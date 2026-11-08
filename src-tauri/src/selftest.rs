@@ -74,6 +74,7 @@ const PROBE_JS: &str = r#"
     ['zoomed', 'tip_footer', 703, 690], ['zoomed', 'tip_port', 697, 553],
     ['zoomed', 'tip_wire_label', 625, 610], ['zoomed', 'tip_target', 90, 164],
     ['map_zoom', 'tip_map_node', 853, 251],
+    ['map_zoom', 'tip_map_node_taken', 869, 433], ['map_zoom', 'tip_map_node_right', 1118, 633],
     ['map_close', 'tip_map_machine', 540, 300], ['map_close', 'tip_map_splitter', 463, 145],
   ];
   const hit = document.elementFromPoint(900, 400);

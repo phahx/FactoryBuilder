@@ -398,7 +398,8 @@ pub fn map_ui(app: &mut FactoryApp, ui: &mut egui::Ui) {
     // Resource nodes.
     let occupied: BTreeSet<&str> = state.world.as_ref().map(|w| w.machines.iter().filter_map(|m| m.node.as_deref()).collect()).unwrap_or_default();
     let node_px = ((state.scale * 1800.0) as f32).clamp(16.0, 28.0);
-    let mut hover: Option<String> = None;
+    // Resource node under the pointer: (title, icon, detail, extra).
+    let mut hover: Option<(String, Option<String>, String, Option<&str>)> = None;
     let pointer = resp.hover_pos();
     for n in &info.nodes {
         let p = state.to_screen(rect, n.x, n.y);
@@ -416,23 +417,27 @@ pub fn map_ui(app: &mut FactoryApp, ui: &mut egui::Ui) {
         }
         if pointer.is_some_and(|q| q.distance(p) < node_px * 0.7) {
             let game = &app.user.game;
-            let what = match n.kind {
+            // The save's overrides (1.2's randomized resources) come first.
+            let over = state.world.as_ref().and_then(|w| w.node_overrides.iter().find(|o| o.id == n.id));
+            let resource = over.and_then(|o| o.resource.clone()).or_else(|| n.resource.clone());
+            let purity = over.and_then(|o| o.purity).unwrap_or(n.purity);
+            let title = match n.kind {
                 SiteKind::Geyser => "Geyser".to_string(),
-                _ => n.resource.as_deref().map(|r| game.item_name(r).to_string()).unwrap_or_default(),
+                _ => resource.as_deref().map(|r| game.item_name(r).to_string()).unwrap_or_default(),
             };
-            let purity = match n.purity {
+            let purity = match purity {
                 Purity::Impure => "Impure",
                 Purity::Normal => "Normal",
                 Purity::Pure => "Pure",
             };
-            let kind = match n.kind {
-                SiteKind::Node | SiteKind::Geyser => "node",
-                SiteKind::WellSatellite => "Resource Well node",
-                SiteKind::WellCore => "Resource Well",
-            };
-            let taken = if occupied.contains(n.id.as_str()) { " · has an extractor" } else { "" };
             // Pressurizer sites have no purity in the game data.
-            hover = Some(if n.kind == SiteKind::WellCore { format!("{what} · {kind}{taken}") } else { format!("{what} · {purity} {kind}{taken}") });
+            let detail = match n.kind {
+                SiteKind::Node | SiteKind::Geyser => format!("{purity} node"),
+                SiteKind::WellSatellite => format!("{purity} Resource Well node"),
+                SiteKind::WellCore => "Resource Well Pressurizer site".to_string(),
+            };
+            let taken = occupied.contains(n.id.as_str()).then_some("Has an extractor");
+            hover = Some((title, resource, detail, taken));
         }
     }
 
@@ -516,9 +521,20 @@ pub fn map_ui(app: &mut FactoryApp, ui: &mut egui::Ui) {
     if resp.clicked() && !ui.input(|i| i.modifiers.shift) {
         state.selected.clear();
     }
-    if let Some(text) = hover {
+    if let Some((title, icon, detail, extra)) = hover {
+        let assets = app.user.assets.as_mut();
         egui::show_tooltip_at_pointer(&ctx, ui.layer_id(), egui::Id::new("map_hover"), |ui| {
-            ui.label(text);
+            widgets::tooltip_title(ui, &title);
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 6.0;
+                if let (Some(a), Some(icon)) = (assets, &icon) {
+                    a.item(ui, icon, 20.0);
+                }
+                widgets::tip_line(ui, RichText::new(&detail).color(TEXT));
+            });
+            if let Some(extra) = extra {
+                widgets::tip_line(ui, RichText::new(extra).small().color(TEXT_DIM));
+            }
         });
     } else if let (Some(q), Some(w), Some(assets)) = (pointer, app.map.world.as_ref(), app.user.assets.as_mut()) {
         // Machines (topmost first), then splitters, storage and the like.
@@ -564,7 +580,7 @@ fn machine_tip(ui: &mut egui::Ui, assets: &mut crate::assets::Assets, game: &fb_
     let name = game.building_names.get(&m.class).map(String::as_str).unwrap_or(&m.class);
     widgets::tooltip_title(ui, name);
     if let Some(r) = m.recipe.as_ref().and_then(|r| game.recipes.get(r)) {
-        ui.label(RichText::new(&r.name).color(TEXT));
+        widgets::tip_line(ui, RichText::new(&r.name).color(TEXT));
         let k = m.clock as f64 * m.boost as f64;
         for a in &r.products {
             let amount = crate::fmt::fmt_rate_unit(r.per_min(a) * k, game.item_form(&a.item));
@@ -582,13 +598,13 @@ fn machine_tip(ui: &mut egui::Ui, assets: &mut crate::assets::Assets, game: &fb_
         };
         widgets::tip_item(ui, assets, &item, game.item_name(&item), on);
     } else {
-        ui.label(RichText::new("No recipe set").color(TEXT_DIM));
+        widgets::tip_line(ui, RichText::new("No recipe set").color(TEXT_DIM));
     }
     let mut setup = format!("{}% clock speed", crate::fmt::fmt_num(m.clock as f64 * 100.0));
     if m.boost > 1.0001 {
         setup += &format!(" · {}× output from Somersloops", crate::fmt::fmt_num(m.boost as f64));
     }
-    ui.label(RichText::new(setup).small().color(TEXT_DIM));
+    widgets::tip_line(ui, RichText::new(setup).small().color(TEXT_DIM));
 }
 
 fn theme_font(size: f32) -> egui::FontId {

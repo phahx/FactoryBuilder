@@ -528,15 +528,17 @@ pub fn tip_item(ui: &mut Ui, assets: &mut Assets, class: &str, name: &str, amoun
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 6.0;
         assets.item(ui, class, 20.0);
-        ui.label(RichText::new(name).color(TEXT));
-        ui.label(RichText::new(amount).color(TEXT_DIM));
+        tip_line(ui, RichText::new(name).color(TEXT));
+        tip_line(ui, RichText::new(amount).color(TEXT_DIM));
     });
 }
 
+/// A short tooltip line that never wraps: the tooltip grows to fit it (and
+/// egui moves it to stay on screen) instead of squeezing it into a column.
+pub fn tip_line(ui: &mut Ui, text: RichText) -> Response {
+    ui.add(egui::Label::new(text).extend())
+}
+
 pub fn tooltip_title(ui: &mut Ui, title: &str) {
-    ui.label(
-        RichText::new(title)
-            .font(theme::semibold(14.0))
-            .color(ACCENT),
-    );
+    tip_line(ui, RichText::new(title).font(theme::semibold(14.0)).color(ACCENT));
 }
