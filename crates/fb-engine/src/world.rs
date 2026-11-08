@@ -1032,8 +1032,7 @@ pub(crate) fn read_world_stats(bytes: &[u8], game: &GameData) -> Result<(World, 
         let [x, y, z] = e.xf.pos;
         let (Some(x), Some(y), Some(z)) = (finite(x), finite(y), finite(z)) else { continue };
         if e.mark {
-            let yaw = finite(e.xf.yaw()).unwrap_or(0.0);
-            world.structures.push(Structure { class: e.class.clone(), x, y, yaw });
+            world.structures.push(Structure { class: e.class.clone(), x, y, yaw: finite(e.xf.yaw()).unwrap_or(0.0) });
         }
         match e.role {
             Role::Machine => {
@@ -1066,7 +1065,7 @@ pub(crate) fn read_world_stats(bytes: &[u8], game: &GameData) -> Result<(World, 
                     _ => spline_points(&e.info.spline, &e.xf),
                 };
                 if points.len() >= 2 {
-                    world.carriers.push(Carrier { class: e.class.clone(), fluid: kind == CarrierKind::Pipe, points });
+                    world.carriers.push(Carrier { class: e.class.clone(), fluid: kind == CarrierKind::Pipe, points, yaw: finite(e.xf.yaw()).unwrap_or(0.0) });
                 }
             }
             _ => {}
