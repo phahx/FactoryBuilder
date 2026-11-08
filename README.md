@@ -6,6 +6,40 @@ and edit the resulting node graph by hand. Rates, machine counts and power updat
 It reads recipes from your own install (`CommunityResources/Docs/en-US.json`) and uses the
 game's own icons, font and colours, extracted locally. Nothing from the game is bundled.
 
+![A planned factory: the plan settings on the left, the node graph in the middle, totals on the right](docs/screenshots/plan.png)
+
+## Download
+
+Get `FactoryBuilder-<version>.zip` from the [latest release](https://github.com/phahx/FactoryBuilder/releases/latest)
+(built from `main` on every push). Unzip it and run `Factory Builder.exe`; the first launch
+installs it (see [First launch](#first-launch)). Windows only, and it needs Satisfactory
+installed. The exe isn't code-signed, so Windows SmartScreen may warn the first time:
+**More info › Run anyway**.
+
+## Screenshots
+
+Every node shows its machines, clock speed, Somersloops and what flows in and out:
+
+![Recipe nodes up close](docs/screenshots/nodes.png)
+
+Let go of a wire on empty canvas and Add node lists only what fits it:
+
+![Add node, filtered to what takes Iron Plate](docs/screenshots/add-node.png)
+
+The Map tab shows a save on the game map: resource nodes, every machine, belts and power.
+Drag to select machines and import them into the planner as a factory:
+
+![A save on the map](docs/screenshots/map.png)
+
+Power lines show what flows through them. Hover one to see its circuit:
+
+![A power line's tooltip with its circuit's production and consumption](docs/screenshots/power.png)
+
+Make project from save turns every factory in a save into a project, linked by the belts
+and pipes running between them:
+
+![A project made from a save, with 138 factories](docs/screenshots/project-from-save.png)
+
 ## Build
 
 Needs Rust with the `wasm32-unknown-unknown` target, a `wasm-bindgen-cli` that matches the

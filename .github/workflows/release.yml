@@ -1,0 +1,71 @@
+# Builds the shipping zip (build.ps1 -Package) on every push to main and
+# publishes it as a new GitHub release, marked latest, so the newest build is
+# always at https://github.com/phahx/FactoryBuilder/releases/latest.
+name: Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+# One release at a time, in push order.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      # build.ps1 needs the wasm-bindgen CLI at the same version as the crate.
+      - name: Find the wasm-bindgen version
+        run: |
+          $v = (cargo tree -p fb-ui --target wasm32-unknown-unknown -i wasm-bindgen --depth 0 | Select-Object -First 1) -replace '^wasm-bindgen v', ''
+          if ($v -notmatch '^\d+\.\d+\.\d+$') { throw "Couldn't read the wasm-bindgen version (got '$v')" }
+          "WASM_BINDGEN=$v" >> $env:GITHUB_ENV
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-bindgen@${{ env.WASM_BINDGEN }}
+
+      - name: Build
+        run: .\build.ps1 -Package
+
+      # After the build: the app embeds dist\, which the build makes. Tests
+      # that need the game's files skip themselves here.
+      - name: Test
+        run: cargo test --workspace --release
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"').Matches[0].Groups[1].Value
+          $zip = "target\package\FactoryBuilder-$version.zip"
+          if (-not (Test-Path $zip)) { throw "$zip wasn't built" }
+          $tag = "v$version-build.${{ github.run_number }}"
+          $short = "${{ github.sha }}".Substring(0, 7)
+          $notes = @(
+            "Built from $short on main.",
+            '',
+            "Download ``FactoryBuilder-$version.zip``, unzip it and run ``Factory Builder.exe``; the first launch installs it. Windows only; needs Satisfactory installed."
+          ) -join "`n"
+          gh release create $tag $zip --target "${{ github.sha }}" --title "Factory Builder $version (build ${{ github.run_number }})" --notes $notes --latest

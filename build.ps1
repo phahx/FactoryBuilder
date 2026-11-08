@@ -86,6 +86,7 @@ try {
     New-Item -ItemType Directory -Force (Join-Path $app 'tools') | Out-Null
     Copy-Item target\release\factory-builder.exe (Join-Path $app 'Factory Builder.exe')
     Copy-Item target\release\tools\* (Join-Path $app 'tools')
+    Copy-Item LICENSE (Join-Path $app 'LICENSE.txt')
 
     # Licenses of what the icon helper bundles, read from each package's own metadata.
     $lines = @('Factory Builder bundles the following third-party software in tools\.', '',
