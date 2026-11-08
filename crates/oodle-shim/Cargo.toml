@@ -2,6 +2,7 @@
 name = "oodle-shim"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 description = "Drop-in OodleLZ_Decompress for the icon extractor, built on the open-source oozextract decoder"
 
 [lib]

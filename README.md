@@ -83,3 +83,11 @@ colour.
 - `src-tauri`: the Tauri backend (`install.rs`: install/uninstall, `setup.rs`: game detection and extraction)
 - `crates/oodle-shim`: Oodle-compatible decompressor DLL for the helper (on oozextract, MIT)
 - `tools/IconExtractor`: the icon helper; pulls icons, font and UI images from the game's paks
+
+## Licence
+
+GPL-3.0 (see `LICENSE`). The vendored `crates/egui_node_graph2` keeps its MIT licence
+(`crates/egui_node_graph2/LICENSE`).
+
+Satisfactory is a trademark of Coffee Stain Studios. This is an unofficial fan tool, not
+affiliated with or endorsed by Coffee Stain Studios.

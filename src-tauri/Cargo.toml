@@ -2,6 +2,7 @@
 name = "factory-builder"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 description = "Satisfactory factory planner"
 
 [build-dependencies]
