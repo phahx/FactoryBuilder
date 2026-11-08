@@ -688,6 +688,8 @@ fn connecting_by_hand_keeps_existing_wire_order() {
         .expect("an output with two wires");
     let item = g[output].typ.0.clone();
     let before = g.output_connections(output);
+    // The sinks go in the canvas's bottom-right corner, where the minimap sits.
+    app.minimap = false;
     // A sink for the same item, placed below everything.
     // Sinks go in the visible canvas, bottom right, clear of the plan.
     let at = app.screen_to_graph(egui::pos2(1150.0, 760.0));
@@ -1886,4 +1888,132 @@ fn moving_a_selection_to_a_new_factory_keeps_the_totals() {
     let t = app.project_totals();
     assert!((t.products["Desc_IronRod_C"] - 30.0).abs() < 1e-6, "{:?}", t.products);
     assert!(!t.from_outside.contains_key("Desc_IronIngot_C"));
+}
+
+// ------------------------------------------------------ frames, find, minimap
+
+fn drag_by(ctx: &egui::Context, app: &mut FactoryApp, from: egui::Pos2, by: egui::Vec2) {
+    let button = |pos, pressed| egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: Default::default() };
+    frame_with(ctx, app, vec![egui::Event::PointerMoved(from)]);
+    frame_with(ctx, app, vec![button(from, true)]);
+    let steps = 6;
+    for k in 1..=steps {
+        frame_with(ctx, app, vec![egui::Event::PointerMoved(from + by * (k as f32 / steps as f32))]);
+    }
+    frame_with(ctx, app, vec![button(from + by, false)]);
+    frames(ctx, app, 2);
+}
+
+/// A planned factory (iron plates: ore, smelters, constructors, output).
+fn planned(ctx: &egui::Context, app: &mut FactoryApp) {
+    frames(ctx, app, 2);
+    app.planner_mut().targets = vec![Target { item: "Desc_IronPlate_C".into(), rate: 60.0 }];
+    app.press_plan();
+    frames(ctx, app, 8);
+}
+
+#[test]
+fn comment_frames_wrap_move_and_save_with_their_nodes() {
+    let Some((ctx, mut app, store)) = harness() else { return };
+    planned(&ctx, &mut app);
+    let g = &app.state.graph;
+    let smelters: Vec<_> = g.iter_nodes().filter(|n| matches!(&g[*n].user_data.kind, crate::graph::NodeKind::Recipe { recipe } if recipe == "Recipe_IngotIron_C")).collect();
+    let others: Vec<_> = g.iter_nodes().filter(|n| !smelters.contains(n)).collect();
+    app.state.selected_nodes = smelters.clone();
+    // C frames the selection and starts naming it.
+    frame_with(&ctx, &mut app, vec![egui::Event::Key { key: egui::Key::C, physical_key: None, pressed: true, repeat: false, modifiers: Default::default() }]);
+    frames(&ctx, &mut app, 2);
+    assert_eq!(app.planner.frames.len(), 1);
+    assert!(app.frames.editing.is_some(), "a new frame asks for its name");
+    app.frames.editing = Some((app.planner.frames[0].id, "Smelting".into()));
+    frame_with(&ctx, &mut app, vec![egui::Event::Key { key: egui::Key::Enter, physical_key: None, pressed: true, repeat: false, modifiers: Default::default() }]);
+    frames(&ctx, &mut app, 2);
+    assert_eq!(app.planner.frames[0].title, "Smelting");
+    assert!(app.frames.editing.is_none());
+    // The frame encloses its nodes.
+    let fr = app.planner.frames[0].rect();
+    for n in &smelters {
+        let p = app.node_pos_unzoomed(*n);
+        assert!(fr.contains(p), "node at {p:?} inside {fr:?}");
+    }
+
+    // Dragging the title bar moves the frame and what's inside, nothing else.
+    let before: Vec<_> = smelters.iter().chain(&others).map(|n| app.node_pos(*n)).collect();
+    let frame_before = app.planner.frames[0].clone();
+    let (header, _) = button("Frame Smelting").expect("frame title bar");
+    drag_by(&ctx, &mut app, header.center(), egui::vec2(120.0, 60.0));
+    let after: Vec<_> = smelters.iter().chain(&others).map(|n| app.node_pos(*n)).collect();
+    for (k, n) in smelters.iter().enumerate() {
+        let d = after[k] - before[k];
+        assert!((d - egui::vec2(120.0, 60.0)).length() < 1.0, "inside node {n:?} moved by {d:?}");
+    }
+    for k in smelters.len()..before.len() {
+        assert!((after[k] - before[k]).length() < 0.01, "outside nodes stay put");
+    }
+    let z = app.state.pan_zoom.zoom;
+    let moved = app.planner.frames[0].x - frame_before.x;
+    assert!((moved - 120.0 / z).abs() < 1.0, "frame moved {moved}");
+
+    // It's one undo step, and it comes back with the file.
+    let steps = app.undo_steps();
+    app.undo();
+    frames(&ctx, &mut app, 1);
+    assert!((app.planner.frames[0].x - frame_before.x).abs() < 0.01, "undo puts it back");
+    assert_eq!(app.undo_steps(), steps - 1);
+    let path = "C:/Factories/Framed.fbfactory";
+    app.save_as(path);
+    frames(&ctx, &mut app, 2);
+    assert!(store.borrow()[path].contains("\"frames\""));
+    app.new_project();
+    frames(&ctx, &mut app, 1);
+    assert!(app.planner.frames.is_empty());
+    app.open(path);
+    frames(&ctx, &mut app, 3);
+    assert_eq!(app.planner.frames.len(), 1);
+    assert_eq!(app.planner.frames[0].title, "Smelting");
+
+    // Deleting the frame keeps its nodes.
+    let n = app.node_count();
+    let id = app.planner.frames[0].id;
+    app.state.selected_nodes.clear();
+    app.frames.selected = Some(id);
+    frame_with(&ctx, &mut app, vec![egui::Event::Key { key: egui::Key::Delete, physical_key: None, pressed: true, repeat: false, modifiers: Default::default() }]);
+    frames(&ctx, &mut app, 1);
+    assert!(app.planner.frames.is_empty());
+    assert_eq!(app.node_count(), n);
+}
+
+#[test]
+fn find_steps_through_matches_and_the_minimap_moves_the_view() {
+    let Some((ctx, mut app, _)) = harness() else { return };
+    planned(&ctx, &mut app);
+    let ctrl_f = egui::Event::Key { key: egui::Key::F, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::COMMAND };
+    frame_with(&ctx, &mut app, vec![ctrl_f]);
+    frames(&ctx, &mut app, 1);
+    assert!(app.find.is_some(), "Ctrl+F opens Find");
+    // Machines are found by their building's name too.
+    let hits = app.find_matches("constructor");
+    assert!(!hits.is_empty());
+    app.find.as_mut().unwrap().query = "constructor".into();
+    frames(&ctx, &mut app, 3);
+    let first = match hits[0] {
+        crate::navigate::Hit::Node(n) => n,
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(app.selected(), vec![first], "the first match is shown and selected");
+    assert!(app.find_matches("no such thing here").is_empty());
+    assert_eq!(app.find_matches("iron plate").len(), app.find_matches("PLATE iron").len(), "words in any order, any case");
+    frame_with(&ctx, &mut app, vec![egui::Event::Key { key: egui::Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: Default::default() }]);
+    frames(&ctx, &mut app, 1);
+    assert!(app.find.is_none(), "Esc closes it");
+
+    // Clicking the minimap's corner moves the view there.
+    let (map, _) = button("Minimap").expect("minimap shown");
+    let pan = app.state.pan_zoom.pan;
+    click(&ctx, &mut app, map.left_top() + egui::vec2(8.0, 8.0), egui::PointerButton::Primary);
+    assert!((app.state.pan_zoom.pan - pan).length() > 1.0, "view moved");
+    assert!(app.selected().len() <= 1, "no box selection from the click");
+    app.minimap = false;
+    frames(&ctx, &mut app, 1);
+    assert!(button("Minimap").is_none(), "View › Minimap hides it");
 }

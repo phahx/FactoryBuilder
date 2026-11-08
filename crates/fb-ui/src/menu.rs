@@ -147,6 +147,16 @@ pub fn menu_bar(app: &mut FactoryApp, ctx: &egui::Context) {
                         ui.close_menu();
                         app.select_all();
                     }
+                    ui.separator();
+                    if ui.add_enabled(sel, Button::new("Add comment frame").shortcut_text("C")).on_disabled_hover_text("Select the nodes to frame first.").clicked() {
+                        ui.close_menu();
+                        app.add_frame_around_selection();
+                    }
+                    if ui.add(Button::new("Find…").shortcut_text("Ctrl+F")).clicked() {
+                        ui.close_menu();
+                        app.view = crate::map::View::Graph;
+                        app.open_find();
+                    }
                 });
                 ui.menu_button("View", |ui| {
                     ui.set_min_width(220.0);
@@ -164,6 +174,8 @@ pub fn menu_bar(app: &mut FactoryApp, ctx: &egui::Context) {
                     ui.separator();
                     ui.checkbox(&mut app.wire_labels, "Belt and pipe labels")
                         .on_hover_text("Show on each wire the slowest belt or pipe that carries it.");
+                    ui.checkbox(&mut app.minimap, "Minimap")
+                        .on_hover_text("The whole graph in the canvas's corner; click it to move the view.");
                 });
                 ui.menu_button("Project", |ui| {
                     ui.set_min_width(260.0);

@@ -55,6 +55,28 @@ pub struct FactoryFile {
     pub nodes: Vec<Node>,
     #[serde(default)]
     pub wires: Vec<Wire>,
+    /// Comment frames, in the same units as node positions.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub frames: Vec<Frame>,
+}
+
+/// A titled box around a group of nodes.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Frame {
+    pub title: String,
+    /// "#RRGGBB", when it has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+}
+
+impl Frame {
+    fn valid(&self) -> bool {
+        [self.x, self.y, self.w, self.h].iter().all(|v| v.is_finite()) && self.w > 0.0 && self.h > 0.0 && self.title.len() <= 1000
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -147,7 +169,7 @@ pub fn color_from_hex(s: &str) -> Option<[u8; 3]> {
 
 impl FactoryFile {
     pub fn new(name: Option<String>) -> Self {
-        Self { format: FORMAT.into(), version: VERSION, name, plan: Plan::default(), nodes: Vec::new(), wires: Vec::new() }
+        Self { format: FORMAT.into(), version: VERSION, name, plan: Plan::default(), nodes: Vec::new(), wires: Vec::new(), frames: Vec::new() }
     }
 
     pub fn to_json(&self, pretty: bool) -> String {
@@ -178,8 +200,11 @@ impl FactoryFile {
         if self.nodes.len() > MAX_NODES || self.wires.len() > MAX_WIRES {
             return Err("That factory is too big to open.".into());
         }
-        if self.nodes.iter().any(|n| !n.x.is_finite() || !n.y.is_finite()) {
+        if self.nodes.iter().any(|n| !n.x.is_finite() || !n.y.is_finite()) || !self.frames.iter().all(Frame::valid) {
             return Err("That factory has broken positions.".into());
+        }
+        if self.frames.len() > MAX_NODES {
+            return Err("That factory is too big to open.".into());
         }
         Ok(())
     }
@@ -226,6 +251,9 @@ pub struct ProjectFile {
     pub factories: Vec<ProjectFactory>,
     #[serde(default)]
     pub links: Vec<Link>,
+    /// Comment frames on the master graph.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub frames: Vec<Frame>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -254,7 +282,7 @@ pub struct Link {
 
 impl ProjectFile {
     pub fn new(name: Option<String>) -> Self {
-        Self { format: PROJECT_FORMAT.into(), version: PROJECT_VERSION, name, factories: Vec::new(), links: Vec::new() }
+        Self { format: PROJECT_FORMAT.into(), version: PROJECT_VERSION, name, factories: Vec::new(), links: Vec::new(), frames: Vec::new() }
     }
 
     pub fn to_json(&self, pretty: bool) -> String {
@@ -286,6 +314,9 @@ impl ProjectFile {
         let nodes: usize = p.factories.iter().map(|f| f.factory.nodes.len()).sum();
         if nodes > MAX_NODES * 10 {
             return Err("That project is too big to open.".into());
+        }
+        if p.frames.len() > MAX_NODES || !p.frames.iter().all(Frame::valid) {
+            return Err("That project has broken positions.".into());
         }
         let mut ids = std::collections::BTreeSet::new();
         for f in &p.factories {

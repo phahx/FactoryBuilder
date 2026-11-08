@@ -38,6 +38,10 @@ pub struct Planner {
     /// Grid or generate, and the generators allowed (old projects: grid).
     #[serde(default)]
     pub power: PowerSettings,
+    /// Comment frames on this document's graph (kept with the plan so undo,
+    /// files and rooms carry them).
+    #[serde(default)]
+    pub frames: Vec<crate::frames::CommentFrame>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -151,6 +155,12 @@ pub struct FactoryApp {
     pub(crate) tabs: Vec<u32>,
     /// A tab was clicked: open that document before the next frame's work.
     pub(crate) switch_to: Option<u32>,
+    /// Comment frames being dragged, renamed or opened.
+    pub(crate) frames: crate::frames::FrameUi,
+    /// The Find bar, while open.
+    pub(crate) find: Option<crate::navigate::FindState>,
+    /// View › Minimap.
+    pub(crate) minimap: bool,
 }
 
 fn is_selftest() -> bool {
@@ -244,6 +254,9 @@ impl FactoryApp {
             active: 1,
             tabs: Vec::new(),
             switch_to: None,
+            frames: Default::default(),
+            find: None,
+            minimap: true,
         };
         app.new_workspace();
         app.committed = app.project_json();
@@ -1084,6 +1097,7 @@ impl FactoryApp {
                 }
             });
         self.node_menu(ctx);
+        self.frame_menu(ctx);
         self.add_node_menu(ctx);
         crate::dialogs::show(self, ctx);
         crate::setup::show(self, ctx);
@@ -1208,6 +1222,32 @@ impl FactoryApp {
                 "map_import" => {
                     self.import_selection(_ctx);
                 }
+                // The first factory with two comment frames, Find open and the minimap.
+                "frames" => {
+                    self.dialog = Dialog::None;
+                    self.room.reset();
+                    if let Some(first) = self.factory_ids().first().copied() {
+                        self.activate(first);
+                    }
+                    self.planner.frames.clear();
+                    let game = self.user.game.clone();
+                    let by_building = |app: &Self, b: &[&str]| -> Vec<NodeId> {
+                        let g = &app.state.graph;
+                        g.iter_nodes().filter(|n| matches!(&g[*n].user_data.kind, NodeKind::Recipe { recipe } if game.recipes.get(recipe).is_some_and(|r| b.contains(&r.building.as_str())))).collect()
+                    };
+                    for (title, buildings, color) in [("Plastic and rubber", &["Build_OilRefinery_C"][..], GAME_COLORS[1].1), ("Ingots", &["Build_SmelterMk1_C", "Build_FoundryMk1_C"][..], GAME_COLORS[0].1)] {
+                        self.state.selected_nodes = by_building(self, buildings);
+                        self.add_frame_around_selection();
+                        if let Some(f) = self.planner.frames.last_mut() {
+                            f.title = title.into();
+                            f.color = Some(color);
+                        }
+                    }
+                    self.frames.editing = None;
+                    self.state.selected_nodes.clear();
+                    self.find = Some(crate::navigate::FindState::new("rubber"));
+                    self.frame_all = true;
+                }
                 // The master graph with two linked factories (one short of
                 // ingots), and one of them open in its tab.
                 "project" | "project_tab" => {
@@ -1287,6 +1327,9 @@ impl FactoryApp {
         if hit(cmd(Key::O)) {
             self.guard(Pending::OpenDialog);
         }
+        if self.view == crate::map::View::Graph && hit(cmd(Key::F)) {
+            self.open_find();
+        }
         if ctx.wants_keyboard_input() || self.view == crate::map::View::Map {
             return; // typing in a field, or on the map: no graph editing keys
         }
@@ -1302,8 +1345,15 @@ impl FactoryApp {
         if hit(cmd(Key::A)) {
             self.select_all();
         }
-        if ctx.input(|i| i.key_pressed(Key::Delete)) && self.has_selection() {
-            self.delete_selected();
+        if ctx.input(|i| i.key_pressed(Key::Delete)) {
+            if self.has_selection() {
+                self.delete_selected();
+            } else if let Some(f) = self.frames.selected {
+                self.delete_frame(f);
+            }
+        }
+        if ctx.input(|i| i.key_pressed(Key::C) && i.modifiers.is_none()) && self.has_selection() {
+            self.add_frame_around_selection();
         }
         if ctx.input(|i| i.key_pressed(Key::Home)) {
             self.frame_all = true;
@@ -1439,9 +1489,14 @@ impl FactoryApp {
                 TEXT_DIM,
             );
         }
+        let frame_slot = Self::frames_slot(ui);
         let resp = self
             .state
             .draw_graph_editor(ui, &self.templates, &mut self.user, Vec::new());
+        let frame_menu = self.frames_ui(ui, rect, frame_slot);
+        if frame_menu {
+            self.state.node_finder = None;
+        }
         for r in &resp.node_responses {
             match r {
                 NodeResponse::User(Resp::Edited)
@@ -1480,6 +1535,10 @@ impl FactoryApp {
             }
         }
         self.editor_rect = rect;
+        if self.export.is_none() {
+            self.minimap_ui(ui, rect);
+            self.find_ui(ui, rect);
+        }
         self.send_cursor(ui.ctx(), rect);
         if self.wire_labels {
             crate::wires::paint_labels(self, ui, &resp.wires, &resp.node_rects);
@@ -1578,7 +1637,7 @@ impl FactoryApp {
         let mut close = false;
         // Run after the menu is drawn: the menu reads the node it's for, and
         // deleting it mid-draw would index a node that no longer exists.
-        let (mut do_duplicate, mut do_delete, mut do_move) = (false, false, false);
+        let (mut do_duplicate, mut do_delete, mut do_move, mut do_frame) = (false, false, false, false);
         #[cfg(test)]
         self.menu_swatches.clear();
         let area = egui::Area::new(egui::Id::new("node_menu"))
@@ -1610,6 +1669,10 @@ impl FactoryApp {
                         .clicked()
                     {
                         do_delete = true;
+                        close = true;
+                    }
+                    if ui.add(egui::Button::new("Add comment frame").shortcut_text("C")).clicked() {
+                        do_frame = true;
                         close = true;
                     }
                     if !self.on_master() {
@@ -1691,6 +1754,9 @@ impl FactoryApp {
         }
         if do_move {
             self.move_selection_to_new_factory(ctx);
+        }
+        if do_frame {
+            self.add_frame_around_selection();
         }
         if do_delete {
             self.delete_selected();
@@ -2320,7 +2386,7 @@ pub(crate) const GAME_COLORS: [(&str, [u8; 3]); 5] = [
 ];
 
 /// A colour chip for the node menu; `None` is "no colour".
-fn swatch(
+pub(crate) fn swatch(
     ui: &mut egui::Ui,
     assets: Option<&mut Assets>,
     rgb: Option<[u8; 3]>,

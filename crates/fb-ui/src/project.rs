@@ -370,6 +370,7 @@ impl FactoryApp {
         self.state.connection_in_progress = None;
         self.state.ongoing_box_selection = None;
         self.state.pan_zoom.started = false;
+        self.frames = Default::default();
     }
 
     /// Opens document `id` in the editor (its tab, or the master graph).
@@ -636,6 +637,8 @@ impl FactoryApp {
             p.links.push(portable::Link { from, to, item: g[output].typ.0.clone(), slot });
         }
         p.links.sort_by(|a, b| (a.from, &a.item, a.slot, a.to).cmp(&(b.from, &b.item, b.slot, b.to)));
+        let master_frames = if self.active == MASTER { &self.planner.frames } else { self.doc(MASTER).and_then(|d| d.body.as_ref()).map(|b| &b.planner.frames).unwrap_or(&self.planner.frames) };
+        p.frames = master_frames.iter().map(crate::app_files::frame_to_file).collect();
         p
     }
 
@@ -699,6 +702,7 @@ impl FactoryApp {
                 self.state.graph.add_connection(o, i, pos);
             }
         }
+        self.planner.frames = p.frames.iter().enumerate().map(|(k, f)| crate::app_files::frame_from_file(f, k as u32 + 1, Vec2::ZERO)).collect();
         self.committed = self.project_json();
         self.frame_all = true;
         skipped

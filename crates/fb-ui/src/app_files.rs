@@ -75,6 +75,15 @@ pub(crate) fn portable_order(state: &EditorState) -> Vec<NodeId> {
     ids
 }
 
+pub(crate) fn frame_to_file(f: &crate::frames::CommentFrame) -> portable::Frame {
+    let r = |v: f32| (v * 10.0).round() / 10.0;
+    portable::Frame { title: f.title.clone(), color: f.color.map(portable::color_to_hex), x: r(f.x), y: r(f.y), w: r(f.w), h: r(f.h) }
+}
+
+pub(crate) fn frame_from_file(f: &portable::Frame, id: u32, offset: Vec2) -> crate::frames::CommentFrame {
+    crate::frames::CommentFrame { id, title: f.title.clone(), color: f.color.as_deref().and_then(portable::color_from_hex), x: f.x + offset.x, y: f.y + offset.y, w: f.w, h: f.h }
+}
+
 pub fn file_stem(path: &str) -> String {
     std::path::Path::new(path).file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| path.to_string())
 }
@@ -160,6 +169,7 @@ impl FactoryApp {
                 }
             }
         }
+        f.frames = planner.frames.iter().map(frame_to_file).collect();
         let p = planner;
         let alts_on: Vec<String> = game.recipes.values().filter(|r| r.alternate && p.enabled.contains(&r.class)).map(|r| r.class.clone()).collect();
         let alts_off: Vec<String> = game.recipes.values().filter(|r| r.alternate && !p.enabled.contains(&r.class)).map(|r| r.class.clone()).collect();
@@ -202,6 +212,8 @@ impl FactoryApp {
             limits,
             extraction: self.planner.extraction.clone(),
             recipe_filter: self.planner.recipe_filter.clone(),
+            // Frames come with the nodes (insert_portable).
+            frames: Vec::new(),
             power: PowerSettings {
                 mode: if plan.generate_power { PowerMode::Generate } else { PowerMode::Grid },
                 generators: match &plan.generators {
@@ -268,6 +280,10 @@ impl FactoryApp {
         for (oid, mut list) in slots {
             list.sort_by_key(|(slot, _)| *slot);
             self.state.graph.set_output_order(oid, list.into_iter().map(|(_, i)| i).collect());
+        }
+        let next = self.planner.frames.iter().map(|f| f.id).max().unwrap_or(0);
+        for (k, fr) in f.frames.iter().enumerate() {
+            self.planner.frames.push(frame_from_file(fr, next + 1 + k as u32, offset));
         }
         (ids.into_iter().flatten().collect(), skipped)
     }
