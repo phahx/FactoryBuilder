@@ -56,6 +56,9 @@ pub struct MapState {
     /// select it.
     pub selftest_zoom: Option<f64>,
     pub selftest_zoomed: bool,
+    /// Toolbar toggles (off = shown, so a fresh state shows everything).
+    pub hide_power: bool,
+    pub hide_flow: bool,
 }
 
 impl MapState {
@@ -212,6 +215,7 @@ pub fn map_ui(app: &mut FactoryApp, ui: &mut egui::Ui) {
     let mut import = false;
     let mut clear = false;
     let mut extract = false;
+    let mut layers_changed = false;
     let (bar, _) = ui.allocate_exact_size(vec2(ui.available_width(), 40.0), Sense::hover());
     ui.painter().rect_filled(bar, 0.0, HEADER);
     let mut child = ui.new_child(egui::UiBuilder::new().max_rect(bar.shrink2(vec2(10.0, 0.0))).layout(egui::Layout::left_to_right(egui::Align::Center)));
@@ -227,6 +231,23 @@ pub fn map_ui(app: &mut FactoryApp, ui: &mut egui::Ui) {
                 }
             }
         });
+        // What's drawn over the map.
+        if let Some(assets) = app.user.assets.as_mut() {
+            ui.add_space(16.0);
+            let mut power = !app.map.hide_power;
+            let tip = "Power lines, what each one carries, and their circuits' figures.";
+            if widgets::checkbox(ui, assets, &mut power, "Power").on_hover_text(tip).clicked() {
+                app.map.hide_power = !power;
+                layers_changed = true;
+            }
+            ui.add_space(12.0);
+            let mut flow = !app.map.hide_flow;
+            let tip = "Arrows along belts showing the way items move (when zoomed in).";
+            if widgets::checkbox(ui, assets, &mut flow, "Belt direction").on_hover_text(tip).clicked() {
+                app.map.hide_flow = !flow;
+                layers_changed = true;
+            }
+        }
         let status = if app.map.loading.is_some() {
             "Reading the save…".to_string()
         } else if let Some(e) = &app.map.world_error {
@@ -258,6 +279,9 @@ pub fn map_ui(app: &mut FactoryApp, ui: &mut egui::Ui) {
     }
     if let Some(s) = pick {
         app.choose_session(s);
+    }
+    if layers_changed {
+        app.save_view_settings();
     }
     if clear {
         app.map.selected.clear();
@@ -374,6 +398,7 @@ pub fn map_ui(app: &mut FactoryApp, ui: &mut egui::Ui) {
     let ctx2 = ui.ctx().clone();
     let view = crate::map_draw::View { rect, center: app.map.center, scale: app.map.scale };
     let mut batch = crate::map_draw::Batch::default();
+    let mut arrows: Vec<egui::Shape> = Vec::new();
     if let (Some(w), Some(assets)) = (&app.map.world, app.user.assets.as_mut()) {
         let vw = {
             let a = app.map.to_world(rect, rect.min);
@@ -393,9 +418,13 @@ pub fn map_ui(app: &mut FactoryApp, ui: &mut egui::Ui) {
                 }
             }
             crate::map_draw::carrier(&ctx2, assets, sprites, &mut batch, &painter, &view, c);
+            if !app.map.hide_flow {
+                crate::map_draw::flow_arrows(&view, sprites, c, &mut arrows);
+            }
         }
     }
     std::mem::take(&mut batch).paint(&painter);
+    painter.extend(arrows);
     let state = &mut app.map;
 
     // Resource nodes.
@@ -505,7 +534,7 @@ pub fn map_ui(app: &mut FactoryApp, ui: &mut egui::Ui) {
     // under the pointer (a line, or a pole or switch) lights up.
     // (title, circuit, the line under the pointer)
     let mut power_hover: Option<(String, Option<u32>, Option<usize>)> = None;
-    if let Some(w) = &app.map.world {
+    if let Some(w) = app.map.world.as_ref().filter(|_| !app.map.hide_power) {
         let st = &app.map;
         let sprites = st.sprites.as_ref();
         let size = ((st.scale * MACHINE_CM) as f32).clamp(3.0, 28.0);
@@ -543,12 +572,23 @@ pub fn map_ui(app: &mut FactoryApp, ui: &mut egui::Ui) {
                 }
             }
             if lit_line == Some(k) {
-                painter.line_segment([a, b], Stroke::new(width + 3.0, ACCENT));
+                // Drawn last, over the rest of its circuit.
             } else if lit.is_some() && l.circuit == lit {
-                painter.line_segment([a, b], Stroke::new(width + 1.0, ACCENT.gamma_multiply(0.6)));
+                // The rest of the circuit: a thin, faded tint, so the line
+                // under the pointer stands out from it.
+                painter.line_segment([a, b], Stroke::new(width, ACCENT.gamma_multiply(0.45)));
             } else {
                 painter.line_segment([a, b], Stroke::new(width + 1.0, Color32::from_black_alpha(170)));
                 painter.line_segment([a, b], Stroke::new((width - 0.5).max(0.75), Color32::from_gray(0xB0).gamma_multiply(0.8)));
+            }
+        }
+        // The line under the pointer: thick, outlined, with its two poles marked.
+        if let Some(l) = lit_line.and_then(|k| w.power_lines.get(k)) {
+            let (a, b) = (st.to_screen(rect, l.a[0] as f64, l.a[1] as f64), st.to_screen(rect, l.b[0] as f64, l.b[1] as f64));
+            painter.line_segment([a, b], Stroke::new(width + 6.0, Color32::from_black_alpha(200)));
+            painter.line_segment([a, b], Stroke::new(width + 3.0, ACCENT));
+            for p in [a, b] {
+                painter.circle(p, width + 4.0, ACCENT, Stroke::new(2.0_f32, Color32::from_black_alpha(200)));
             }
         }
         // Labels: an arrow toward where the power goes, and how much.

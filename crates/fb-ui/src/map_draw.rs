@@ -134,6 +134,56 @@ pub fn carrier(ctx: &egui::Context, assets: &mut Assets, sprites: Option<&Sprite
     painter.add(Shape::line(pts, Stroke::new(width, if c.fluid { PIPE } else { BELT })));
 }
 
+/// Chevrons along a belt, pointing the way items move: a belt's curve runs
+/// from its input end to its output end (checked on a late-game save: the
+/// start of every belt meets what feeds it). Pipes can flow either way and
+/// lifts run straight up or down, so they get none.
+pub fn flow_arrows(view: &View, sprites: Option<&Sprites>, c: &Carrier, out: &mut Vec<Shape>) {
+    if c.fluid || c.class.contains("ConveyorLift") {
+        return;
+    }
+    // On screen as wide as the belt's render, or as its fallback line.
+    let width = match sprites.and_then(|sp| sp.strips.get(&c.class)) {
+        Some(s) => (s.width_cm as f64 * view.scale) as f32,
+        None => ((view.scale * 60.0) as f32).clamp(0.8, 3.0),
+    };
+    let size = if width >= ARROW_MIN_PX { (width * 0.4).min(7.0) } else { return };
+    let gap = (width * 4.0).max(48.0);
+    let pts: Vec<Pos2> = c.points.iter().map(|p| view.screen(p[0] as f64, p[1] as f64)).collect();
+    let total: f32 = pts.windows(2).map(|s| s[0].distance(s[1])).sum();
+    let clip = view.rect.expand(size);
+    // The first in the middle of a short belt, else half a gap in.
+    let mut next = (gap * 0.5).min(total * 0.5);
+    let mut run = 0.0;
+    for s in pts.windows(2) {
+        let len = s[0].distance(s[1]);
+        if len < 1e-3 {
+            continue;
+        }
+        let dir = (s[1] - s[0]) / len;
+        while next <= run + len {
+            let p = s[0] + dir * (next - run);
+            if clip.contains(p) {
+                chevron(out, p, dir, size);
+            }
+            next += gap;
+        }
+        run += len;
+    }
+}
+
+/// Below this many pixels wide, a belt has no room for an arrow.
+const ARROW_MIN_PX: f32 = 6.0;
+
+fn chevron(out: &mut Vec<Shape>, p: Pos2, dir: egui::Vec2, size: f32) {
+    let across = egui::vec2(-dir.y, dir.x) * size * 0.6;
+    let tip = p + dir * size * 0.5;
+    let back = p - dir * size * 0.5;
+    let pts = vec![back + across, tip, back - across];
+    out.push(Shape::line(pts.clone(), Stroke::new(3.5, Color32::from_black_alpha(150))));
+    out.push(Shape::line(pts, Stroke::new(1.75, Color32::from_gray(240))));
+}
+
 /// One straight stretch of belt: as many rendered pieces as fit, the last
 /// one cut short.
 fn pieces(batch: &mut Batch, tex: TextureId, view: &View, s: &Strip, a: [f32; 2], b: [f32; 2]) {
@@ -170,6 +220,23 @@ mod tests {
         // Yaw 90: local +X (forward) points to world +Y.
         let (x, y) = rotate(90.0, 100.0, 0.0);
         assert!(x.abs() < 1e-3 && (y - 100.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn belt_arrows_point_downstream() {
+        let view = View { rect: Rect::from_min_size(Pos2::ZERO, egui::vec2(1000.0, 1000.0)), center: (0.0, 0.0), scale: 1.0 };
+        let mut sprites = Sprites::default();
+        sprites.strips.insert("Build_ConveyorBeltMk1_C".into(), Strip { file: "b.png".into(), length_cm: 200.0, width_cm: 20.0 });
+        let belt = |class: &str, fluid: bool| Carrier { class: class.into(), fluid, points: vec![[-300.0, 0.0], [300.0, 0.0]], yaw: 0.0 };
+        let mut out = Vec::new();
+        flow_arrows(&view, Some(&sprites), &belt("Build_ConveyorBeltMk1_C", false), &mut out);
+        // 600 px long, 80 px apart from 40 px in: 8 chevrons, outline + line each.
+        assert_eq!(out.len(), 16);
+        let Shape::Path(p) = &out[1] else { panic!("a chevron") };
+        assert!(p.points[1].x > p.points[0].x, "the tip is downstream (+x)");
+        out.clear();
+        flow_arrows(&view, Some(&sprites), &belt("Build_Pipeline_C", true), &mut out);
+        assert!(out.is_empty(), "pipes have no fixed direction");
     }
 
     #[test]

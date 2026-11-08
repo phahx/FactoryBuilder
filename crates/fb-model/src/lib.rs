@@ -520,6 +520,12 @@ pub struct ViewSettings {
     pub wire_labels: bool,
     #[serde(default = "yes")]
     pub minimap: bool,
+    /// Map: power lines and what they carry.
+    #[serde(default = "yes")]
+    pub map_power: bool,
+    /// Map: arrows along belts the way items move.
+    #[serde(default = "yes")]
+    pub map_belt_flow: bool,
 }
 
 fn yes() -> bool {
@@ -528,7 +534,7 @@ fn yes() -> bool {
 
 impl Default for ViewSettings {
     fn default() -> Self {
-        ViewSettings { snap_to_grid: false, wire_labels: true, minimap: true }
+        ViewSettings { snap_to_grid: false, wire_labels: true, minimap: true, map_power: true, map_belt_flow: true }
     }
 }
 

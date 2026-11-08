@@ -568,6 +568,7 @@ impl FactoryApp {
                     if first {
                         let v = &s.settings.view;
                         (self.snap, self.wire_labels, self.minimap) = (v.snap_to_grid, v.wire_labels, v.minimap);
+                        (self.map.hide_power, self.map.hide_flow) = (!v.map_power, !v.map_belt_flow);
                     }
                     let setup_done = s.settings.setup_done;
                     self.status = Some(s.clone());
@@ -1826,7 +1827,13 @@ impl FactoryApp {
     /// Remembers the View menu's toggles.
     pub(crate) fn save_view_settings(&mut self) {
         if let Some(s) = self.status.as_mut() {
-            s.settings.view = fb_model::ViewSettings { snap_to_grid: self.snap, wire_labels: self.wire_labels, minimap: self.minimap };
+            s.settings.view = fb_model::ViewSettings {
+                snap_to_grid: self.snap,
+                wire_labels: self.wire_labels,
+                minimap: self.minimap,
+                map_power: !self.map.hide_power,
+                map_belt_flow: !self.map.hide_flow,
+            };
             let settings = s.settings.clone();
             self.backend.call("set_settings", json!({ "settings": settings }), Msg::Status);
         }
