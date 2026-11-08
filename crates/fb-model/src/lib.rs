@@ -660,6 +660,27 @@ pub mod world {
         /// The circuit each powered machine is on (machine id -> circuit).
         #[serde(default)]
         pub machine_circuit: std::collections::BTreeMap<u32, u32>,
+        /// What each powered machine draws or makes (machine id -> power).
+        #[serde(default)]
+        pub machine_power: std::collections::BTreeMap<u32, PowerUse>,
+    }
+
+    /// One building's power: MW drawn now, drawn running at its clock
+    /// speed, and made (generators).
+    #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Default)]
+    pub struct PowerUse {
+        pub now: f32,
+        pub max: f32,
+        pub makes: f32,
+    }
+
+    /// What one side of a power line makes and uses.
+    #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Default)]
+    pub struct PowerSide {
+        pub makes: f32,
+        pub uses: f32,
+        /// Buildings drawing power.
+        pub buildings: u32,
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -668,6 +689,11 @@ pub mod world {
         pub a: [f32; 2],
         pub b: [f32; 2],
         pub circuit: Option<u32>,
+        /// When this line is the only link between two parts of its circuit:
+        /// what the part at end `a` and the part at end `b` make and use.
+        /// None when power can also go round another way.
+        #[serde(default)]
+        pub sides: Option<[PowerSide; 2]>,
     }
 
     /// One power circuit: everything joined by power lines (and train tracks).
@@ -680,6 +706,10 @@ pub mod world {
         pub max_consumption: f32,
         /// MW the generators can make right now.
         pub capacity: f32,
+        /// MW they make: all but Biomass Burners always run at full output;
+        /// Biomass Burners make what's still needed.
+        #[serde(default)]
+        pub production: f32,
         /// Power Storage on it and what they hold (MWh).
         pub batteries: u32,
         pub stored_mwh: f32,
@@ -754,6 +784,9 @@ pub mod world {
         /// Power poles, switches and batteries: their circuit.
         #[serde(default)]
         pub circuit: Option<u32>,
+        /// Stations and the like: what they draw.
+        #[serde(default)]
+        pub power: Option<PowerUse>,
     }
 
     /// Top-down renders of the game's own models, written by the icon helper

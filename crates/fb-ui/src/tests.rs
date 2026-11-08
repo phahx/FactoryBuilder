@@ -2509,3 +2509,18 @@ fn snap_to_grid_moves_nodes_and_frames_in_grid_steps() {
     assert!((after - before).length() > 1.0, "it moved");
     assert!(!(on_grid(after.x) && on_grid(after.y)), "and isn't held to the grid: {after:?}");
 }
+
+#[test]
+fn power_sections_name_their_ends_and_what_crosses() {
+    use crate::map::{compass, crossing};
+    use fb_model::world::PowerSide;
+    // Screen up is north (world -Y).
+    assert_eq!(compass(1.0, 0.0), "east");
+    assert_eq!(compass(0.0, -1.0), "north");
+    assert_eq!(compass(-1.0, 1.0), "south-west");
+    let side = |makes: f32, uses: f32| PowerSide { makes, uses, buildings: 1 };
+    // The b side uses 300 MW more than it makes: it comes from a.
+    assert_eq!(crossing([side(1000.0, 200.0), side(100.0, 400.0)]), Some((300.0, true)));
+    assert_eq!(crossing([side(0.0, 50.0), side(500.0, 10.0)]), Some((50.0, false)));
+    assert_eq!(crossing([side(100.0, 50.0), side(500.0, 10.0)]), None, "each side covers itself");
+}

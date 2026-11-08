@@ -1136,7 +1136,7 @@ pub(crate) fn read_world_stats(bytes: &[u8], game: &GameData) -> Result<(World, 
         let [x, y, z] = e.xf.pos;
         let (Some(x), Some(y), Some(z)) = (finite(x), finite(y), finite(z)) else { continue };
         if e.mark {
-            world.structures.push(Structure { class: e.class.clone(), x, y, yaw: finite(e.xf.yaw()).unwrap_or(0.0), circuit: None });
+            world.structures.push(Structure { class: e.class.clone(), x, y, yaw: finite(e.xf.yaw()).unwrap_or(0.0), circuit: None, power: None });
         }
         match e.role {
             Role::Machine => {
@@ -1331,109 +1331,299 @@ pub(crate) fn read_world_stats(bytes: &[u8], game: &GameData) -> Result<(World, 
 }
 
 /// Joins power connections into circuits (through power lines, the third
-/// rail, and the buildings they belong to) and totals each circuit.
+/// rail, and the buildings they belong to), totals each circuit, and works
+/// out for every power line that is the only link between two parts of its
+/// circuit what each part makes and uses.
+///
+/// Generators other than Biomass Burners always run at full output; Biomass
+/// Burners make what's still needed (satisfactory.wiki.gg/wiki/Power). The
+/// game doesn't track which way power goes along a line, so only a line that
+/// splits its circuit in two gets numbers: whatever one side lacks has to
+/// come across it.
 fn circuits(game: &GameData, ents: &[Ent], machine_of: &[Option<u32>], power: &[PowerComp], world: &mut World) {
-    fn id<'a>(s: &'a str, index: &mut HashMap<&'a str, usize>) -> usize {
+    use fb_model::world::{Circuit, PowerSide, PowerSource, PowerUse};
+    let ent_by_name: HashMap<&str, usize> = ents.iter().enumerate().map(|(i, e)| (e.name.as_str(), i)).collect();
+    let is_switch = |parent: &str| ent_by_name.get(parent).is_some_and(|&e| SWITCHES.iter().any(|s| ents[e].class.starts_with(s)));
+
+    // Nodes: a building (all its connections), or one side of a switch, or
+    // something the map doesn't draw (a rail's third rail, a drop pod).
+    let mut index: HashMap<&str, usize> = HashMap::new();
+    fn node<'a>(s: &'a str, index: &mut HashMap<&'a str, usize>) -> usize {
         let n = index.len();
         *index.entry(s).or_insert(n)
     }
-    let mut index: HashMap<&str, usize> = HashMap::new();
-    let ent_by_name: HashMap<&str, usize> = ents.iter().enumerate().map(|(i, e)| (e.name.as_str(), i)).collect();
-    let switch_open = |parent: &str| {
-        ent_by_name.get(parent).is_some_and(|&e| SWITCHES.iter().any(|s| ents[e].class.starts_with(s)) && ents[e].info.switch_on != Some(true))
-    };
-    let mut pairs: Vec<(usize, usize)> = Vec::new();
-    for p in power {
-        let c = id(&p.name, &mut index);
-        if !switch_open(&p.parent) {
-            let o = id(&p.parent, &mut index);
-            pairs.push((c, o));
-        }
-        for w in p.info.wires.iter().chain(&p.info.hidden) {
-            let o = id(w, &mut index);
-            pairs.push((c, o));
-        }
-    }
-    for e in ents.iter().filter(|e| e.role == Role::Wire) {
-        id(&e.name, &mut index);
-    }
-    let mut uf = petgraph::unionfind::UnionFind::<usize>::new(index.len().max(1));
-    for (a, b) in pairs {
-        uf.union(a, b);
-    }
-    let root = |s: &str| index.get(s).map(|&i| uf.find(i));
+    let key = |p: &'_ PowerComp| -> bool { is_switch(&p.parent) };
+    let comp_node: Vec<usize> = power.iter().map(|p| if key(p) { node(&p.name, &mut index) } else { node(&p.parent, &mut index) }).collect();
+    let comp_by_name: HashMap<&str, usize> = power.iter().enumerate().map(|(i, p)| (p.name.as_str(), i)).collect();
 
-    // Circuits that have something on them, in the order first met.
-    let mut circuit_of_root: HashMap<usize, u32> = HashMap::new();
-    let mut circuit = |r: usize, world: &mut World| -> u32 {
-        *circuit_of_root.entry(r).or_insert_with(|| {
-            world.circuits.push(fb_model::world::Circuit::default());
-            (world.circuits.len() - 1) as u32
-        })
-    };
-    let generator = |class: &str| class.starts_with("Build_Generator");
-    let mut seen_owner: HashSet<&str> = HashSet::new();
-    for p in power {
-        let Some(r) = root(&p.name) else { continue };
-        let c = circuit(r, world) as usize;
-        let Some(&e) = ent_by_name.get(p.parent.as_str()) else {
-            // Something the map doesn't draw (a drop pod, a radar tower...).
-            let target = p.info.target.unwrap_or(0.0).max(0.0);
-            if target > 0.0 && seen_owner.insert(p.parent.as_str()) {
-                world.circuits[c].consumption += target;
-                world.circuits[c].max_consumption += target;
-                world.circuits[c].consumers += 1;
-            }
-            continue;
-        };
-        let ent = &ents[e];
-        if let Some(m) = machine_of[e] {
-            world.machine_circuit.insert(m, c as u32);
+    // Edges: power lines, hidden links, switches that are on.
+    let mut edges: Vec<(usize, usize)> = Vec::new();
+    let mut edge_of_wire: HashMap<&str, usize> = HashMap::new();
+    let mut wire_nodes: HashMap<&str, Vec<usize>> = HashMap::new();
+    for (i, p) in power.iter().enumerate() {
+        for w in &p.info.wires {
+            wire_nodes.entry(w.as_str()).or_default().push(comp_node[i]);
         }
-        if ent.class.starts_with("Build_PowerStorage") && seen_owner.insert(p.parent.as_str()) {
-            let cir = &mut world.circuits[c];
-            cir.batteries += 1;
-            cir.stored_mwh += ent.info.power_store.unwrap_or(0.0).max(0.0);
-            cir.battery_mwh += game.power_store_mwh.get(&ent.class).copied().unwrap_or(0.0) as f32;
+        for h in &p.info.hidden {
+            let other = match comp_by_name.get(h.as_str()) {
+                Some(&j) => comp_node[j],
+                None => node(h, &mut index),
+            };
+            if other != comp_node[i] {
+                edges.push((comp_node[i], other));
+            }
+        }
+    }
+    for (w, ns) in &wire_nodes {
+        if let [a, b, ..] = ns[..] {
+            if a != b {
+                edge_of_wire.insert(w, edges.len());
+                edges.push((a, b));
+            }
+        }
+    }
+    let mut sides_of_switch: HashMap<&str, Vec<usize>> = HashMap::new();
+    for (i, p) in power.iter().enumerate() {
+        if key(p) {
+            sides_of_switch.entry(p.parent.as_str()).or_default().push(comp_node[i]);
+        }
+    }
+    for (parent, ns) in &sides_of_switch {
+        let on = ent_by_name.get(parent).is_some_and(|&e| ents[e].info.switch_on == Some(true));
+        if on {
+            for w in ns.windows(2) {
+                edges.push((w[0], w[1]));
+            }
+        }
+    }
+    let n = index.len();
+    let mut adj: Vec<Vec<(usize, usize)>> = vec![Vec::new(); n];
+    for (k, &(a, b)) in edges.iter().enumerate() {
+        adj[a].push((b, k));
+        adj[b].push((a, k));
+    }
+
+    // What each node makes, uses and could use.
+    #[derive(Clone, Copy, Default)]
+    struct Val {
+        fixed: f32,
+        biomass: f32,
+        uses: f32,
+        max: f32,
+        users: u32,
+    }
+    let mut val = vec![Val::default(); n];
+    let mut use_of: HashMap<&str, PowerUse> = HashMap::new();
+    // Generators by building (each has more than one power component).
+    let mut gens: HashMap<&str, (usize, &str, f32)> = HashMap::new();
+    let mut batteries: Vec<(usize, f32, f32)> = Vec::new();
+    let mut seen: HashSet<&str> = HashSet::new();
+    for (i, p) in power.iter().enumerate() {
+        let v = comp_node[i];
+        let ent = ent_by_name.get(p.parent.as_str()).map(|&e| &ents[e]);
+        let class = ent.map(|e| e.class.as_str()).unwrap_or("");
+        if class.starts_with("Build_PowerStorage") && seen.insert(p.parent.as_str()) {
+            let e = ent.unwrap();
+            batteries.push((v, e.info.power_store.unwrap_or(0.0).max(0.0), game.power_store_mwh.get(class).copied().unwrap_or(0.0) as f32));
         }
         let made = p.info.dynamic_capacity.unwrap_or(0.0).max(0.0) + p.info.base_production.unwrap_or(0.0).max(0.0);
-        if generator(&ent.class) {
+        if class.starts_with("Build_Generator") {
             if made > 0.0 || p.info.target.is_none() {
-                let cir = &mut world.circuits[c];
-                match cir.sources.iter_mut().find(|s| s.class == ent.class) {
-                    Some(s) if seen_owner.insert(p.parent.as_str()) => {
-                        s.count += 1;
-                        s.mw += made;
-                    }
-                    Some(s) => s.mw += made,
-                    None => {
-                        seen_owner.insert(p.parent.as_str());
-                        cir.sources.push(fb_model::world::PowerSource { class: ent.class.clone(), count: 1, mw: made });
-                    }
+                if class.contains("Biomass") {
+                    val[v].biomass += made;
+                } else {
+                    val[v].fixed += made;
                 }
-                cir.capacity += made;
+                gens.entry(p.parent.as_str()).or_insert((v, class, 0.0)).2 += made;
+                use_of.entry(p.parent.as_str()).or_default().makes += made;
             }
             continue;
         }
         let Some(target) = p.info.target else { continue };
-        if !seen_owner.insert(p.parent.as_str()) {
+        let target = target.max(0.0);
+        if !seen.insert(p.parent.as_str()) {
             continue;
         }
-        let cir = &mut world.circuits[c];
-        cir.consumption += target.max(0.0);
-        cir.consumers += 1;
         // What it draws running at its clock speed.
-        let full = match machine_of[e].map(|m| &world.machines[m as usize]) {
-            Some(m) => machine_power(game, m),
-            None => game.buildable_power.get(&ent.class).map(|p| *p as f32),
-        };
-        world.circuits[c].max_consumption += full.unwrap_or(target).max(target);
+        let full = match ent.and_then(|_| ent_by_name.get(p.parent.as_str())).and_then(|&e| machine_of[e]) {
+            Some(m) => machine_power(game, &world.machines[m as usize]),
+            None => game.buildable_power.get(class).map(|p| *p as f32),
+        }
+        .unwrap_or(target)
+        .max(target);
+        val[v].uses += target;
+        val[v].max += full;
+        val[v].users += 1;
+        let u = use_of.entry(p.parent.as_str()).or_default();
+        u.now += target;
+        u.max += full;
+    }
+
+    // Circuits: connected parts that have something on them.
+    let mut comp = vec![usize::MAX; n];
+    let mut circuit_of_comp: Vec<Option<u32>> = Vec::new();
+    for s in 0..n {
+        if comp[s] != usize::MAX {
+            continue;
+        }
+        let id = circuit_of_comp.len();
+        circuit_of_comp.push(None);
+        let mut stack = vec![s];
+        comp[s] = id;
+        while let Some(v) = stack.pop() {
+            for &(to, _) in &adj[v] {
+                if comp[to] == usize::MAX {
+                    comp[to] = id;
+                    stack.push(to);
+                }
+            }
+        }
+    }
+    for (i, _) in power.iter().enumerate() {
+        let c = comp[comp_node[i]];
+        if circuit_of_comp[c].is_none() {
+            world.circuits.push(Circuit::default());
+            circuit_of_comp[c] = Some((world.circuits.len() - 1) as u32);
+        }
+    }
+    let circuit_of = |v: usize| circuit_of_comp[comp[v]];
+    for v in 0..n {
+        let Some(c) = circuit_of(v) else { continue };
+        let cir = &mut world.circuits[c as usize];
+        cir.capacity += val[v].fixed + val[v].biomass;
+        cir.consumption += val[v].uses;
+        cir.max_consumption += val[v].max;
+        cir.consumers += val[v].users;
+    }
+    let mut biomass_total = vec![0f32; world.circuits.len()];
+    let mut fixed_total = vec![0f32; world.circuits.len()];
+    for v in 0..n {
+        if let Some(c) = circuit_of(v) {
+            biomass_total[c as usize] += val[v].biomass;
+            fixed_total[c as usize] += val[v].fixed;
+        }
+    }
+    // Share of their output Biomass Burners run at, per circuit.
+    let share: Vec<f32> = (0..world.circuits.len())
+        .map(|c| if biomass_total[c] > 0.0 { ((world.circuits[c].consumption - fixed_total[c]) / biomass_total[c]).clamp(0.0, 1.0) } else { 0.0 })
+        .collect();
+    for (c, cir) in world.circuits.iter_mut().enumerate() {
+        cir.production = fixed_total[c] + biomass_total[c] * share[c];
+    }
+    let mut gens: Vec<(usize, &str, f32)> = gens.into_values().collect();
+    gens.sort_by(|a, b| a.1.cmp(b.1).then(a.0.cmp(&b.0)));
+    for (v, class, made) in gens {
+        let Some(c) = circuit_of(v) else { continue };
+        let cir = &mut world.circuits[c as usize];
+        match cir.sources.iter_mut().find(|s| s.class == class) {
+            Some(s) => {
+                s.count += 1;
+                s.mw += made;
+            }
+            None => cir.sources.push(PowerSource { class: class.to_string(), count: 1, mw: made }),
+        }
+    }
+    for (v, stored, cap) in batteries {
+        if let Some(c) = circuit_of(v) {
+            let cir = &mut world.circuits[c as usize];
+            cir.batteries += 1;
+            cir.stored_mwh += stored;
+            cir.battery_mwh += cap;
+        }
     }
     for c in &mut world.circuits {
         c.sources.sort_by(|a, b| b.mw.total_cmp(&a.mw).then(a.class.cmp(&b.class)));
     }
+    let makes = |v: usize| val[v].fixed + circuit_of(v).map(|c| val[v].biomass * share[c as usize]).unwrap_or(0.0);
+    // Biomass Burners make their share of what's needed.
+    for (parent, u) in use_of.iter_mut() {
+        if let Some(&e) = ent_by_name.get(parent) {
+            if ents[e].class.contains("Biomass") && ents[e].class.starts_with("Build_Generator") {
+                let v = index[parent];
+                if let Some(c) = circuit_of(v) {
+                    u.makes *= share[c as usize];
+                }
+            }
+        }
+    }
 
-    // Poles and switches on the map, and the lines.
+    // Lines that split their circuit (bridges), with what's on each side.
+    let mut tin = vec![usize::MAX; n];
+    let mut low = vec![0usize; n];
+    let mut parent_edge = vec![usize::MAX; n];
+    let mut sub: Vec<PowerSide> = (0..n).map(|v| PowerSide { makes: makes(v), uses: val[v].uses, buildings: val[v].users }).collect();
+    let mut bridge_child: Vec<Option<usize>> = vec![None; edges.len()];
+    let mut timer = 0;
+    for s in 0..n {
+        if tin[s] != usize::MAX {
+            continue;
+        }
+        tin[s] = timer;
+        low[s] = timer;
+        timer += 1;
+        let mut stack: Vec<(usize, usize)> = vec![(s, 0)];
+        while let Some(&mut (v, ref mut i)) = stack.last_mut() {
+            if *i < adj[v].len() {
+                let (to, e) = adj[v][*i];
+                *i += 1;
+                if e == parent_edge[v] {
+                    continue;
+                }
+                if tin[to] == usize::MAX {
+                    parent_edge[to] = e;
+                    tin[to] = timer;
+                    low[to] = timer;
+                    timer += 1;
+                    stack.push((to, 0));
+                } else {
+                    low[v] = low[v].min(tin[to]);
+                }
+            } else {
+                stack.pop();
+                if let Some(&(p, _)) = stack.last() {
+                    low[p] = low[p].min(low[v]);
+                    let child = sub[v];
+                    sub[p].makes += child.makes;
+                    sub[p].uses += child.uses;
+                    sub[p].buildings += child.buildings;
+                    if low[v] > tin[p] {
+                        bridge_child[parent_edge[v]] = Some(v);
+                    }
+                }
+            }
+        }
+    }
+    // Circuit totals for the other side.
+    let total_of = |c: u32| {
+        let cir = &world.circuits[c as usize];
+        PowerSide { makes: cir.production, uses: cir.consumption, buildings: cir.consumers }
+    };
+    let mut names = vec![""; n];
+    for (k, &i) in &index {
+        names[i] = k;
+    }
+    let pos_of = |v: usize| -> Option<[f32; 2]> {
+        let name = names[v];
+        let e = ent_by_name.get(name).map(|&e| &ents[e]).or_else(|| comp_by_name.get(name).and_then(|&j| ent_by_name.get(power[j].parent.as_str())).map(|&e| &ents[e]))?;
+        Some([e.xf.pos[0] as f32, e.xf.pos[1] as f32])
+    };
+
+    // Buildings: circuit and power use; poles and switches; the lines.
+    for (e, ent) in ents.iter().enumerate() {
+        let Some(&v) = index.get(ent.name.as_str()) else { continue };
+        if let (Some(m), Some(c)) = (machine_of[e], circuit_of(v)) {
+            world.machine_circuit.insert(m, c);
+        }
+        if let (Some(m), Some(u)) = (machine_of[e], use_of.get(ent.name.as_str())) {
+            world.machine_power.insert(m, *u);
+        }
+    }
+    let mut circuit_of_ent: HashMap<&str, u32> = HashMap::new();
+    for (i, p) in power.iter().enumerate() {
+        if let Some(c) = circuit_of(comp_node[i]) {
+            circuit_of_ent.entry(p.parent.as_str()).or_insert(c);
+        }
+    }
     let mut k = 0;
     for e in ents.iter() {
         let [x, y, z] = e.xf.pos;
@@ -1442,19 +1632,32 @@ fn circuits(game: &GameData, ents: &[Ent], machine_of: &[Option<u32>], power: &[
         }
         if e.mark {
             if let Some(s) = world.structures.get_mut(k) {
-                let comp = power.iter().find(|p| p.parent == e.name).map(|p| p.name.as_str());
-                s.circuit = comp.and_then(root).and_then(|r| circuit_of_root.get(&r).copied());
+                s.circuit = circuit_of_ent.get(e.name.as_str()).copied();
+                s.power = use_of.get(e.name.as_str()).copied().filter(|u| u.max > 0.0 || u.makes > 0.0);
             }
             k += 1;
         }
-        if e.role == Role::Wire {
-            if let [a, b, ..] = e.info.wire_ends[..] {
-                if let (Some(ax), Some(ay), Some(bx), Some(by)) = (finite(a[0]), finite(a[1]), finite(b[0]), finite(b[1])) {
-                    let circuit = root(&e.name).and_then(|r| circuit_of_root.get(&r).copied());
-                    world.power_lines.push(fb_model::world::PowerLine { a: [ax, ay], b: [bx, by], circuit });
-                }
-            }
+        if e.role != Role::Wire {
+            continue;
         }
+        let [a, b, ..] = e.info.wire_ends[..] else { continue };
+        let (Some(ax), Some(ay), Some(bx), Some(by)) = (finite(a[0]), finite(a[1]), finite(b[0]), finite(b[1])) else { continue };
+        let edge = edge_of_wire.get(e.name.as_str()).copied();
+        let circuit = edge.and_then(|k| circuit_of(edges[k].0)).or_else(|| wire_nodes.get(e.name.as_str()).and_then(|ns| ns.first()).and_then(|&v| circuit_of(v)));
+        let sides = edge.and_then(|k| {
+            let child = bridge_child[k]?;
+            let c = circuit?;
+            let near = sub[child];
+            let total = total_of(c);
+            let far = PowerSide { makes: total.makes - near.makes, uses: total.uses - near.uses, buildings: total.buildings - near.buildings };
+            // Which end the child's side is at: the end nearer its building.
+            let child_at_a = match pos_of(child) {
+                Some(p) => (p[0] - ax).hypot(p[1] - ay) <= (p[0] - bx).hypot(p[1] - by),
+                None => true,
+            };
+            Some(if child_at_a { [near, far] } else { [far, near] })
+        });
+        world.power_lines.push(fb_model::world::PowerLine { a: [ax, ay], b: [bx, by], circuit, sides });
     }
 }
 

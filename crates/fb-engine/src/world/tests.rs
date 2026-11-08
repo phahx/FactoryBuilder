@@ -886,6 +886,27 @@ fn real_save_power() {
     eprintln!("line end to nearest site (cm): median {:.0}, 90% {:.0}, 99% {:.0}, max {:.0}", pct(0.5), pct(0.9), pct(0.99), pct(1.0));
     let hub: Vec<_> = w.structures.iter().filter(|s| s.class == "Build_TradingPost_C").collect();
     eprintln!("HUB: {hub:?}");
+    // Lines that split their circuit: both sides add up to the circuit.
+    let split: Vec<_> = w.power_lines.iter().filter(|l| l.sides.is_some()).collect();
+    eprintln!("lines that split their circuit: {} of {}", split.len(), w.power_lines.len());
+    for l in &split {
+        let [a, b] = l.sides.unwrap();
+        let c = &w.circuits[l.circuit.unwrap() as usize];
+        assert!((a.uses + b.uses - c.consumption).abs() < 0.5 && (a.makes + b.makes - c.production).abs() < 0.5, "{a:?} {b:?} vs {c:?}");
+        assert_eq!(a.buildings + b.buildings, c.consumers);
+    }
+    let mut busiest: Vec<_> = split.iter().map(|l| { let [a, b] = l.sides.unwrap(); ((a.uses - a.makes).max(b.uses - b.makes), a, b) }).collect();
+    busiest.sort_by(|x, y| y.0.total_cmp(&x.0));
+    for (need, a, b) in busiest.iter().take(5) {
+        eprintln!("crosses {need:.1} MW: a {a:?} / b {b:?}");
+    }
+    let main = w.circuits.iter().max_by(|a, b| a.consumers.cmp(&b.consumers)).unwrap();
+    // One count per generator: late.sav has 130 Fuel-Powered and 50 Coal-Powered Generators on it.
+    let count = |c: &str| main.sources.iter().find(|s| s.class == c).map(|s| s.count);
+    assert_eq!((count("Build_GeneratorFuel_C"), count("Build_GeneratorCoal_C")), (Some(130), Some(50)));
+    eprintln!("main circuit production {:.1} (capacity {:.1}, consumption {:.1})", main.production, main.capacity, main.consumption);
+    let powered = w.machine_power.len();
+    eprintln!("machines with power figures: {powered}; structures with power: {}", w.structures.iter().filter(|s| s.power.is_some()).count());
     assert_eq!(w.power_lines.len(), 4521, "every power line in the save");
     assert!(w.power_lines.iter().all(|l| l.circuit.is_some()));
     assert_eq!(hub.len(), 1, "the HUB is on the map");

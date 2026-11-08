@@ -503,7 +503,8 @@ pub fn map_ui(app: &mut FactoryApp, ui: &mut egui::Ui) {
 
     // Power lines, over the buildings (they hang from pole tops). The circuit
     // under the pointer (a line, or a pole or switch) lights up.
-    let mut power_hover: Option<(String, Option<u32>)> = None;
+    // (title, circuit, the line under the pointer)
+    let mut power_hover: Option<(String, Option<u32>, Option<usize>)> = None;
     if let Some(w) = &app.map.world {
         let st = &app.map;
         let sprites = st.sprites.as_ref();
@@ -513,27 +514,57 @@ pub fn map_ui(app: &mut FactoryApp, ui: &mut egui::Ui) {
                 Some(sp) => crate::map_draw::contains(&crate::map_draw::corners(&view, sp, s.x, s.y, s.yaw), q),
                 None => view.screen(s.x as f64, s.y as f64).distance(q) <= (size * 0.5).max(4.0),
             };
-            if let Some(s) = w.structures.iter().rev().filter(|s| s.circuit.is_some()).find(|s| on(s)) {
+            // Poles, switches and batteries (stations and the like have a
+            // tip of their own, with their power in it).
+            if let Some(s) = w.structures.iter().rev().filter(|s| s.circuit.is_some() && s.power.is_none()).find(|s| on(s)) {
                 let name = app.user.game.building_names.get(&s.class).cloned().unwrap_or_else(|| s.class.clone());
-                power_hover = Some((name, s.circuit));
-            } else if let Some(l) = w.power_lines.iter().find(|l| segment_distance(q, st.to_screen(rect, l.a[0] as f64, l.a[1] as f64), st.to_screen(rect, l.b[0] as f64, l.b[1] as f64)) < 5.0) {
-                power_hover = Some(("Power Line".into(), l.circuit));
+                power_hover = Some((name, s.circuit, None));
+            } else if let Some(k) = w.power_lines.iter().position(|l| segment_distance(q, st.to_screen(rect, l.a[0] as f64, l.a[1] as f64), st.to_screen(rect, l.b[0] as f64, l.b[1] as f64)) < 5.0) {
+                power_hover = Some(("Power Line".into(), w.power_lines[k].circuit, Some(k)));
             }
         }
         let lit = power_hover.as_ref().and_then(|h| h.1);
+        let lit_line = power_hover.as_ref().and_then(|h| h.2);
+        let mut labels: Vec<(Pos2, Pos2, String)> = Vec::new();
         let width = ((st.scale * 60.0) as f32).clamp(1.0, 3.0);
         let screen = rect.expand(4.0);
-        for l in &w.power_lines {
+        for (k, l) in w.power_lines.iter().enumerate() {
             let (a, b) = (st.to_screen(rect, l.a[0] as f64, l.a[1] as f64), st.to_screen(rect, l.b[0] as f64, l.b[1] as f64));
             if !screen.intersects(Rect::from_two_pos(a, b)) {
                 continue;
             }
-            if lit.is_some() && l.circuit == lit {
-                painter.line_segment([a, b], Stroke::new(width + 1.5, ACCENT));
+            // What has to cross this section, toward the end that's short.
+            // (Labels from 1 MW: idle machines draw 0.1 MW each and would bury
+            // the rest; the tip shows every section.)
+            if let Some((need, to_b)) = l.sides.and_then(crossing) {
+                if a.distance(b) >= 110.0 && need >= 1.0 {
+                    let (from, to) = if to_b { (a, b) } else { (b, a) };
+                    labels.push((from, to, format!("{} MW", fmt_mw(need))));
+                }
+            }
+            if lit_line == Some(k) {
+                painter.line_segment([a, b], Stroke::new(width + 3.0, ACCENT));
+            } else if lit.is_some() && l.circuit == lit {
+                painter.line_segment([a, b], Stroke::new(width + 1.0, ACCENT.gamma_multiply(0.6)));
             } else {
                 painter.line_segment([a, b], Stroke::new(width + 1.0, Color32::from_black_alpha(170)));
                 painter.line_segment([a, b], Stroke::new((width - 0.5).max(0.75), Color32::from_gray(0xB0).gamma_multiply(0.8)));
             }
+        }
+        // Labels: an arrow toward where the power goes, and how much.
+        for (from, to, text) in labels {
+            let mid = from + (to - from) * 0.5;
+            let dir = (to - from).normalized();
+            let g = painter.layout_no_wrap(text, egui::FontId::proportional(11.0), TEXT);
+            let w_ = g.size().x + 22.0;
+            let chip = Rect::from_center_size(mid, vec2(w_, g.size().y + 6.0));
+            painter.rect_filled(chip, 3.0, CONTENT.gamma_multiply(0.9));
+            painter.rect_stroke(chip, 3.0, Stroke::new(1.0_f32, ACCENT.gamma_multiply(0.7)));
+            let tip = pos2(chip.left() + 13.0, mid.y) + dir * 4.0;
+            let back = pos2(chip.left() + 13.0, mid.y) - dir * 4.0;
+            let side = vec2(-dir.y, dir.x) * 3.5;
+            painter.add(egui::Shape::convex_polygon(vec![tip, back + side, back - side], ACCENT, Stroke::NONE));
+            painter.galley(pos2(chip.left() + 19.0, mid.y - g.size().y / 2.0), g, TEXT);
         }
     }
 
@@ -591,13 +622,22 @@ pub fn map_ui(app: &mut FactoryApp, ui: &mut egui::Ui) {
             egui::show_tooltip_at_pointer(&ctx, ui.layer_id(), egui::Id::new("map_machine"), |ui| {
                 machine_tip(ui, assets, &game, &info, w, m);
             });
-        } else if let Some((title, circuit)) = power_hover {
+        } else if let Some((title, circuit, line)) = power_hover {
             egui::show_tooltip_at_pointer(&ctx, ui.layer_id(), egui::Id::new("map_power"), |ui| {
-                circuit_tip(ui, assets, &game, &title, circuit.and_then(|c| w.circuits.get(c as usize)));
+                widgets::tooltip_title(ui, &title);
+                if let Some(l) = line.and_then(|k| w.power_lines.get(k)) {
+                    section_tip(ui, l);
+                    ui.add_space(4.0);
+                    widgets::tip_line(ui, RichText::new("Whole circuit").small().color(ACCENT));
+                }
+                circuit_tip(ui, assets, &game, circuit.and_then(|c| w.circuits.get(c as usize)));
             });
         } else if let Some(s) = w.structures.iter().rev().find(|s| under(&s.class, s.x, s.y, s.yaw)) {
             egui::show_tooltip_at_pointer(&ctx, ui.layer_id(), egui::Id::new("map_structure"), |ui| {
                 widgets::tooltip_title(ui, game.building_names.get(&s.class).map(String::as_str).unwrap_or(&s.class));
+                if let Some(u) = s.power {
+                    power_section(ui, u, None, s.circuit.and_then(|c| w.circuits.get(c as usize)));
+                }
             });
         }
     }
@@ -648,10 +688,108 @@ fn machine_tip(ui: &mut egui::Ui, assets: &mut crate::assets::Assets, game: &fb_
         setup += &format!(" · {}× output from Somersloops", crate::fmt::fmt_num(m.boost as f64));
     }
     widgets::tip_line(ui, RichText::new(setup).small().color(TEXT_DIM));
-    if let Some(c) = w.machine_circuit.get(&m.id).and_then(|c| w.circuits.get(*c as usize)) {
-        let text = format!("Its circuit: {} of {} MW in use", fmt_mw(c.consumption), fmt_mw(c.capacity));
-        widgets::tip_line(ui, RichText::new(text).small().color(TEXT_DIM));
+    let circuit = w.machine_circuit.get(&m.id).and_then(|c| w.circuits.get(*c as usize));
+    match w.machine_power.get(&m.id) {
+        Some(u) => power_section(ui, *u, Some(m.clock), circuit),
+        // Machines that need power but aren't wired to anything.
+        None if game.buildings.get(&m.class).is_some_and(|b| b.power_mw > 0.0) || game.extraction.extractors.iter().any(|x| x.class == m.class) => {
+            ui.add_space(4.0);
+            widgets::tip_line(ui, RichText::new("Power").small().color(ACCENT));
+            widgets::tip_line(ui, RichText::new("Not connected to power").color(TEXT_DIM));
+        }
+        None => {}
     }
+}
+
+/// The Power part of a building's tip: what it draws (now, and running at
+/// its clock speed) or makes, and its circuit.
+fn power_section(ui: &mut egui::Ui, u: fb_model::world::PowerUse, clock: Option<f32>, circuit: Option<&fb_model::world::Circuit>) {
+    ui.add_space(4.0);
+    widgets::tip_line(ui, RichText::new("Power").small().color(ACCENT));
+    let row = |ui: &mut egui::Ui, label: &str, mw: f32| {
+        ui.horizontal(|ui| {
+            widgets::tip_line(ui, RichText::new(label).color(TEXT_DIM));
+            widgets::tip_line(ui, RichText::new(format!("{} MW", fmt_mw(mw))).color(TEXT));
+        });
+    };
+    if u.makes > 0.0 || (u.max <= 0.0 && u.now <= 0.0) {
+        row(ui, "Makes", u.makes);
+    } else {
+        row(ui, "Uses now", u.now);
+        let running = match clock {
+            Some(c) => format!("Running at {}%", crate::fmt::fmt_num(c as f64 * 100.0)),
+            None => "Running".to_string(),
+        };
+        row(ui, &running, u.max);
+    }
+    match circuit {
+        Some(c) => {
+            let text = format!("Its circuit makes {} MW and uses {} MW", fmt_mw(c.production), fmt_mw(c.consumption));
+            widgets::tip_line(ui, RichText::new(text).small().color(TEXT_DIM));
+        }
+        None => {
+            widgets::tip_line(ui, RichText::new("Not connected to power").small().color(TEXT_DIM));
+        }
+    }
+}
+
+/// What has to cross a line that splits its circuit: MW, and whether it
+/// goes toward end `b` (else toward `a`). None when nothing has to.
+pub(crate) fn crossing(sides: [fb_model::world::PowerSide; 2]) -> Option<(f32, bool)> {
+    let [a, b] = sides;
+    let (short_a, short_b) = (a.uses - a.makes, b.uses - b.makes);
+    if short_b > 0.05 && short_b >= short_a {
+        Some((short_b, true))
+    } else if short_a > 0.05 {
+        Some((short_a, false))
+    } else {
+        None
+    }
+}
+
+/// "north-east" for a direction on the map (screen up is north).
+pub(crate) fn compass(dx: f32, dy: f32) -> &'static str {
+    let a = (-dy).atan2(dx).to_degrees();
+    const NAMES: [&str; 8] = ["east", "north-east", "north", "north-west", "west", "south-west", "south", "south-east"];
+    NAMES[(((a + 360.0 + 22.5) % 360.0) / 45.0) as usize % 8]
+}
+
+/// A line's own part of its tip: what each end's side makes and uses, and
+/// what has to come across this section.
+fn section_tip(ui: &mut egui::Ui, l: &fb_model::world::PowerLine) {
+    let Some(sides) = l.sides else {
+        let text = if l.circuit.is_some() {
+            "This section is part of a loop: power can go round either way, so how much goes through here can't be told."
+        } else {
+            "Not connected to anything."
+        };
+        ui.add(egui::Label::new(RichText::new(text).color(TEXT_DIM)).wrap());
+        return;
+    };
+    let end_a = compass(l.a[0] - l.b[0], l.a[1] - l.b[1]);
+    let end_b = compass(l.b[0] - l.a[0], l.b[1] - l.a[1]);
+    let n = |b: u32| format!("{b} {}", if b == 1 { "building" } else { "buildings" });
+    egui::Grid::new("section_sides").num_columns(4).spacing(vec2(12.0, 2.0)).show(ui, |ui| {
+        for t in ["", "Makes", "Uses", ""] {
+            widgets::tip_line(ui, RichText::new(t).small().color(TEXT_DIM));
+        }
+        ui.end_row();
+        for (end, s) in [(end_a, sides[0]), (end_b, sides[1])] {
+            widgets::tip_line(ui, RichText::new(format!("The {end} side")).color(TEXT_DIM));
+            widgets::tip_line(ui, RichText::new(format!("{} MW", fmt_mw(s.makes))).color(TEXT));
+            widgets::tip_line(ui, RichText::new(format!("{} MW", fmt_mw(s.uses))).color(TEXT));
+            widgets::tip_line(ui, RichText::new(n(s.buildings)).small().color(TEXT_DIM));
+            ui.end_row();
+        }
+    });
+    let [a, b] = sides;
+    let text = match crossing(sides) {
+        _ if a.uses > a.makes + 0.05 && b.uses > b.makes + 0.05 => "Both sides use more than they make: the circuit doesn't make enough".to_string(),
+        Some((mw, true)) => format!("{} MW has to come through here to the {end_b} side", fmt_mw(mw)),
+        Some((mw, false)) => format!("{} MW has to come through here to the {end_a} side", fmt_mw(mw)),
+        None => "Each side makes enough for itself: nothing has to come through here".to_string(),
+    };
+    widgets::tip_line(ui, RichText::new(text).color(ACCENT));
 }
 
 fn fmt_mw(v: f32) -> String {
@@ -667,14 +805,13 @@ fn segment_distance(p: Pos2, a: Pos2, b: Pos2) -> f32 {
 
 /// Hover tip for a power line, pole, switch or battery: its circuit's
 /// production, capacity and consumption, and where the power comes from.
-fn circuit_tip(ui: &mut egui::Ui, assets: &mut crate::assets::Assets, game: &fb_model::GameData, title: &str, c: Option<&fb_model::world::Circuit>) {
-    widgets::tooltip_title(ui, title);
+fn circuit_tip(ui: &mut egui::Ui, assets: &mut crate::assets::Assets, game: &fb_model::GameData, c: Option<&fb_model::world::Circuit>) {
     let Some(c) = c.filter(|c| c.consumers > 0 || !c.sources.is_empty() || c.batteries > 0) else {
         widgets::tip_line(ui, RichText::new("Not connected to anything that makes or uses power").color(TEXT_DIM));
         return;
     };
-    // Generators only make what's drawn.
-    let production = c.consumption.min(c.capacity);
+    // All but Biomass Burners run at full output (the save's figures).
+    let production = c.production;
     egui::Grid::new("circuit_numbers").num_columns(2).spacing(vec2(16.0, 2.0)).show(ui, |ui| {
         for (label, mw) in [("Production", production), ("Production capacity", c.capacity), ("Consumption", c.consumption), ("Max. consumption", c.max_consumption)] {
             widgets::tip_line(ui, RichText::new(label).color(TEXT_DIM));
@@ -684,7 +821,7 @@ fn circuit_tip(ui: &mut egui::Ui, assets: &mut crate::assets::Assets, game: &fb_
             ui.end_row();
         }
     });
-    if c.consumption > c.capacity + 0.01 {
+    if c.consumption > c.production + 0.01 {
         let text = if c.stored_mwh > 0.0 { "Drawing more than the generators make: the batteries cover the rest" } else { "Drawing more than the generators make" };
         widgets::tip_line(ui, RichText::new(text).small().color(ACCENT));
     } else if c.max_consumption > c.capacity + 0.01 {
