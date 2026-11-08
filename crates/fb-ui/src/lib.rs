@@ -12,6 +12,7 @@ pub mod graph;
 pub mod menu;
 pub mod panels;
 pub mod portable;
+pub mod power_ui;
 pub mod room;
 pub mod setup;
 pub mod theme;

@@ -8,6 +8,8 @@
 #[cfg(feature = "solver")]
 pub mod docs;
 pub mod layout;
+#[cfg(feature = "solver")]
+pub mod power;
 pub mod sim;
 #[cfg(feature = "solver")]
 pub mod solver;

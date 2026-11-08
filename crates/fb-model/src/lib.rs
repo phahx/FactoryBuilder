@@ -61,12 +61,35 @@ pub struct Recipe {
     /// Recipes in variable-power buildings (Particle Accelerator, Converter,
     /// Quantum Encoder) set their own power draw: average MW.
     pub variable_power_mw: Option<f64>,
+    /// Power one machine generates at 100% clock speed, in MW. Only the
+    /// synthesized generator recipes (see [`GENERATOR_PREFIX`]) have it.
+    #[serde(default)]
+    pub generates_mw: f64,
 }
+
+/// Class-name prefix of the synthesized generator recipes:
+/// `Generator__<building>__<fuel>`, e.g.
+/// `Generator__Build_GeneratorCoal_C__Desc_Coal_C`. They burn fuel (and
+/// water) instead of making items; they never appear in recipe lists and
+/// are only planned when the plan generates its own power.
+pub const GENERATOR_PREFIX: &str = "Generator__";
 
 impl Recipe {
     /// Items (or m³) per minute, per machine at 100% clock.
     pub fn per_min(&self, a: &Amount) -> f64 {
         a.amount * 60.0 / self.duration_s
+    }
+
+    /// A synthesized power generator (building + fuel), not a crafting recipe.
+    pub fn is_generator(&self) -> bool {
+        self.generates_mw > 0.0
+    }
+
+    /// Item whose icon stands for this recipe: the main product, or the
+    /// fuel for generators (some have no product at all).
+    pub fn icon_item(&self) -> Option<&str> {
+        let list = if self.is_generator() { &self.ingredients } else { &self.products };
+        list.first().map(|a| a.item.as_str())
     }
 }
 
@@ -133,9 +156,46 @@ pub struct SolveRequest {
     pub targets: Vec<Target>,
     /// Items already available (e.g. from another factory), per minute.
     pub inputs: Vec<Target>,
+    /// Crafting recipes the plan may use (generator recipes listed here are
+    /// ignored; they come from `power`).
     pub enabled_recipes: Vec<ClassName>,
     pub resource_limits: BTreeMap<ClassName, f64>,
     pub objective: Objective,
+    #[serde(default)]
+    pub power: PowerSettings,
+}
+
+/// Where the factory's power comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum PowerMode {
+    /// Bought from the existing power grid: the plan only reports the MW.
+    #[default]
+    Grid,
+    /// The plan builds generators, and their fuel chain, for its own MW.
+    Generate,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PowerSettings {
+    #[serde(default)]
+    pub mode: PowerMode,
+    /// Generator recipes (`Generator__...`) the plan may build in Generate mode.
+    #[serde(default = "default_generators")]
+    pub generators: Vec<ClassName>,
+}
+
+/// The generator offered by default: the first one with automated fuel
+/// delivery in the game (Coal-Powered Generator burning Coal).
+pub const DEFAULT_GENERATOR: &str = "Generator__Build_GeneratorCoal_C__Desc_Coal_C";
+
+fn default_generators() -> Vec<ClassName> {
+    vec![DEFAULT_GENERATOR.to_string()]
+}
+
+impl Default for PowerSettings {
+    fn default() -> Self {
+        Self { mode: PowerMode::Grid, generators: default_generators() }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -171,7 +231,11 @@ pub struct PlanEdge {
 pub struct Plan {
     pub nodes: Vec<PlanNode>,
     pub edges: Vec<PlanEdge>,
+    /// Consumed by the planned machines at 100% clock speed.
     pub power_mw: f64,
+    /// Produced by the planned generators (0 when power comes from the grid).
+    #[serde(default)]
+    pub generated_mw: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -64,6 +64,13 @@ pub struct Plan {
     /// Resource limits that differ from the whole-map defaults.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub limits: BTreeMap<String, f64>,
+    /// The plan builds its own generators instead of using the grid.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub generate_power: bool,
+    /// Generators allowed, when they differ from the default (Coal-Powered
+    /// Generator burning Coal).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generators: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

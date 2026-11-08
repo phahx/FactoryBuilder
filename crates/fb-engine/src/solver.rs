@@ -6,6 +6,10 @@
 //!   u_i  externally supplied item i (bounded by the given input rate)
 //!   s_i  surplus of item i (byproducts / overflow)
 //! For every item:  sum_j net_ij * r_j + e_i + u_i - s_i = target_i
+//! When the plan generates its own power (PowerMode::Generate), the allowed
+//! generator recipes join the recipes and
+//!   sum_j consumed_MW_j * r_j <= sum_g generated_MW_g * r_g
+//! (machines at 100% clock), so their fuel chain is planned too.
 //! The objective picks which of the many feasible plans is "best".
 
 use crate::layout;
@@ -24,11 +28,27 @@ pub fn solve(data: &GameData, req: &SolveRequest) -> SolveOutcome {
         return SolveOutcome::Infeasible(vec!["Add at least one product with a rate above 0.".into()]);
     }
 
-    let recipes: Vec<&Recipe> = req
+    // Generators only come from the power settings, never from the recipe list.
+    let mut recipes: Vec<&Recipe> = req
         .enabled_recipes
         .iter()
         .filter_map(|c| data.recipes.get(c))
+        .filter(|r| !r.is_generator())
         .collect();
+    let generate = req.power.mode == PowerMode::Generate;
+    if generate {
+        let generators: BTreeSet<&str> = req
+            .power
+            .generators
+            .iter()
+            .filter(|c| data.recipes.get(*c).is_some_and(|r| r.is_generator()))
+            .map(|c| c.as_str())
+            .collect();
+        if generators.is_empty() {
+            return SolveOutcome::Infeasible(vec!["Pick at least one generator under Power, or take the power from the grid.".into()]);
+        }
+        recipes.extend(generators.into_iter().map(|c| &data.recipes[c]));
+    }
 
     // Items that appear anywhere in the problem.
     let mut items: BTreeSet<&str> = BTreeSet::new();
@@ -83,9 +103,22 @@ pub fn solve(data: &GameData, req: &SolveRequest) -> SolveOutcome {
     }
     let mut power = Expression::with_capacity(recipes.len());
     let mut machines = Expression::with_capacity(recipes.len());
+    // Consumed minus generated MW at 100% clock: must be <= 0 in Generate mode.
+    let mut net_power = Expression::with_capacity(recipes.len());
+    let mut generated = Expression::default();
     for (r, &v) in recipes.iter().zip(&r_vars) {
         power.add_mul(data.recipe_power_mw(r).max(0.1), v);
         machines.add_mul(1.0, v);
+        net_power.add_mul(data.recipe_power_mw(r) - r.generates_mw, v);
+        if r.is_generator() {
+            generated.add_mul(r.generates_mw, v);
+        }
+    }
+    // Generating its own power, the plan always covers what it uses, so
+    // "least power" means the least generating capacity to build (and so the
+    // least fuel); resources break ties between generators.
+    if generate && req.objective == Objective::Power {
+        power = generated;
     }
     let mut surplus = Expression::with_capacity(s_vars.len());
     for &v in s_vars.values() {
@@ -110,6 +143,9 @@ pub fn solve(data: &GameData, req: &SolveRequest) -> SolveOutcome {
         }
     }
     let mut problem = vars.minimise(objective.clone()).using(microlp);
+    if generate {
+        problem.add_constraint(net_power.leq(0.0));
+    }
     for (&item, expr) in &balance {
         let mut e = expr.clone();
         if let Some(&v) = e_vars.get(item) {
@@ -160,18 +196,22 @@ pub fn solve(data: &GameData, req: &SolveRequest) -> SolveOutcome {
     }
 
     let edges = distribute(data, &nodes);
-    let power_mw = nodes
+    let (power_mw, generated_mw) = nodes
         .iter()
         .map(|n| match n {
-            PlanNodeKind::Recipe { recipe, machines } => data.recipe_power_mw(&data.recipes[recipe]) * machines,
-            _ => 0.0,
+            PlanNodeKind::Recipe { recipe, machines } => {
+                let r = &data.recipes[recipe];
+                (data.recipe_power_mw(r) * machines, r.generates_mw * machines)
+            }
+            _ => (0.0, 0.0),
         })
-        .sum();
+        .fold((0.0, 0.0), |a, b| (a.0 + b.0, a.1 + b.1));
     let positions = layout::layered(nodes.len(), &edges.iter().map(|e| (e.from, e.to)).collect::<Vec<_>>());
     SolveOutcome::Solved(Plan {
         nodes: nodes.into_iter().zip(positions).map(|(kind, pos)| PlanNode { kind, pos }).collect(),
         edges,
         power_mw,
+        generated_mw,
     })
 }
 
@@ -262,6 +302,14 @@ fn explain_infeasible(data: &GameData, req: &SolveRequest, recipes: &[&Recipe]) 
         .filter(|t| !makeable.contains(t.item.as_str()))
         .map(|t| format!("{} can't be made with the enabled recipes and resources.", data.item_name(&t.item)))
         .collect();
+    if why.is_empty() && req.power.mode == PowerMode::Generate {
+        let fuelable = recipes
+            .iter()
+            .any(|r| r.is_generator() && r.ingredients.iter().all(|a| makeable.contains(a.item.as_str())));
+        if !fuelable {
+            why.push("None of the allowed generators can get fuel with the enabled recipes and resources. Allow another generator or enable the recipes for its fuel.".into());
+        }
+    }
     if why.is_empty() {
         why.push("Not enough raw resources for these rates. Lower the targets, raise resource limits, or enable alternate recipes.".into());
     }
@@ -340,6 +388,167 @@ mod tests {
         };
         let SolveOutcome::Infeasible(why) = solve(&data, &req) else { panic!("should be infeasible") };
         assert!(why[0].contains("Iron Plate"), "{why:?}");
+    }
+
+    const COAL_GEN: &str = "Generator__Build_GeneratorCoal_C__Desc_Coal_C";
+
+    fn machines_of(plan: &Plan, class: &str) -> f64 {
+        rate_of(plan, |k| match k {
+            PlanNodeKind::Recipe { recipe, machines } if recipe == class => Some(*machines),
+            _ => None,
+        })
+    }
+
+    fn resource(plan: &Plan, class: &str) -> f64 {
+        rate_of(plan, |k| match k {
+            PlanNodeKind::Resource { item, rate } if item == class => Some(*rate),
+            _ => None,
+        })
+    }
+
+    fn generate(generators: &[&str]) -> PowerSettings {
+        PowerSettings { mode: PowerMode::Generate, generators: generators.iter().map(|g| g.to_string()).collect() }
+    }
+
+    #[test]
+    fn iron_plates_with_their_own_coal_power() {
+        let Some(data) = game() else { return };
+        let req = SolveRequest {
+            targets: vec![Target { item: "Desc_IronPlate_C".into(), rate: 60.0 }],
+            enabled_recipes: standard(&data),
+            power: generate(&[COAL_GEN]),
+            ..Default::default()
+        };
+        let SolveOutcome::Solved(plan) = solve(&data, &req) else { panic!("infeasible") };
+        // Consumption (Docs mPowerConsumption): 3 Smelters x 4 MW + 3 Constructors x 4 MW.
+        let smelter = data.buildings["Build_SmelterMk1_C"].power_mw;
+        let constructor = data.buildings["Build_ConstructorMk1_C"].power_mw;
+        let used = 3.0 * smelter + 3.0 * constructor;
+        assert_eq!(used, 24.0);
+        assert!((plan.power_mw - used).abs() < 1e-6, "machines still use {} MW", plan.power_mw);
+        // Coal-Powered Generator (Docs): mPowerProduction 75 MW; Coal mEnergyValue 300 MJ;
+        // mSupplementalToPowerRatio 10 L of water per MJ.
+        let gen = &data.recipes[COAL_GEN];
+        assert_eq!(gen.generates_mw, 75.0);
+        let generators = used / gen.generates_mw; // 24 / 75 = 0.32
+        assert!((machines_of(&plan, COAL_GEN) - generators).abs() < 1e-6, "generators {}", machines_of(&plan, COAL_GEN));
+        assert!((plan.generated_mw - used).abs() < 1e-6, "generates exactly what it uses: {}", plan.generated_mw);
+        // Coal: 0.32 x 75 MW / 300 MJ x 60 = 4.8 per min.
+        assert!((resource(&plan, "Desc_Coal_C") - generators * 75.0 / 300.0 * 60.0).abs() < 1e-6);
+        assert!((resource(&plan, "Desc_Coal_C") - 4.8).abs() < 1e-6, "coal {}", resource(&plan, "Desc_Coal_C"));
+        // Water: 0.32 x 75 MW x 10 L/MJ x 60 s / 1000 = 14.4 m³/min.
+        assert!((resource(&plan, "Desc_Water_C") - 14.4).abs() < 1e-6, "water {}", resource(&plan, "Desc_Water_C"));
+        assert!((resource(&plan, "Desc_OreIron_C") - 90.0).abs() < 1e-6, "the product side is unchanged");
+        // Coal and water flow into the generators.
+        let gen_node = plan
+            .nodes
+            .iter()
+            .position(|n| matches!(&n.kind, PlanNodeKind::Recipe { recipe, .. } if recipe == COAL_GEN))
+            .unwrap();
+        let fed: Vec<&str> = plan.edges.iter().filter(|e| e.to == gen_node).map(|e| e.item.as_str()).collect();
+        assert!(fed.contains(&"Desc_Coal_C") && fed.contains(&"Desc_Water_C"), "{fed:?}");
+    }
+
+    #[test]
+    fn grid_mode_never_plans_generators() {
+        let Some(data) = game() else { return };
+        // Even with every recipe (generators included) in the recipe list.
+        let req = SolveRequest {
+            targets: vec![Target { item: "Desc_IronPlate_C".into(), rate: 60.0 }],
+            enabled_recipes: data.recipes.keys().cloned().collect(),
+            ..Default::default()
+        };
+        let SolveOutcome::Solved(plan) = solve(&data, &req) else { panic!("infeasible") };
+        assert!(plan
+            .nodes
+            .iter()
+            .all(|n| !matches!(&n.kind, PlanNodeKind::Recipe { recipe, .. } if data.recipes[recipe].is_generator())));
+        assert_eq!(plan.generated_mw, 0.0);
+    }
+
+    #[test]
+    fn fuel_generators_plan_the_refinery_chain() {
+        let Some(data) = game() else { return };
+        let fuel_gen = "Generator__Build_GeneratorFuel_C__Desc_LiquidFuel_C";
+        let req = SolveRequest {
+            targets: vec![Target { item: "Desc_IronPlate_C".into(), rate: 60.0 }],
+            enabled_recipes: standard(&data),
+            power: generate(&[fuel_gen]),
+            ..Default::default()
+        };
+        let SolveOutcome::Solved(plan) = solve(&data, &req) else { panic!("infeasible") };
+        // The refineries making the fuel need power too, so generation covers them as well.
+        assert!(plan.power_mw > 24.0, "refineries add to the load: {}", plan.power_mw);
+        assert!(plan.generated_mw >= plan.power_mw - 1e-6);
+        assert!(resource(&plan, "Desc_LiquidOil_C") > 0.0);
+        assert!((machines_of(&plan, fuel_gen) * 250.0 - plan.generated_mw).abs() < 1e-6);
+    }
+
+    #[test]
+    fn nuclear_waste_is_surplus() {
+        let Some(data) = game() else { return };
+        let nuclear = "Generator__Build_GeneratorNuclear_C__Desc_NuclearFuelRod_C";
+        let req = SolveRequest {
+            targets: vec![Target { item: "Desc_IronPlate_C".into(), rate: 600.0 }],
+            enabled_recipes: standard(&data),
+            power: generate(&[nuclear]),
+            ..Default::default()
+        };
+        let SolveOutcome::Solved(plan) = solve(&data, &req) else { panic!("infeasible") };
+        let plants = machines_of(&plan, nuclear);
+        assert!(plants > 0.0);
+        // 50 Uranium Waste per rod (mByproductAmount), 0.2 rods/min per plant: 10 per min per plant.
+        let waste = rate_of(&plan, |k| match k {
+            PlanNodeKind::Surplus { item, rate } if item == "Desc_NuclearWaste_C" => Some(*rate),
+            _ => None,
+        });
+        assert!((waste - plants * 10.0).abs() < 1e-4, "waste {waste} for {plants} plants");
+        // The fuel rods are made in the plan (from uranium, mined or converted).
+        let rods = &data.recipes["Recipe_NuclearFuelRod_C"];
+        let rod_makers = plants * 0.2 / rods.per_min(&rods.products[0]);
+        assert!((machines_of(&plan, "Recipe_NuclearFuelRod_C") - rod_makers).abs() < 1e-4);
+    }
+
+    #[test]
+    fn power_objective_builds_the_least_generation() {
+        let Some(data) = game() else { return };
+        let req = SolveRequest {
+            targets: vec![Target { item: "Desc_IronPlate_C".into(), rate: 60.0 }],
+            enabled_recipes: standard(&data),
+            objective: Objective::Power,
+            power: generate(&[COAL_GEN, "Generator__Build_GeneratorFuel_C__Desc_LiquidFuel_C"]),
+            ..Default::default()
+        };
+        let SolveOutcome::Solved(plan) = solve(&data, &req) else { panic!("infeasible") };
+        // Coal needs no extra machines, Fuel needs refineries: coal is the least power.
+        assert!((plan.generated_mw - 24.0).abs() < 1e-6, "generated {}", plan.generated_mw);
+        assert!((machines_of(&plan, COAL_GEN) - 0.32).abs() < 1e-6);
+    }
+
+    #[test]
+    fn generating_without_generators_is_explained() {
+        let Some(data) = game() else { return };
+        let mut req = SolveRequest {
+            targets: vec![Target { item: "Desc_IronPlate_C".into(), rate: 60.0 }],
+            enabled_recipes: standard(&data),
+            power: generate(&[]),
+            ..Default::default()
+        };
+        let SolveOutcome::Infeasible(why) = solve(&data, &req) else { panic!("should be infeasible") };
+        assert!(why[0].contains("generator"), "{why:?}");
+        // Fuel generators, but no recipe that makes Fuel.
+        req.power = generate(&["Generator__Build_GeneratorFuel_C__Desc_LiquidFuel_C"]);
+        req.enabled_recipes.retain(|r| !r.contains("Fuel"));
+        let SolveOutcome::Infeasible(why) = solve(&data, &req) else { panic!("should be infeasible") };
+        assert!(why[0].contains("fuel"), "{why:?}");
+    }
+
+    #[test]
+    fn old_requests_default_to_the_grid() {
+        let json = r#"{"targets":[],"inputs":[],"enabled_recipes":[],"resource_limits":{},"objective":"Power"}"#;
+        let req: SolveRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.power.mode, PowerMode::Grid);
+        assert_eq!(req.power.generators, vec![COAL_GEN.to_string()]);
     }
 
     #[test]

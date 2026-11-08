@@ -93,11 +93,7 @@ impl NodeKind {
     /// Item shown in the title bar.
     pub fn icon_item<'a>(&'a self, game: &'a GameData) -> Option<&'a str> {
         match self {
-            NodeKind::Recipe { recipe } => game
-                .recipes
-                .get(recipe)
-                .and_then(|r| r.products.first())
-                .map(|p| p.item.as_str()),
+            NodeKind::Recipe { recipe } => game.recipes.get(recipe).and_then(|r| r.icon_item()),
             NodeKind::Resource { item }
             | NodeKind::Input { item }
             | NodeKind::Output { item }
@@ -165,14 +161,14 @@ impl UserState {
         self.zoom.max(0.2)
     }
 
-    fn item_icon(&mut self, ui: &mut Ui, class: &str, size: f32) {
+    pub(crate) fn item_icon(&mut self, ui: &mut Ui, class: &str, size: f32) {
         let size = size * self.z();
         if let Some(a) = self.assets.as_mut() {
             a.item(ui, class, size);
         }
     }
 
-    fn ui_icon(&mut self, ui: &mut Ui, icon: UiIcon, size: f32, tint: Color32) {
+    pub(crate) fn ui_icon(&mut self, ui: &mut Ui, icon: UiIcon, size: f32, tint: Color32) {
         let size = size * self.z();
         if let Some(a) = self.assets.as_mut() {
             a.ui(ui, icon, size, tint);
@@ -618,6 +614,10 @@ impl NodeDataTrait for NodeData {
                     ui.colored_label(DANGER, "This recipe is not in the game data.");
                     return vec![];
                 };
+                if r.is_generator() {
+                    crate::power_ui::generator_footer(ui, s, graph, node_id, r);
+                    return vec![];
+                }
                 let machines = input_number(graph, node_id, MACHINES);
                 let clock = input_number(graph, node_id, CLOCK) / 100.0;
                 let power = s.nodes.get(&node_id).map(|n| n.power_mw).unwrap_or(0.0);

@@ -11,6 +11,7 @@ use crate::backend::Msg;
 use crate::dialogs::{Dialog, Pending};
 use crate::graph::*;
 use crate::portable::{self, FactoryFile};
+use fb_model::{PowerMode, PowerSettings};
 use egui::{vec2, Pos2, Rect, Vec2};
 use egui_node_graph2::{InputId, NodeId, OutputId};
 use serde_json::json;
@@ -144,8 +145,10 @@ impl FactoryApp {
             alternates_on: if most_on { Vec::new() } else { alts_on },
             all_alternates: most_on,
             alternates_off: if most_on { alts_off } else { Vec::new() },
-            standard_off: game.recipes.values().filter(|r| !r.alternate && !p.enabled.contains(&r.class)).map(|r| r.class.clone()).collect(),
+            standard_off: game.recipes.values().filter(|r| !r.alternate && !r.is_generator() && !p.enabled.contains(&r.class)).map(|r| r.class.clone()).collect(),
             limits: p.limits.iter().filter(|(k, v)| game.resource_limits.get(*k) != Some(*v)).map(|(k, v)| (k.clone(), *v)).collect(),
+            generate_power: p.power.mode == PowerMode::Generate,
+            generators: (p.power.generators != PowerSettings::default().generators).then(|| p.power.generators.clone()),
         };
         f
     }
@@ -153,7 +156,7 @@ impl FactoryApp {
     fn planner_from_portable(&self, plan: &portable::Plan) -> Planner {
         let game = &self.user.game;
         let mut enabled: std::collections::BTreeSet<String> =
-            game.recipes.values().filter(|r| !r.alternate && !plan.standard_off.contains(&r.class)).map(|r| r.class.clone()).collect();
+            game.recipes.values().filter(|r| !r.alternate && !r.is_generator() && !plan.standard_off.contains(&r.class)).map(|r| r.class.clone()).collect();
         if plan.all_alternates {
             enabled.extend(game.recipes.values().filter(|r| r.alternate && !plan.alternates_off.contains(&r.class)).map(|r| r.class.clone()));
         }
@@ -171,6 +174,13 @@ impl FactoryApp {
             enabled,
             limits,
             recipe_filter: self.planner.recipe_filter.clone(),
+            power: PowerSettings {
+                mode: if plan.generate_power { PowerMode::Generate } else { PowerMode::Grid },
+                generators: match &plan.generators {
+                    Some(list) => list.iter().filter(|c| game.recipes.get(*c).is_some_and(|r| r.is_generator())).cloned().collect(),
+                    None => PowerSettings::default().generators,
+                },
+            },
         }
     }
 
@@ -386,6 +396,9 @@ impl FactoryApp {
         let mut out = String::new();
         out.push_str(&format!("{}\n", self.project_name.clone().unwrap_or_else(|| "Untitled factory".into())));
         out.push_str(&format!("Power: {} MW\n", crate::fmt::fmt_num(s.power_mw)));
+        if let Some(mw) = s.generation {
+            out.push_str(&format!("Power production: {} MW\n", crate::fmt::fmt_num(mw)));
+        }
         if !s.outputs.is_empty() {
             out.push_str("\nProducts\n");
             for (item, got, want) in &s.outputs {

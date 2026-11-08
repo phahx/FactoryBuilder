@@ -51,8 +51,15 @@ impl Catalog {
             let Some(b) = game.buildings.get(&r.building) else {
                 continue;
             };
-            let Some(icon) = r.products.first().map(|p| p.item.clone()) else {
+            let Some(icon) = r.icon_item().map(str::to_string) else {
                 continue;
+            };
+            // Generators make power, not (only) items.
+            let made = if r.is_generator() {
+                let mw = format!("{} MW", fmt_num(r.generates_mw));
+                if r.products.is_empty() { mw } else { format!("{mw}, {}", names(&r.products)) }
+            } else {
+                names(&r.products)
             };
             entries.push(Entry {
                 template: Template::Recipe(r.class.clone()),
@@ -62,7 +69,7 @@ impl Catalog {
                     "{} · {} › {}",
                     b.name,
                     names(&r.ingredients),
-                    names(&r.products)
+                    made
                 ),
                 group: b.name.clone(),
                 icon,

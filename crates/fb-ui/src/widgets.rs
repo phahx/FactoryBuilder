@@ -117,6 +117,8 @@ pub fn tabs<T: PartialEq + Copy>(ui: &mut Ui, value: &mut T, options: &[(T, &str
             let selected = *value == *v;
             let (rect, resp) =
                 ui.allocate_exact_size(vec2(each, ui.spacing().interact_size.y), Sense::click());
+            #[cfg(test)]
+            TEST_BUTTONS.with(|b| b.borrow_mut().push((label.to_string(), rect, true)));
             let (fill, fg) = if selected {
                 (TAB_SELECTED, TEXT_DARK)
             } else if resp.hovered() {
