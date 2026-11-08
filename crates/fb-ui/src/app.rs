@@ -134,6 +134,8 @@ pub struct FactoryApp {
     pub(crate) wire_labels: bool,
     /// Graph or Map tab.
     pub(crate) view: crate::map::View,
+    /// Fit the view to the selected nodes on the next frame.
+    pub(crate) frame_selected: bool,
     pub(crate) map: crate::map::MapState,
     #[cfg(test)]
     pub(crate) wire_label_texts: Vec<String>,
@@ -223,6 +225,7 @@ impl FactoryApp {
             wire_flow: Default::default(),
             wire_labels: true,
             view: Default::default(),
+            frame_selected: false,
             map: Default::default(),
             #[cfg(test)]
             wire_label_texts: Vec::new(),
@@ -512,7 +515,7 @@ impl FactoryApp {
                 | Msg::Extract(_)
                 | Msg::DevDone(_)) => self.on_setup_msg(ctx, m),
                 m @ (Msg::Saves(_) | Msg::PickedSaveGame(_) | Msg::SaveUnlocks(_)) => self.on_progress_msg(ctx, m),
-                m @ (Msg::MapInfo(_) | Msg::WorldSessions(_) | Msg::WorldLoaded { .. } | Msg::WorldLatest(_)) => self.on_map_msg(m),
+                m @ (Msg::MapInfo(_) | Msg::WorldSessions(_) | Msg::WorldLoaded { .. } | Msg::WorldLatest(_) | Msg::SelftestSave(_)) => self.on_map_msg(m),
                 Msg::Solved(r) => {
                     self.solving = false;
                     match r {
@@ -1268,11 +1271,25 @@ impl FactoryApp {
                     self.dialog = Dialog::None;
                     self.wizard = Some(w);
                 }
+                // The Map tab with the self-test's sample save.
+                "map" | "map_zoom" => {
+                    self.dialog = Dialog::None;
+                    self.view = crate::map::View::Map;
+                    if self.map.world.is_none() {
+                        self.backend.call("selftest_save", json!({}), Msg::SelftestSave);
+                    }
+                    self.map.selftest_zoom = view == "map_zoom";
+                }
+                // Import the zoomed-in selection and show the result.
+                "map_import" => {
+                    self.import_selection(_ctx);
+                }
                 "settings_dev" => {
                     let s = self.status.as_ref().map(|s| s.settings.clone()).unwrap_or_default();
                     self.dialog = Dialog::settings(&s);
                 }
                 "export" => {
+                    self.view = crate::map::View::Graph;
                     self.room.reset();
                     self.dialog = Dialog::None;
                     self.start_image_export_for_selftest(_ctx);
@@ -1459,7 +1476,11 @@ impl FactoryApp {
         }
         if self.frame_all {
             self.frame_all = false;
-            self.fit_view(ui);
+            self.fit_view(ui, false);
+        }
+        if self.frame_selected {
+            self.frame_selected = false;
+            self.fit_view(ui, true);
         }
         if let Some(node) = self.focus_node.take() {
             if let Some(pos) = self.state.node_positions.get(node).copied() {
@@ -1541,13 +1562,16 @@ impl FactoryApp {
     }
 
     /// Fit every node into view (View > Frame all, Home).
-    fn fit_view(&mut self, ui: &egui::Ui) {
+    /// Zooms and pans so every node (or, with `selected`, the selected
+    /// nodes) fits the view.
+    fn fit_view(&mut self, ui: &egui::Ui, selected: bool) {
         let rect = ui.max_rect();
         let z = self.state.pan_zoom.zoom;
         let w = theme::graph_style().node_width;
         let size = |id: NodeId| vec2(w, self.node_heights.get(&id).copied().unwrap_or(260.0));
+        let wanted = |id: NodeId| !selected || self.state.selected_nodes.contains(&id);
         let mut bounds = egui::Rect::NOTHING;
-        for (id, p) in self.state.node_positions.iter() {
+        for (id, p) in self.state.node_positions.iter().filter(|(id, _)| wanted(*id)) {
             bounds = bounds.union(egui::Rect::from_min_size(*p, size(id) * z));
         }
         if !bounds.is_positive() {
@@ -1564,7 +1588,7 @@ impl FactoryApp {
         }
         self.state.pan_zoom.zoom(ui.clip_rect(), ui.style(), k);
         let mut b = egui::Rect::NOTHING;
-        for (id, p) in self.state.node_positions.iter() {
+        for (id, p) in self.state.node_positions.iter().filter(|(id, _)| wanted(*id)) {
             b = b.union(egui::Rect::from_min_size(*p, size(id) * target));
         }
         self.state.pan_zoom.pan = rect.size() / 2.0 - b.center().to_vec2();

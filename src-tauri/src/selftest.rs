@@ -45,7 +45,7 @@ const PROBE_JS: &str = r#"
   // then read the canvas in a later animation frame (before it clears).
   const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
   r.screenshots = [];
-  for (const view of ['graph', 'zoomed', 'finder', 'finder_search', 'menu', 'room_cursors', 'room_info', 'setup_install', 'setup_game', 'setup_icons', 'setup_name', 'settings_dev', 'export']) {
+  for (const view of ['graph', 'zoomed', 'finder', 'finder_search', 'menu', 'room_cursors', 'room_info', 'setup_install', 'setup_game', 'setup_icons', 'setup_name', 'settings_dev', 'map', 'map_zoom', 'map_import', 'export']) {
     try {
       window.__fbSelftestView = view;
       for (let i = 0; i < 6; i++) {
@@ -90,6 +90,15 @@ fn write(app: &AppHandle, out: &PathBuf, probe: &str) {
     let report = format!("{{\"calls_before_probe\":{},\"probe\":{}}}", serde_json::to_string(&calls).unwrap(), probe);
     let _ = std::fs::write(out, report);
     app.exit(0);
+}
+
+/// Self-test only: a save to show on the Map tab (`FB_SELFTEST_SAVE`), so
+/// the map can be checked with a real 1.x save without touching the game's
+/// own save folder. None outside the self-test.
+#[tauri::command]
+pub fn selftest_save() -> Option<String> {
+    std::env::var_os("FB_SELFTEST")?;
+    std::env::var("FB_SELFTEST_SAVE").ok()
 }
 
 #[tauri::command]

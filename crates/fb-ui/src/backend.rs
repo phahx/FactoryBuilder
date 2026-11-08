@@ -84,6 +84,8 @@ pub enum Msg {
         result: Result<fb_model::world::World, String>,
     },
     WorldLatest(Result<Option<fb_model::saves::SaveSummary>, String>),
+    /// Self-test: the sample save to show on the Map tab.
+    SelftestSave(Result<Option<String>, String>),
 }
 
 #[cfg(not(target_arch = "wasm32"))]

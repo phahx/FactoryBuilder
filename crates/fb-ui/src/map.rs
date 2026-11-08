@@ -52,6 +52,9 @@ pub struct MapState {
     carrier_boxes: Vec<[f32; 4]>,
     /// The map area on screen last frame.
     pub rect: Option<Rect>,
+    /// Self-test: zoom into the busiest part of the save and select it.
+    pub selftest_zoom: bool,
+    selftest_zoomed: bool,
 }
 
 impl MapState {
@@ -135,6 +138,10 @@ impl FactoryApp {
                     Err(e) => self.map.world_error = Some(e),
                 }
             }
+            Msg::SelftestSave(Ok(Some(path))) => {
+                self.map.session = Some("Self-test".into());
+                self.load_world(path);
+            }
             Msg::WorldLatest(r) => {
                 if let Ok(Some(latest)) = r {
                     let current = self.map.world.as_ref().map(|w| w.save.path.clone());
@@ -160,7 +167,7 @@ impl FactoryApp {
         ctx.request_repaint_after(std::time::Duration::from_secs_f64(FOLLOW_SECONDS));
     }
 
-    fn import_selection(&mut self, ctx: &egui::Context) {
+    pub(crate) fn import_selection(&mut self, ctx: &egui::Context) {
         let Some(world) = self.map.world.clone() else { return };
         let game = self.user.game.clone();
         let (file, report) = crate::map_import::import(&world, &self.map.selected, &game, self.map.info.as_ref());
@@ -170,6 +177,8 @@ impl FactoryApp {
         }
         self.import_factory(ctx, file);
         self.view = View::Graph;
+        // Show what was imported (it's placed beside the existing graph).
+        self.frame_selected = true;
         let mut text = format!("Imported {} machines as {} nodes.", report.machines, report.nodes);
         if report.left_out > 0 {
             text += &format!(" {} left out (no recipe set, or generators).", report.left_out);
@@ -224,7 +233,8 @@ pub fn map_ui(app: &mut FactoryApp, ui: &mut egui::Ui) {
             String::new()
         };
         let err = app.map.world_error.is_some();
-        ui.label(RichText::new(status).small().color(if err { DANGER } else { TEXT_DIM }));
+        // Right-hand controls first; the status takes what's left and
+        // truncates (full text on hover) instead of running under them.
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             let n = app.map.selected.len();
             import = widgets::button_enabled(ui, "Import into planner", n > 0).on_hover_text("Adds the selected machines to the graph, one node per recipe.").clicked();
@@ -234,6 +244,10 @@ pub fn map_ui(app: &mut FactoryApp, ui: &mut egui::Ui) {
             } else if app.map.world.is_some() {
                 ui.label(RichText::new("Drag on the map to select machines").small().color(TEXT_DIM));
             }
+            ui.add_space(12.0);
+            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                ui.add(egui::Label::new(RichText::new(&status).small().color(if err { DANGER } else { TEXT_DIM })).truncate()).on_hover_text(&status);
+            });
         });
     }
     if let Some(s) = pick {
@@ -278,6 +292,29 @@ pub fn map_ui(app: &mut FactoryApp, ui: &mut egui::Ui) {
         state.scale = (rect.width().min(rect.height()) as f64) / info.size;
         state.center = (info.x_min + info.size / 2.0, info.y_min + info.size / 2.0);
         state.fitted = true;
+    }
+    // Self-test: centre on the median machine, zoomed in, with the machines
+    // near it selected (so the screenshot shows marks and the selection).
+    if state.selftest_zoom && !state.selftest_zoomed {
+        if let Some(w) = &state.world {
+            if !w.machines.is_empty() {
+                // The machine with the most others within 100 m.
+                let busiest = w
+                    .machines
+                    .iter()
+                    .max_by_key(|a| w.machines.iter().filter(|b| (a.x - b.x).abs() < 10_000.0 && (a.y - b.y).abs() < 10_000.0).count())
+                    .unwrap();
+                let (cx, cy) = (busiest.x as f64, busiest.y as f64);
+                state.center = (cx, cy);
+                state.scale = 0.012;
+                state.selected = w.machines.iter().filter(|m| ((m.x as f64 - cx).abs() < 4000.0) && ((m.y as f64 - cy).abs() < 3000.0)).map(|m| m.id).collect();
+                state.selftest_zoomed = true;
+            }
+        }
+    } else if !state.selftest_zoom && state.selftest_zoomed {
+        state.fitted = false;
+        state.selftest_zoomed = false;
+        state.selected.clear();
     }
     // Zoom around the pointer; pan with middle-drag or Ctrl+drag.
     let fit = (rect.width().min(rect.height()) as f64) / info.size;

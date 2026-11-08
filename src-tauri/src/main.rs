@@ -649,6 +649,10 @@ fn main() {
             };
             let settings = load_settings(&data_dir);
             let allowed = files::Allowed::default();
+            // Self-test: the sample save it shows on the Map tab may be read.
+            if let (Some(_), Some(save)) = (&selftest_out, std::env::var_os("FB_SELFTEST_SAVE")) {
+                allowed.allow(Path::new(&save));
+            }
             let startup = files::startup_file_from_args().map(|p| {
                 allowed.allow(&p);
                 p.to_string_lossy().into_owned()
@@ -719,6 +723,7 @@ fn main() {
             room_send,
             room_poll,
             selftest::selftest_report,
+            selftest::selftest_save,
             selftest::selftest_screenshot
         ])
         .run(tauri::generate_context!())
