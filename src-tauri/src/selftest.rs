@@ -45,7 +45,7 @@ const PROBE_JS: &str = r#"
   // then read the canvas in a later animation frame (before it clears).
   const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
   r.screenshots = [];
-  for (const view of ['graph', 'zoomed', 'finder', 'finder_search', 'menu', 'room_cursors', 'room_info', 'setup_install', 'setup_game', 'setup_icons', 'setup_name', 'settings_dev', 'map', 'map_zoom', 'map_close', 'map_import', 'export', 'frames', 'project', 'project_menu', 'project_tab']) {
+  for (const view of ['graph', 'zoomed', 'finder', 'finder_search', 'menu', 'room_cursors', 'room_info', 'setup_install', 'setup_game', 'setup_icons', 'setup_name', 'settings_dev', 'map', 'map_zoom', 'map_close', 'map_import', 'export', 'frames', 'project', 'project_menu', 'tab_menu', 'project_tab']) {
     try {
       window.__fbSelftestView = view;
       for (let i = 0; i < 6; i++) {
@@ -76,6 +76,7 @@ const PROBE_JS: &str = r#"
     ['map_zoom', 'tip_map_node', 853, 251],
     ['map_zoom', 'tip_map_node_taken', 869, 433], ['map_zoom', 'tip_map_node_right', 1118, 633],
     ['map_close', 'tip_map_machine', 540, 300], ['map_close', 'tip_map_splitter', 463, 145],
+    ['project_menu', 'hover_menu_row', 520, 270],
   ];
   const hit = document.elementFromPoint(900, 400);
   r.hit_test = hit ? (hit.tagName + '#' + hit.id) : null;
@@ -106,8 +107,9 @@ pub fn start(app: AppHandle, out: PathBuf) {
                 write(&app, &out, &format!("{{\"eval_error\":{:?}}}", e.to_string()));
             }
         }
-        // Safety net if the probe never reports back.
-        std::thread::sleep(Duration::from_secs(45));
+        // Safety net if the probe never reports back (it takes about a
+        // second per view and two per hover tip).
+        std::thread::sleep(Duration::from_secs(150));
         write(&app, &out, "{\"timeout\":true}");
     });
 }

@@ -373,6 +373,8 @@ impl FactoryApp {
         self.frames = Default::default();
         self.master_menu = None;
         self.block_spot = None;
+        self.node_rename = None;
+        self.snap_raw.clear();
     }
 
     /// Opens document `id` in the editor (its tab, or the master graph).
@@ -779,7 +781,7 @@ impl FactoryApp {
             g[n].inputs.iter().filter(|(_, x)| matches!(g[*x].value, PortValue::Item(_))).position(|(_, x)| *x == i)
         };
         let output_index = |o: OutputId| g[g[o].node].outputs.iter().position(|(_, x)| *x == o);
-        let io_node = |kind, item: &str, rate: f64, x: f32, y: f32| Node { kind, class: item.to_string(), machines: None, clock: None, sloops: None, rate: Some((rate * 1e4).round() / 1e4), color: None, x, y };
+        let io_node = |kind, item: &str, rate: f64, x: f32, y: f32| Node { kind, class: item.to_string(), machines: None, clock: None, sloops: None, rate: Some((rate * 1e4).round() / 1e4), name: None, color: None, x, y };
         let mut row = 0.0;
         for (item, list) in &into {
             let at = f.nodes.len();
@@ -901,7 +903,7 @@ impl FactoryApp {
         if self.docs.iter().any(|d| d.name == "Smelting") {
             return;
         }
-        let node = |kind, class: &str, machines: Option<f64>, rate: Option<f64>, x: f32| Node { kind, class: class.into(), machines, clock: machines.map(|_| 100.0), sloops: None, rate, color: None, x, y: 0.0 };
+        let node = |kind, class: &str, machines: Option<f64>, rate: Option<f64>, x: f32| Node { kind, class: class.into(), machines, clock: machines.map(|_| 100.0), sloops: None, rate, name: None, color: None, x, y: 0.0 };
         let mut a = FactoryFile::new(Some("Smelting".into()));
         a.nodes = vec![
             node(Kind::Resource, "Desc_OreIron_C", None, Some(60.0), 0.0),

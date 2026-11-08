@@ -7,7 +7,7 @@
 //! and frame inside it; the corner handle resizes it; double-clicking the
 //! title renames it; right-clicking the title bar opens its menu.
 
-use crate::app::{FactoryApp, GAME_COLORS};
+use crate::app::FactoryApp;
 use crate::theme::{self, *};
 use egui::{pos2, vec2, Color32, CursorIcon, Pos2, Rect, Sense, Shape, Stroke};
 use egui_node_graph2::NodeId;
@@ -44,9 +44,11 @@ impl CommentFrame {
 }
 
 enum Drag {
-    /// Moving a frame and what was inside it when the drag started.
-    Move { nodes: Vec<NodeId>, frames: Vec<u32> },
-    Resize,
+    /// Moving a frame and what was inside it when the drag started; `raw`
+    /// is where the frame would be without snapping (graph units).
+    Move { nodes: Vec<NodeId>, frames: Vec<u32>, raw: Pos2 },
+    /// `raw` is the bottom-right corner without snapping.
+    Resize { raw: Pos2 },
 }
 
 /// What the frames are doing on screen (not saved).
@@ -171,7 +173,7 @@ impl FactoryApp {
             crate::widgets::TEST_BUTTONS.with(|b| b.borrow_mut().push((format!("Frame {}", f.title), header, true)));
             if hr.drag_started() {
                 let (nodes, frames) = self.frame_contents(rect, f.id);
-                self.frames.drag = Some((f.id, Drag::Move { nodes, frames }));
+                self.frames.drag = Some((f.id, Drag::Move { nodes, frames, raw: pos2(f.x, f.y) }));
                 self.frames.selected = Some(f.id);
                 clicked_header = true;
             }
@@ -192,34 +194,45 @@ impl FactoryApp {
             let rr = ui.interact(handle, id.with("resize"), if under_node || busy { Sense::hover() } else { Sense::drag() });
             let rr = if under_node || busy { rr } else { rr.on_hover_cursor(CursorIcon::ResizeNwSe) };
             if rr.drag_started() {
-                self.frames.drag = Some((f.id, Drag::Resize));
+                self.frames.drag = Some((f.id, Drag::Resize { raw: f.rect().max }));
             }
         }
         ui.painter().set(slot, Shape::Vec(shapes));
 
         // An ongoing drag.
-        if let Some((id, drag)) = &self.frames.drag {
+        let snap = self.snap;
+        let grid = |p: Pos2| if snap { pos2(crate::app::snap_to_grid(p.x), crate::app::snap_to_grid(p.y)) } else { p };
+        if let Some((id, drag)) = self.frames.drag.as_mut() {
             let id = *id;
             let delta = ui.input(|i| i.pointer.delta());
             let released = !ui.input(|i| i.pointer.primary_down());
             if delta != egui::Vec2::ZERO {
                 let d = delta / z.max(0.01);
+                let Some(at) = self.planner.frames.iter().find(|f| f.id == id).map(|f| f.rect()) else {
+                    self.frames.drag = None;
+                    return menu_opened;
+                };
                 match drag {
-                    Drag::Move { nodes, frames } => {
-                        for n in nodes {
+                    Drag::Move { nodes, frames, raw } => {
+                        // The frame lands on the grid; its contents keep their place in it.
+                        *raw += d;
+                        let step = grid(*raw) - at.min;
+                        for n in nodes.iter() {
                             if let Some(p) = self.state.node_positions.get_mut(*n) {
-                                *p += delta;
+                                *p += step * z;
                             }
                         }
                         for f in self.planner.frames.iter_mut().filter(|f| f.id == id || frames.contains(&f.id)) {
-                            f.x += d.x;
-                            f.y += d.y;
+                            f.x += step.x;
+                            f.y += step.y;
                         }
                     }
-                    Drag::Resize => {
+                    Drag::Resize { raw } => {
+                        *raw += d;
+                        let corner = grid(*raw);
                         if let Some(f) = self.planner.frames.iter_mut().find(|f| f.id == id) {
-                            f.w = (f.w + d.x).max(MIN_W);
-                            f.h = (f.h + d.y).max(MIN_H);
+                            f.w = (corner.x - f.x).max(MIN_W);
+                            f.h = (corner.y - f.y).max(MIN_H);
                         }
                     }
                 }
@@ -279,61 +292,27 @@ impl FactoryApp {
             self.frames.menu = None;
             return;
         };
-        let mut close = false;
         let (mut rename, mut delete, mut select) = (false, false, false);
-        let mut pick: Option<Option<[u8; 3]>> = None;
-        let area = egui::Area::new(egui::Id::new("frame_menu")).order(egui::Order::Foreground).fixed_pos(pos).show(ctx, |ui| {
-            egui::Frame::popup(ui.style()).show(ui, |ui| {
-                ui.set_min_width(180.0);
-                if ui.add(egui::Button::new("Rename").shortcut_text("Double-click")).clicked() {
-                    rename = true;
-                    close = true;
-                }
-                if ui.button("Select what's inside").clicked() {
-                    select = true;
-                    close = true;
-                }
-                if ui.button("Delete frame").on_hover_text("Removes the frame; what's inside stays.").clicked() {
-                    delete = true;
-                    close = true;
-                }
-                ui.separator();
-                ui.label(egui::RichText::new("Colour").small().color(TEXT_DIM));
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 4.0;
-                    if crate::app::swatch(ui, self.user.assets.as_mut(), None, f.color.is_none(), "No colour").clicked() {
-                        pick = Some(None);
-                    }
-                    for (name, rgb) in GAME_COLORS {
-                        if crate::app::swatch(ui, self.user.assets.as_mut(), Some(rgb), f.color == Some(rgb), name).clicked() {
-                            pick = Some(Some(rgb));
-                        }
-                    }
-                });
-                match self.custom_color {
-                    None => {
-                        if ui.button("Custom colour…").clicked() {
-                            self.custom_color = Some(f.color.unwrap_or([0xE5, 0x93, 0x44]));
-                        }
-                    }
-                    Some(rgb) => {
-                        let mut c = Color32::from_rgb(rgb[0], rgb[1], rgb[2]);
-                        if egui::color_picker::color_picker_color32(ui, &mut c, egui::color_picker::Alpha::Opaque) {
-                            self.custom_color = Some([c.r(), c.g(), c.b()]);
-                            pick = Some(Some([c.r(), c.g(), c.b()]));
-                        }
-                    }
-                }
-            });
+        let mut custom = self.custom_color;
+        let mut assets = self.user.assets.take();
+        let mut pick = None;
+        let menu = crate::menus::popup(ctx, "frame_menu", pos, &f.title, |ui| {
+            use crate::menus::{item, separator};
+            rename = item(ui, "Rename", "Double-click", true).clicked();
+            select = item(ui, "Select what's inside", "", true).clicked();
+            delete = item(ui, "Delete frame", "Del", true).on_hover_text("Removes the frame; what's inside stays.").clicked();
+            separator(ui);
+            pick = crate::menus::colours(ui, assets.as_mut(), f.color, &mut custom, &mut Vec::new());
         });
+        self.user.assets = assets;
+        self.custom_color = custom;
         if let Some(color) = pick {
             if let Some(f) = self.planner.frames.iter_mut().find(|f| f.id == id) {
                 f.color = color;
             }
             self.changed();
         }
-        let clicked_elsewhere = ctx.input(|i| i.pointer.any_pressed()) && !area.response.contains_pointer();
-        if close || clicked_elsewhere || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+        if rename || select || delete || crate::menus::dismissed(ctx, &menu) {
             self.frames.menu = None;
         }
         if rename {

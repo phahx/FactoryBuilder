@@ -499,6 +499,30 @@ pub struct Settings {
     /// game updates it no longer matches and the app offers to extract again.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub icons_stamp: Option<String>,
+    /// The View menu's toggles.
+    #[serde(default)]
+    pub view: ViewSettings,
+}
+
+/// The View menu's toggles, remembered between sessions.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ViewSettings {
+    #[serde(default)]
+    pub snap_to_grid: bool,
+    #[serde(default = "yes")]
+    pub wire_labels: bool,
+    #[serde(default = "yes")]
+    pub minimap: bool,
+}
+
+fn yes() -> bool {
+    true
+}
+
+impl Default for ViewSettings {
+    fn default() -> Self {
+        ViewSettings { snap_to_grid: false, wire_labels: true, minimap: true }
+    }
 }
 
 pub const DEFAULT_ROOM_PORT: u16 = 47860;
@@ -535,6 +559,7 @@ impl Default for Settings {
             recent: Vec::new(),
             setup_done: false,
             icons_stamp: None,
+            view: ViewSettings::default(),
         }
     }
 }

@@ -21,7 +21,6 @@ const CLOSE: f32 = 18.0;
 enum TabAction {
     Open(u32),
     Close(u32),
-    Rename(u32),
     Map,
     New,
 }
@@ -118,16 +117,9 @@ pub fn tab_bar(app: &mut FactoryApp, ui: &mut Ui, bar: Rect) {
         if r.middle_clicked() {
             action = Some(TabAction::Close(id));
         }
-        r.context_menu(|ui| {
-            if ui.button("Rename…").clicked() {
-                action = Some(TabAction::Rename(id));
-                ui.close_menu();
-            }
-            if ui.button("Close tab").clicked() {
-                action = Some(TabAction::Close(id));
-                ui.close_menu();
-            }
-        });
+        if r.secondary_clicked() {
+            app.factory_menu = r.interact_pointer_pos().map(|p| (id, p));
+        }
         x += w + 2.0;
     }
     // New factory.
@@ -158,10 +150,52 @@ pub fn tab_bar(app: &mut FactoryApp, ui: &mut Ui, bar: Rect) {
             app.switch_to = Some(id);
         }
         Some(TabAction::Close(id)) => app.close_tab(id),
-        Some(TabAction::Rename(id)) => app.dialog = Dialog::RenameFactory { id, name: app.doc_name(id) },
         Some(TabAction::Map) => app.view = View::Map,
         Some(TabAction::New) => app.new_factory(),
         None => {}
+    }
+}
+
+/// Right-click on a factory's tab or its row in the factory list.
+pub fn factory_menu(app: &mut FactoryApp, ctx: &egui::Context) {
+    let Some((id, pos)) = app.factory_menu else { return };
+    if app.doc(id).is_none() {
+        app.factory_menu = None;
+        return;
+    }
+    let tabbed = app.tabs.contains(&id);
+    let mut pick = None;
+    let menu = crate::menus::popup(ctx, "factory_menu", pos, &app.doc_name(id), |ui| {
+        use crate::menus::{item, separator};
+        if item(ui, "Open", "", true).clicked() {
+            pick = Some(ListAction::Open(id));
+        }
+        if item(ui, "Rename…", "", true).clicked() {
+            pick = Some(ListAction::Rename(id));
+        }
+        if item(ui, "Duplicate", "", true).clicked() {
+            pick = Some(ListAction::Duplicate(id));
+        }
+        if tabbed && item(ui, "Close tab", "Middle-click", true).on_hover_text("The factory stays in the project.").clicked() {
+            pick = Some(ListAction::Close(id));
+        }
+        separator(ui);
+        if item(ui, "Delete…", "", true).clicked() {
+            pick = Some(ListAction::Delete(id));
+        }
+    });
+    if pick.is_some() || crate::menus::dismissed(ctx, &menu) {
+        app.factory_menu = None;
+    }
+    match pick {
+        Some(ListAction::Open(id)) => app.switch_to = Some(id),
+        Some(ListAction::Rename(id)) => app.dialog = Dialog::RenameFactory { id, name: app.doc_name(id) },
+        Some(ListAction::Duplicate(id)) => {
+            app.duplicate_factory(id);
+        }
+        Some(ListAction::Close(id)) => app.close_tab(id),
+        Some(ListAction::Delete(id)) => app.dialog = Dialog::DeleteFactories { ids: vec![id] },
+        _ => {}
     }
 }
 
@@ -173,21 +207,14 @@ pub fn master_canvas_menu(app: &mut FactoryApp, ctx: &egui::Context) {
         return;
     }
     let mut pick = None;
-    let area = egui::Area::new(egui::Id::new("master_menu")).order(egui::Order::Foreground).fixed_pos(pos).show(ctx, |ui| {
-        egui::Frame::popup(ui.style()).show(ui, |ui| {
-            ui.set_min_width(220.0);
-            for (k, label) in ["New factory", "Add factory file…", "Add factory from a share code…"].into_iter().enumerate() {
-                let r = ui.button(label);
-                #[cfg(test)]
-                widgets::TEST_BUTTONS.with(|b| b.borrow_mut().push((label.to_string(), r.rect, true)));
-                if r.clicked() {
-                    pick = Some(k);
-                }
+    let menu = crate::menus::popup(ctx, "master_menu", pos, "Add factory", |ui| {
+        for (k, label) in ["New factory", "Add factory file…", "Add factory from a share code…"].into_iter().enumerate() {
+            if crate::menus::item(ui, label, "", true).clicked() {
+                pick = Some(k);
             }
-        });
+        }
     });
-    let clicked_elsewhere = ctx.input(|i| i.pointer.any_pressed()) && !area.response.contains_pointer();
-    if pick.is_some() || clicked_elsewhere || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+    if pick.is_some() || crate::menus::dismissed(ctx, &menu) {
         app.master_menu = None;
     }
     match pick {
@@ -214,6 +241,7 @@ fn padded(ui: &mut Ui, add: impl FnOnce(&mut Ui)) {
 }
 
 enum ListAction {
+    Close(u32),
     Open(u32),
     Rename(u32),
     Duplicate(u32),
@@ -232,6 +260,7 @@ pub fn factories_panel(app: &mut FactoryApp, ui: &mut Ui) {
     }
     let infos = app.factory_infos();
     let mut action = None;
+    let mut menu_for = None;
     let Some(assets) = app.user.assets.as_mut() else { return };
     padded(ui, |ui| {
         ui.spacing_mut().item_spacing.y = 0.0;
@@ -261,14 +290,9 @@ pub fn factories_panel(app: &mut FactoryApp, ui: &mut Ui) {
             if row.clicked() {
                 action = Some(ListAction::Open(*id));
             }
-            row.context_menu(|ui| {
-                for (label, a) in [("Open", ListAction::Open(*id)), ("Rename…", ListAction::Rename(*id)), ("Duplicate", ListAction::Duplicate(*id)), ("Delete…", ListAction::Delete(*id))] {
-                    if ui.button(label).clicked() {
-                        action = Some(a);
-                        ui.close_menu();
-                    }
-                }
-            });
+            if row.secondary_clicked() {
+                menu_for = row.interact_pointer_pos().map(|p| (*id, p));
+            }
         }
         ui.add_space(6.0);
         if widgets::add_row(ui, assets, "New factory").clicked() {
@@ -286,6 +310,9 @@ pub fn factories_panel(app: &mut FactoryApp, ui: &mut Ui) {
     if matches!(action, Some(ListAction::Open(_) | ListAction::New)) {
         app.room.following = None;
     }
+    if menu_for.is_some() {
+        app.factory_menu = menu_for;
+    }
     match action {
         Some(ListAction::Open(id)) => app.switch_to = Some(id),
         Some(ListAction::Rename(id)) => app.dialog = Dialog::RenameFactory { id, name: app.doc_name(id) },
@@ -296,6 +323,7 @@ pub fn factories_panel(app: &mut FactoryApp, ui: &mut Ui) {
         Some(ListAction::New) => app.new_factory(),
         Some(ListAction::AddFile) => app.pick_open(crate::app_files::OpenPurpose::AddFactory),
         Some(ListAction::AddCode) => app.dialog = Dialog::share_code(crate::dialogs::ShareMode::AddFactory),
+        Some(ListAction::Close(id)) => app.close_tab(id),
         None => {}
     }
 }

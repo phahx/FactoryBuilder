@@ -15,6 +15,7 @@ pub mod map_import;
 pub mod fmt;
 pub mod graph;
 pub mod menu;
+pub mod menus;
 pub mod overview_extra;
 pub mod panels;
 pub mod portable;

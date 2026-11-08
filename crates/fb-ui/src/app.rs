@@ -167,6 +167,22 @@ pub struct FactoryApp {
     /// A factory being added from that menu (via a file or share code) goes
     /// here, and the master graph stays open.
     pub(crate) block_spot: Option<egui::Pos2>,
+    /// A factory's right-click menu (from its tab or the factory list).
+    pub(crate) factory_menu: Option<(u32, egui::Pos2)>,
+    /// Node being renamed (F2), and the text so far.
+    pub(crate) node_rename: Option<(NodeId, String)>,
+    /// View › Snap to grid.
+    pub(crate) snap: bool,
+    /// Where dragged nodes would be without snapping (zoomed units).
+    pub(crate) snap_raw: BTreeMap<NodeId, egui::Pos2>,
+}
+
+/// The background grid, in graph units; snapping uses it too.
+pub(crate) const GRID: f32 = 32.0;
+
+/// `v` (graph units) on the nearest grid line.
+pub(crate) fn snap_to_grid(v: f32) -> f32 {
+    (v / GRID).round() * GRID
 }
 
 fn is_selftest() -> bool {
@@ -265,6 +281,10 @@ impl FactoryApp {
             minimap: true,
             master_menu: None,
             block_spot: None,
+            factory_menu: None,
+            node_rename: None,
+            snap: false,
+            snap_raw: BTreeMap::new(),
         };
         app.new_workspace();
         app.committed = app.project_json();
@@ -545,6 +565,10 @@ impl FactoryApp {
             match msg {
                 Msg::Status(Ok(s)) => {
                     let first = self.status.is_none();
+                    if first {
+                        let v = &s.settings.view;
+                        (self.snap, self.wire_labels, self.minimap) = (v.snap_to_grid, v.wire_labels, v.minimap);
+                    }
                     let setup_done = s.settings.setup_done;
                     self.status = Some(s.clone());
                     // The self-test drives its own views.
@@ -1106,8 +1130,10 @@ impl FactoryApp {
                 }
             });
         self.node_menu(ctx);
+        self.node_title_editor(ctx);
         self.frame_menu(ctx);
         crate::project_ui::master_canvas_menu(self, ctx);
+        crate::project_ui::factory_menu(self, ctx);
         self.add_node_menu(ctx);
         self.chat_box(ctx);
         crate::dialogs::show(self, ctx);
@@ -1259,6 +1285,14 @@ impl FactoryApp {
                     self.find = Some(crate::navigate::FindState::new("rubber"));
                     self.frame_all = true;
                 }
+                // A factory tab's right-click menu.
+                "tab_menu" => {
+                    self.dialog = Dialog::None;
+                    self.master_menu = None;
+                    if let Some(id) = self.tabs.first().copied() {
+                        self.factory_menu = Some((id, self.editor_rect.left_top() + vec2(110.0, -12.0)));
+                    }
+                }
                 // The master graph's right-click menu on empty canvas.
                 "project_menu" => {
                     self.dialog = Dialog::None;
@@ -1400,6 +1434,9 @@ impl FactoryApp {
             } else if let Some(f) = self.frames.selected {
                 self.delete_frame(f);
             }
+        }
+        if ctx.input(|i| i.key_pressed(Key::F2)) {
+            self.start_rename();
         }
         if ctx.input(|i| i.key_pressed(Key::C) && i.modifiers.is_none()) && self.has_selection() {
             self.add_frame_around_selection();
@@ -1544,6 +1581,26 @@ impl FactoryApp {
         let resp = self
             .state
             .draw_graph_editor(ui, &self.templates, &mut self.user, Vec::new());
+        if self.snap {
+            let z = self.state.pan_zoom.zoom.max(0.01);
+            for r in &resp.node_responses {
+                if let NodeResponse::MoveNode { node, drag_delta } = r {
+                    let sel = &self.state.selected_nodes;
+                    let moved: Vec<NodeId> = if sel.contains(node) && sel.len() > 1 { sel.clone() } else { vec![*node] };
+                    for n in moved {
+                        let Some(cur) = self.state.node_positions.get(n).copied() else { continue };
+                        // The editor already moved it; track where it would be unsnapped.
+                        let raw = self.snap_raw.entry(n).or_insert(cur - *drag_delta);
+                        *raw += *drag_delta;
+                        let g = (raw.to_vec2() / z).to_pos2();
+                        self.state.node_positions.insert(n, (egui::vec2(snap_to_grid(g.x), snap_to_grid(g.y)) * z).to_pos2());
+                    }
+                }
+            }
+        }
+        if !ui.input(|i| i.pointer.any_down()) {
+            self.snap_raw.clear();
+        }
         let frame_menu = self.frames_ui(ui, rect, frame_slot);
         if frame_menu {
             self.state.node_finder = None;
@@ -1658,7 +1715,7 @@ impl FactoryApp {
     }
 
     fn draw_grid(&self, ui: &egui::Ui, rect: egui::Rect) {
-        let step = 32.0 * self.state.pan_zoom.zoom;
+        let step = GRID * self.state.pan_zoom.zoom;
         if step < 6.0 {
             return;
         }
@@ -1690,120 +1747,65 @@ impl FactoryApp {
         self.context_targets
             .retain(|id| self.state.graph.nodes.contains_key(*id));
         self.state.selected_nodes = self.context_targets.clone();
-        let mut close = false;
         // Run after the menu is drawn: the menu reads the node it's for, and
         // deleting it mid-draw would index a node that no longer exists.
         let (mut do_duplicate, mut do_delete, mut do_move, mut do_frame) = (false, false, false, false);
+        let (mut do_open, mut do_rename) = (false, false);
+        let g = &self.state.graph;
+        let title = if self.context_targets.len() > 1 { format!("{} nodes", self.context_targets.len()) } else { g[node].label.clone() };
+        let factory = crate::project::factory_of(g, node);
+        let current = g[node].user_data.color;
+        let on_master = self.on_master();
+        let mut custom = self.custom_color;
+        let mut swatches = Vec::new();
+        let mut assets = self.user.assets.take();
+        let mut pick = None;
+        let menu = crate::menus::popup(ctx, "node_menu", pos, &title, |ui| {
+            use crate::menus::{item, separator};
+            if factory.is_some() {
+                do_open = item(ui, "Open", "Double-click", true).clicked();
+            }
+            do_rename = item(ui, "Rename", "F2", true).clicked();
+            separator(ui);
+            do_duplicate = item(ui, "Duplicate", "Ctrl+D", true).clicked();
+            do_delete = item(ui, "Delete", "Del", true).clicked();
+            do_frame = item(ui, "Add comment frame", "C", true).clicked();
+            if !on_master {
+                separator(ui);
+                do_move = item(ui, "Move to a new factory", "", true)
+                    .on_hover_text("Moves these nodes into a factory of their own, linked to this one on the master graph.")
+                    .clicked();
+            }
+            separator(ui);
+            pick = crate::menus::colours(ui, assets.as_mut(), current, &mut custom, &mut swatches);
+        });
+        self.user.assets = assets;
+        self.custom_color = custom;
         #[cfg(test)]
-        self.menu_swatches.clear();
-        let area = egui::Area::new(egui::Id::new("node_menu"))
-            .order(egui::Order::Foreground)
-            .fixed_pos(pos)
-            .show(ctx, |ui| {
-                egui::Frame::popup(ui.style()).show(ui, |ui| {
-                    ui.set_min_width(180.0);
-                    if let Some(f) = crate::project::factory_of(&self.state.graph, node) {
-                        if ui.add(egui::Button::new("Open").shortcut_text("Double-click")).clicked() {
-                            self.switch_to = Some(f);
-                            close = true;
-                        }
-                        if ui.button("Rename…").clicked() {
-                            self.dialog = Dialog::RenameFactory { id: f, name: self.doc_name(f) };
-                            close = true;
-                        }
-                        ui.separator();
-                    }
-                    if ui
-                        .add(egui::Button::new("Duplicate").shortcut_text("Ctrl+D"))
-                        .clicked()
-                    {
-                        do_duplicate = true;
-                        close = true;
-                    }
-                    if ui
-                        .add(egui::Button::new("Delete").shortcut_text("Del"))
-                        .clicked()
-                    {
-                        do_delete = true;
-                        close = true;
-                    }
-                    if ui.add(egui::Button::new("Add comment frame").shortcut_text("C")).clicked() {
-                        do_frame = true;
-                        close = true;
-                    }
-                    if !self.on_master() {
-                        ui.separator();
-                        if ui.button("Move to a new factory").on_hover_text("Moves these nodes into a factory of their own, linked to this one on the master graph.").clicked() {
-                            do_move = true;
-                            close = true;
-                        }
-                    }
-                    ui.separator();
-                    ui.label(RichText::new("Colour").small().color(TEXT_DIM));
-                    let current = self.state.graph[node].user_data.color;
-                    let mut pick: Option<Option<[u8; 3]>> = None;
-                    ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = 4.0;
-                        let r = swatch(
-                            ui,
-                            self.user.assets.as_mut(),
-                            None,
-                            current.is_none(),
-                            "No colour",
-                        );
-                        #[cfg(test)]
-                        self.menu_swatches.push(r.rect);
-                        if r.clicked() {
-                            pick = Some(None);
-                        }
-                        for (name, rgb) in GAME_COLORS {
-                            let r = swatch(
-                                ui,
-                                self.user.assets.as_mut(),
-                                Some(rgb),
-                                current == Some(rgb),
-                                name,
-                            );
-                            #[cfg(test)]
-                            self.menu_swatches.push(r.rect);
-                            if r.clicked() {
-                                pick = Some(Some(rgb));
-                            }
-                        }
-                    });
-                    match self.custom_color {
-                        None => {
-                            if ui.button("Custom colour…").clicked() {
-                                self.custom_color = Some(current.unwrap_or([0xE5, 0x93, 0x44]));
-                            }
-                        }
-                        Some(rgb) => {
-                            let mut c = egui::Color32::from_rgb(rgb[0], rgb[1], rgb[2]);
-                            if egui::color_picker::color_picker_color32(
-                                ui,
-                                &mut c,
-                                egui::color_picker::Alpha::Opaque,
-                            ) {
-                                self.custom_color = Some([c.r(), c.g(), c.b()]);
-                                pick = Some(Some([c.r(), c.g(), c.b()]));
-                            }
-                        }
-                    }
-                    if let Some(color) = pick {
-                        for id in self.context_targets.clone() {
-                            if self.state.graph.nodes.contains_key(id) {
-                                self.state.graph[id].user_data.color = color;
-                            }
-                        }
-                        self.changed();
-                    }
-                });
-            });
-        let clicked_elsewhere = ctx.input(|i| i.pointer.any_pressed())
-            && !area.response.contains_pointer()
-            && !area.response.hovered();
-        if close || clicked_elsewhere || ctx.input(|i| i.key_pressed(Key::Escape)) {
+        {
+            self.menu_swatches = swatches;
+        }
+        #[cfg(not(test))]
+        let _ = swatches;
+        if let Some(color) = pick {
+            for id in self.context_targets.clone() {
+                if self.state.graph.nodes.contains_key(id) {
+                    self.state.graph[id].user_data.color = color;
+                }
+            }
+            self.changed();
+        }
+        let chose = do_duplicate || do_delete || do_move || do_frame || do_open || do_rename;
+        if chose || crate::menus::dismissed(ctx, &menu) {
             self.context_menu = None;
+        }
+        if let Some(f) = factory {
+            if do_open {
+                self.switch_to = Some(f);
+            }
+        }
+        if do_rename {
+            self.node_rename = Some((node, self.state.graph[node].label.clone()));
         }
         if do_duplicate {
             self.duplicate_selected();
@@ -1816,6 +1818,68 @@ impl FactoryApp {
         }
         if do_delete {
             self.delete_selected();
+        }
+    }
+
+    /// Remembers the View menu's toggles.
+    pub(crate) fn save_view_settings(&mut self) {
+        if let Some(s) = self.status.as_mut() {
+            s.settings.view = fb_model::ViewSettings { snap_to_grid: self.snap, wire_labels: self.wire_labels, minimap: self.minimap };
+            let settings = s.settings.clone();
+            self.backend.call("set_settings", json!({ "settings": settings }), Msg::Status);
+        }
+    }
+
+    /// F2: rename the selected node, or the selected comment frame.
+    pub(crate) fn start_rename(&mut self) {
+        if let [n] = self.state.selected_nodes[..] {
+            if self.state.graph.nodes.contains_key(n) {
+                self.node_rename = Some((n, self.state.graph[n].label.clone()));
+            }
+        } else if self.state.selected_nodes.is_empty() {
+            if let Some(f) = self.frames.selected.and_then(|id| self.planner.frames.iter().find(|f| f.id == id)) {
+                self.frames.editing = Some((f.id, f.title.clone()));
+            }
+        }
+    }
+
+    /// Renaming a node: a text field over its title. Enter keeps it, Esc
+    /// cancels; an empty name goes back to the recipe's or item's. On the
+    /// master graph it renames the factory.
+    fn node_title_editor(&mut self, ctx: &egui::Context) {
+        let Some((node, mut text)) = self.node_rename.clone() else { return };
+        let (Some(r), true) = (self.node_rects.get(&node).copied(), self.state.graph.nodes.contains_key(node)) else {
+            self.node_rename = None;
+            return;
+        };
+        let z = self.state.pan_zoom.zoom.max(0.4);
+        let mut done = None;
+        egui::Area::new(egui::Id::new(("node_title", node))).order(egui::Order::Foreground).fixed_pos(r.min + vec2(6.0, 6.0) * z).show(ctx, |ui| {
+            let edit = ui.add(egui::TextEdit::singleline(&mut text).desired_width((r.width() - 12.0 * z).max(120.0)).hint_text("Name"));
+            if !edit.has_focus() && !edit.lost_focus() {
+                edit.request_focus();
+            }
+            if edit.lost_focus() {
+                done = Some(!ui.input(|i| i.key_pressed(Key::Escape)));
+            }
+        });
+        match done {
+            None => self.node_rename = Some((node, text)),
+            Some(keep) => {
+                self.node_rename = None;
+                let name: String = text.trim().chars().take(200).collect();
+                if !keep || name == self.state.graph[node].label {
+                    return;
+                }
+                if let Some(f) = crate::project::factory_of(&self.state.graph, node) {
+                    self.rename_factory(f, &name);
+                    return;
+                }
+                let game = self.user.game.clone();
+                let label = if name.is_empty() { crate::app_files::default_label(&game, &self.state.graph[node].user_data.kind) } else { name };
+                self.state.graph[node].label = label;
+                self.changed();
+            }
         }
     }
 

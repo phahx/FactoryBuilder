@@ -90,9 +90,9 @@ pub fn import(world: &World, selected: &BTreeSet<u32>, game: &GameData, map: Opt
                     report.mixed_sloops += 1;
                 }
                 let common = counts.iter().max_by_key(|(_, n)| **n).map(|(s, _)| *s).unwrap_or(0);
-                Node { kind: Kind::Recipe, class: r.clone(), machines: Some(count), clock: Some((clock * 100.0 * 1000.0).round() / 1000.0), sloops: Some(common).filter(|s| *s > 0), rate: None, color: None, x: 0.0, y: 0.0 }
+                Node { kind: Kind::Recipe, class: r.clone(), machines: Some(count), clock: Some((clock * 100.0 * 1000.0).round() / 1000.0), sloops: Some(common).filter(|s| *s > 0), rate: None, name: None, color: None, x: 0.0, y: 0.0 }
             }
-            Group::Resource(res) => Node { kind: Kind::Resource, class: res.clone(), machines: None, clock: None, sloops: None, rate: Some((resource_rate[res] * 1000.0).round() / 1000.0), color: None, x: 0.0, y: 0.0 },
+            Group::Resource(res) => Node { kind: Kind::Resource, class: res.clone(), machines: None, clock: None, sloops: None, rate: Some((resource_rate[res] * 1000.0).round() / 1000.0), name: None, color: None, x: 0.0, y: 0.0 },
         };
         index.insert(g.clone(), f.nodes.len());
         f.nodes.push(node);
@@ -164,13 +164,13 @@ pub fn import(world: &World, selected: &BTreeSet<u32>, game: &GameData, map: Opt
         if let Some(i) = in_port(g, item) {
             let kind = if game.items.get(item).is_some_and(|it| it.raw) { Kind::Resource } else { Kind::Input };
             let r = rate(g, item, true);
-            extra.push((Node { kind, class: item.clone(), machines: None, clock: None, sloops: None, rate: Some((r * 1000.0).round() / 1000.0), color: None, x: 0.0, y: 0.0 }, Some((index[g], i, true))));
+            extra.push((Node { kind, class: item.clone(), machines: None, clock: None, sloops: None, rate: Some((r * 1000.0).round() / 1000.0), name: None, color: None, x: 0.0, y: 0.0 }, Some((index[g], i, true))));
         }
     }
     for (g, item) in &to_outside {
         if let Some(o) = out_port(g, item) {
             let r = rate(g, item, false);
-            extra.push((Node { kind: Kind::Output, class: item.clone(), machines: None, clock: None, sloops: None, rate: Some((r * 1000.0).round() / 1000.0), color: None, x: 0.0, y: 0.0 }, Some((index[g], o, false))));
+            extra.push((Node { kind: Kind::Output, class: item.clone(), machines: None, clock: None, sloops: None, rate: Some((r * 1000.0).round() / 1000.0), name: None, color: None, x: 0.0, y: 0.0 }, Some((index[g], o, false))));
         }
     }
     for (node, link) in extra {

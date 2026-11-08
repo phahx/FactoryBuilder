@@ -568,6 +568,7 @@ pub fn show(app: &mut FactoryApp, ctx: &egui::Context) {
                 ("Select several", "Drag on empty canvas"),
                 ("Select all", "Ctrl+A"),
                 ("Duplicate / Delete", "Ctrl+D / Del"),
+                ("Rename a node or frame", "F2"),
                 ("Comment frame around selection", "C"),
                 ("Find", "Ctrl+F"),
                 ("Pan", "Middle-drag, or Ctrl+drag"),

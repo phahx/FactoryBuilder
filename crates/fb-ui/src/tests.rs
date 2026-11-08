@@ -584,11 +584,13 @@ fn node_menu_delete_removes_the_node() {
     let n = app.node_count();
     let (id, rect, _) = app.first_node().unwrap();
     click(&ctx, &mut app, rect.center(), egui::PointerButton::Secondary);
-    // The menu opens at the click; "Delete" is its second row.
+    // The menu opens at the click, with its rows the menu's full width.
     let menu = ctx.memory(|m| m.area_rect(egui::Id::new("node_menu"))).expect("node menu open");
-    let row = ctx.style().spacing.interact_size.y + ctx.style().spacing.item_spacing.y;
-    let delete = egui::pos2(menu.center().x, menu.top() + ctx.style().spacing.window_margin.top + row * 1.5);
-    click(&ctx, &mut app, delete, egui::PointerButton::Primary);
+    let rows: Vec<egui::Rect> = crate::widgets::TEST_BUTTONS.with(|b| b.borrow().iter().filter(|(l, r, _)| menu.contains_rect(*r) && ["Duplicate", "Delete", "Add comment frame", "Move to a new factory"].contains(&l.as_str())).map(|(_, r, _)| *r).collect());
+    assert_eq!(rows.len(), 4);
+    assert!(rows.iter().all(|r| (r.width() - rows[0].width()).abs() < 0.5 && r.width() > menu.width() - 4.0), "every row as wide as the menu: {rows:?}");
+    let delete = crate::widgets::TEST_BUTTONS.with(|b| b.borrow().iter().find(|(l, r, _)| l == "Delete" && menu.contains_rect(*r)).map(|(_, r, _)| *r)).expect("Delete row");
+    click(&ctx, &mut app, delete.center(), egui::PointerButton::Primary);
     assert!(!app.graph().nodes.contains_key(id), "deleted");
     assert_eq!(app.node_count(), n - 1);
     assert!(app.context_menu.is_none(), "menu closed");
@@ -1941,7 +1943,7 @@ fn zooming_keeps_graph_coordinates_stable() {
 /// Smelter(s) making Iron Ingots from ore, delivered as an output.
 fn ingot_factory(name: &str, smelters: f64) -> crate::portable::FactoryFile {
     use crate::portable::{FactoryFile, Kind, Node, Wire};
-    let node = |kind, class: &str, machines: Option<f64>, rate: Option<f64>, x: f32| Node { kind, class: class.into(), machines, clock: machines.map(|_| 100.0), sloops: None, rate, color: None, x, y: 0.0 };
+    let node = |kind, class: &str, machines: Option<f64>, rate: Option<f64>, x: f32| Node { kind, class: class.into(), machines, clock: machines.map(|_| 100.0), sloops: None, rate, name: None, color: None, x, y: 0.0 };
     let mut f = FactoryFile::new(Some(name.into()));
     f.nodes.push(node(Kind::Resource, "Desc_OreIron_C", None, Some(30.0 * smelters), 0.0));
     f.nodes.push(node(Kind::Recipe, "Recipe_IngotIron_C", Some(smelters), None, 400.0));
@@ -1954,7 +1956,7 @@ fn ingot_factory(name: &str, smelters: f64) -> crate::portable::FactoryFile {
 /// Constructors turning 60 Iron Ingots from elsewhere into 60 Iron Rods.
 fn rod_factory(name: &str) -> crate::portable::FactoryFile {
     use crate::portable::{FactoryFile, Kind, Node, Wire};
-    let node = |kind, class: &str, machines: Option<f64>, rate: Option<f64>, x: f32| Node { kind, class: class.into(), machines, clock: machines.map(|_| 100.0), sloops: None, rate, color: None, x, y: 0.0 };
+    let node = |kind, class: &str, machines: Option<f64>, rate: Option<f64>, x: f32| Node { kind, class: class.into(), machines, clock: machines.map(|_| 100.0), sloops: None, rate, name: None, color: None, x, y: 0.0 };
     let mut f = FactoryFile::new(Some(name.into()));
     f.nodes.push(node(Kind::Input, "Desc_IronIngot_C", None, Some(60.0), 0.0));
     f.nodes.push(node(Kind::Recipe, "Recipe_IronRod_C", Some(4.0), None, 400.0));
@@ -2171,7 +2173,7 @@ fn moving_a_selection_to_a_new_factory_keeps_the_totals() {
     use crate::portable::{FactoryFile, Kind, Node, Wire};
     let Some((ctx, mut app, _)) = harness() else { return };
     frames(&ctx, &mut app, 2);
-    let node = |kind, class: &str, machines: Option<f64>, rate: Option<f64>, x: f32| Node { kind, class: class.into(), machines, clock: machines.map(|_| 100.0), sloops: None, rate, color: None, x, y: 0.0 };
+    let node = |kind, class: &str, machines: Option<f64>, rate: Option<f64>, x: f32| Node { kind, class: class.into(), machines, clock: machines.map(|_| 100.0), sloops: None, rate, name: None, color: None, x, y: 0.0 };
     let mut f = FactoryFile::new(Some("Rods".into()));
     f.nodes = vec![
         node(Kind::Resource, "Desc_OreIron_C", None, Some(30.0), 0.0),
@@ -2375,7 +2377,7 @@ fn right_click_on_the_master_graph_adds_a_factory_there() {
 
     // From a file: the block goes to the menu's spot too, once the file is read.
     let mut f = crate::portable::FactoryFile::new(Some("Smelting".into()));
-    f.nodes.push(crate::portable::Node { kind: crate::portable::Kind::Resource, class: "Desc_OreIron_C".into(), machines: None, clock: None, sloops: None, rate: Some(60.0), color: None, x: 0.0, y: 0.0 });
+    f.nodes.push(crate::portable::Node { kind: crate::portable::Kind::Resource, class: "Desc_OreIron_C".into(), machines: None, clock: None, sloops: None, rate: Some(60.0), name: None, color: None, x: 0.0, y: 0.0 });
     store.borrow_mut().insert("C:/Factories/Smelting.fbfactory".into(), f.to_json(false));
     let spot2 = egui::pos2(only.right() + 150.0, only.bottom() + 200.0);
     assert!(!app.node_rects.values().any(|r| r.contains(spot2)));
@@ -2392,4 +2394,118 @@ fn right_click_on_the_master_graph_adds_a_factory_there() {
     let b2 = crate::project::block_of(&app.state.graph, smelting).unwrap();
     assert!((app.node_pos_unzoomed(b2) - at2).length() < 1.0);
     assert!(app.block_spot.is_none());
+}
+
+fn press_key(ctx: &egui::Context, app: &mut FactoryApp, key: egui::Key) {
+    frame_with(ctx, app, vec![egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers: Default::default() }]);
+}
+
+#[test]
+fn f2_renames_nodes_and_factory_blocks() {
+    let Some((ctx, mut app, store)) = harness() else { return };
+    planned(&ctx, &mut app);
+    let g = &app.state.graph;
+    let smelter = g.iter_nodes().find(|n| matches!(&g[*n].user_data.kind, crate::graph::NodeKind::Recipe { recipe } if recipe == "Recipe_IngotIron_C")).unwrap();
+    let original = g[smelter].label.clone();
+    app.state.selected_nodes = vec![smelter];
+    press_key(&ctx, &mut app, egui::Key::F2);
+    frames(&ctx, &mut app, 1);
+    assert_eq!(app.node_rename.as_ref().map(|r| r.0), Some(smelter), "F2 starts renaming the selected node");
+    app.node_rename = Some((smelter, "  Main smelters ".into()));
+    frames(&ctx, &mut app, 1);
+    press_key(&ctx, &mut app, egui::Key::Enter);
+    frames(&ctx, &mut app, 2);
+    assert!(app.node_rename.is_none());
+    assert_eq!(app.state.graph[smelter].label, "Main smelters");
+    assert!(app.find_matches("main smelters").len() == 1, "found by its new name");
+
+    // The name is saved; the recipe still is what it was.
+    let path = "C:/Factories/Named.fbfactory";
+    app.save_as(path);
+    frames(&ctx, &mut app, 2);
+    assert!(store.borrow()[path].contains("\"name\": \"Main smelters\""));
+    app.new_project();
+    frames(&ctx, &mut app, 1);
+    app.open(path);
+    frames(&ctx, &mut app, 3);
+    let g = &app.state.graph;
+    let back = g.iter_nodes().find(|n| g[*n].label == "Main smelters").expect("name came back");
+    assert!(matches!(&g[back].user_data.kind, crate::graph::NodeKind::Recipe { recipe } if recipe == "Recipe_IngotIron_C"));
+    let unnamed = store.borrow()[path].matches("\"name\"").count();
+    assert_eq!(unnamed, 2, "only the renamed node (and the factory) carry a name");
+
+    // An empty name goes back to the recipe's; Esc keeps the old one.
+    app.state.selected_nodes = vec![back];
+    press_key(&ctx, &mut app, egui::Key::F2);
+    frames(&ctx, &mut app, 1);
+    app.node_rename = Some((back, "Throwaway".into()));
+    frames(&ctx, &mut app, 1);
+    press_key(&ctx, &mut app, egui::Key::Escape);
+    frames(&ctx, &mut app, 1);
+    assert_eq!(app.state.graph[back].label, "Main smelters", "Esc cancels");
+    press_key(&ctx, &mut app, egui::Key::F2);
+    frames(&ctx, &mut app, 1);
+    app.node_rename = Some((back, String::new()));
+    frames(&ctx, &mut app, 1);
+    press_key(&ctx, &mut app, egui::Key::Enter);
+    frames(&ctx, &mut app, 1);
+    assert_eq!(app.state.graph[back].label, original);
+
+    // On the master graph, F2 on a block renames the factory.
+    app.activate(crate::project::MASTER);
+    frames(&ctx, &mut app, 2);
+    let id = app.factory_ids()[0];
+    let block = crate::project::block_of(&app.state.graph, id).unwrap();
+    app.state.selected_nodes = vec![block];
+    press_key(&ctx, &mut app, egui::Key::F2);
+    frames(&ctx, &mut app, 1);
+    app.node_rename = Some((block, "Plates".into()));
+    frames(&ctx, &mut app, 1);
+    press_key(&ctx, &mut app, egui::Key::Enter);
+    frames(&ctx, &mut app, 2);
+    assert_eq!(app.doc_name(id), "Plates");
+    assert_eq!(app.state.graph[block].label, "Plates");
+}
+
+#[test]
+fn snap_to_grid_moves_nodes_and_frames_in_grid_steps() {
+    let Some((ctx, mut app, _)) = harness() else { return };
+    planned(&ctx, &mut app);
+    assert!(!app.snap, "off unless turned on");
+    app.snap = true;
+    app.save_view_settings();
+    frames(&ctx, &mut app, 2);
+    assert!(app.status.as_ref().unwrap().settings.view.snap_to_grid, "remembered in the settings");
+
+    let (id, rect, _) = app.first_node().unwrap();
+    app.state.selected_nodes.clear();
+    let grab = rect.left_top() + egui::vec2(40.0, 14.0);
+    drag(&ctx, &mut app, grab, grab + egui::vec2(37.0, 13.0));
+    let p = app.node_pos_unzoomed(id);
+    let on_grid = |v: f32| ((v / crate::app::GRID).round() * crate::app::GRID - v).abs() < 0.01;
+    assert!(on_grid(p.x) && on_grid(p.y), "node at {p:?} is on the grid");
+
+    // Frames too, and what's inside them stays where it is in the frame.
+    let g = &app.state.graph;
+    let all: Vec<_> = g.iter_nodes().collect();
+    app.state.selected_nodes = all[..2].to_vec();
+    app.add_frame_around_selection();
+    app.frames.editing = None;
+    frames(&ctx, &mut app, 2);
+    let title = app.planner.frames[0].title.clone();
+    let (header, _) = button(&format!("Frame {title}")).expect("frame title bar");
+    drag_by(&ctx, &mut app, header.center() + egui::vec2(-40.0, 0.0), egui::vec2(51.0, 22.0));
+    let f = &app.planner.frames[0];
+    assert!(on_grid(f.x) && on_grid(f.y), "frame at {}, {}", f.x, f.y);
+
+    // Off again: free movement.
+    app.snap = false;
+    let (id, rect, _) = app.first_node().unwrap();
+    let before = app.node_pos_unzoomed(id);
+    let grab = rect.left_top() + egui::vec2(40.0, 14.0);
+    drag(&ctx, &mut app, grab, grab + egui::vec2(7.0, 5.0));
+    // (egui starts a drag after the first few pixels, so it moves a bit less.)
+    let after = app.node_pos_unzoomed(id);
+    assert!((after - before).length() > 1.0, "it moved");
+    assert!(!(on_grid(after.x) && on_grid(after.y)), "and isn't held to the grid: {after:?}");
 }

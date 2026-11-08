@@ -172,10 +172,19 @@ pub fn menu_bar(app: &mut FactoryApp, ctx: &egui::Context) {
                         app.request_arrange();
                     }
                     ui.separator();
-                    ui.checkbox(&mut app.wire_labels, "Belt and pipe labels")
-                        .on_hover_text("Show on each wire the slowest belt or pipe that carries it.");
-                    ui.checkbox(&mut app.minimap, "Minimap")
-                        .on_hover_text("The whole graph in the canvas's corner; click it to move the view.");
+                    let mut toggled = false;
+                    toggled |= ui.checkbox(&mut app.snap, "Snap to grid")
+                        .on_hover_text("Nodes and comment frames move in steps of the background grid.")
+                        .changed();
+                    toggled |= ui.checkbox(&mut app.wire_labels, "Belt and pipe labels")
+                        .on_hover_text("Show on each wire the slowest belt or pipe that carries it.")
+                        .changed();
+                    toggled |= ui.checkbox(&mut app.minimap, "Minimap")
+                        .on_hover_text("The whole graph in the canvas's corner; click it to move the view.")
+                        .changed();
+                    if toggled {
+                        app.save_view_settings();
+                    }
                 });
                 ui.menu_button("Project", |ui| {
                     ui.set_min_width(260.0);

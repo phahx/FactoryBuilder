@@ -84,6 +84,13 @@ pub(crate) fn frame_from_file(f: &portable::Frame, id: u32, offset: Vec2) -> cra
     crate::frames::CommentFrame { id, title: f.title.clone(), color: f.color.as_deref().and_then(portable::color_from_hex), x: f.x + offset.x, y: f.y + offset.y, w: f.w, h: f.h }
 }
 
+/// A node's own name: its recipe's or item's.
+pub(crate) fn default_label(game: &std::rc::Rc<fb_model::GameData>, kind: &NodeKind) -> String {
+    use egui_node_graph2::NodeTemplateTrait;
+    let mut user = UserState { game: game.clone(), ..Default::default() };
+    kind.template().node_graph_label(&mut user)
+}
+
 pub fn file_stem(path: &str) -> String {
     std::path::Path::new(path).file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| path.to_string())
 }
@@ -153,6 +160,7 @@ impl FactoryApp {
                 clock: is_recipe.then(|| input_number(g, id, CLOCK)),
                 sloops: Some(crate::graph::sloops(game, g, id)).filter(|n| *n > 0),
                 rate: has_rate.then(|| input_number(g, id, RATE)),
+                name: Some(n.label.clone()).filter(|l| *l != default_label(game, &n.user_data.kind)),
                 color: n.user_data.color.map(portable::color_to_hex),
                 x: (pos.x * 10.0).round() / 10.0,
                 y: (pos.y * 10.0).round() / 10.0,
@@ -259,6 +267,9 @@ impl FactoryApp {
             set(self, crate::graph::SLOOPS, n.sloops.map(f64::from));
             set(self, RATE, n.rate);
             self.state.graph[id].user_data.color = n.color.as_deref().and_then(portable::color_from_hex);
+            if let Some(name) = n.name.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+                self.state.graph[id].label = name.chars().take(200).collect();
+            }
             ids[i] = Some(id);
         }
         // Wires: inputs in file order, then each output's bubble order.
