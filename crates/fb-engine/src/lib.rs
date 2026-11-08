@@ -8,6 +8,11 @@
 #[cfg(feature = "solver")]
 pub mod docs;
 pub mod layout;
+pub mod progress;
+#[cfg(feature = "solver")]
+pub mod save;
+#[cfg(feature = "solver")]
+mod schematics;
 pub mod sim;
 #[cfg(feature = "solver")]
 pub mod solver;

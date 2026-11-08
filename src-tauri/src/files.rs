@@ -23,7 +23,7 @@ impl Allowed {
     pub fn allow(&self, p: &Path) {
         self.0.lock().unwrap().insert(normal(p));
     }
-    fn has(&self, p: &Path) -> bool {
+    pub fn has(&self, p: &Path) -> bool {
         self.0.lock().unwrap().contains(&normal(p))
     }
 }

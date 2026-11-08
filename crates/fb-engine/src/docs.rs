@@ -267,6 +267,7 @@ pub fn parse_docs(root: &Value) -> Result<GameData, DocsError> {
         }
     }
 
+    crate::schematics::parse(&classes_of("FGSchematic"), &classes_of("FGRecipe"), &mut data);
     if data.recipes.is_empty() || data.items.is_empty() {
         return Err(DocsError::Shape("no recipes or items found"));
     }

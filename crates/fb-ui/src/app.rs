@@ -481,6 +481,7 @@ impl FactoryApp {
                 | Msg::ExtractStarted(_)
                 | Msg::Extract(_)
                 | Msg::DevDone(_)) => self.on_setup_msg(ctx, m),
+                m @ (Msg::Saves(_) | Msg::PickedSaveGame(_) | Msg::SaveUnlocks(_)) => self.on_progress_msg(ctx, m),
                 Msg::Solved(r) => {
                     self.solving = false;
                     match r {

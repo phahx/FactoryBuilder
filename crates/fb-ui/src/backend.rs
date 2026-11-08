@@ -72,6 +72,10 @@ pub enum Msg {
     Extract(Result<fb_model::setup::ExtractProgress, String>),
     /// A Developer settings action finished (its message).
     DevDone(Result<String, String>),
+    // Recipes from a save (progress_ui.rs).
+    Saves(Result<Vec<fb_model::saves::SaveSummary>, String>),
+    PickedSaveGame(Result<Option<String>, String>),
+    SaveUnlocks(Result<fb_model::saves::SaveUnlocks, String>),
 }
 
 #[cfg(not(target_arch = "wasm32"))]

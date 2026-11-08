@@ -34,6 +34,8 @@ pub enum Dialog {
     JoinRoom { name: String, code: String, error: Option<String>, busy: bool },
     /// Host: the room code and how to let people in from outside.
     RoomInfo,
+    /// Pick a save to use the recipes it has unlocked.
+    Saves(crate::progress_ui::SavesDialog),
 }
 
 impl Dialog {
@@ -464,6 +466,7 @@ pub fn show(app: &mut FactoryApp, ctx: &egui::Context) {
                 app.dialog = Dialog::None;
             }
         }
+        Dialog::Saves(d) => crate::progress_ui::show(app, ctx, d),
         Dialog::Shortcuts => {
             let rows = [
                 ("New factory", "Ctrl+N"),

@@ -23,6 +23,7 @@ use tauri::{ipc::Response, AppHandle, Manager, State};
 mod files;
 mod install;
 mod room;
+mod saves;
 mod selftest;
 mod setup;
 
@@ -433,6 +434,42 @@ fn dev_remove_test_install(state: State<AppState>) -> CmdResult<String> {
     Ok(if said.is_empty() { "There was no test install.".into() } else { said.join(" ") })
 }
 
+// --------------------------------------------------------------------- saves
+
+#[tauri::command]
+async fn list_saves(state: State<'_, AppState>) -> CmdResult<Vec<fb_model::saves::SaveSummary>> {
+    state.log("list_saves");
+    tauri::async_runtime::spawn_blocking(saves::list).await.map_err(|e| e.to_string())
+}
+
+/// Native Open dialog for a save file somewhere else.
+#[tauri::command]
+async fn pick_save_game(app: AppHandle) -> CmdResult<Option<String>> {
+    tauri::async_runtime::spawn_blocking(move || {
+        use tauri_plugin_dialog::DialogExt;
+        let mut d = app.dialog().file().set_title("Open a Satisfactory save").add_filter("Satisfactory saves", &["sav"]);
+        if let Some(root) = saves::saves_root().filter(|r| r.is_dir()) {
+            d = d.set_directory(root);
+        }
+        let path = d.blocking_pick_file().and_then(|f| f.into_path().ok())?;
+        app.state::<AppState>().allowed.allow(&path);
+        Some(path.to_string_lossy().into_owned())
+    })
+    .await
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn read_save_unlocks(app: AppHandle, path: String) -> CmdResult<fb_model::saves::SaveUnlocks> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        state.log("read_save_unlocks");
+        saves::unlocks(&state.allowed, &path)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 // --------------------------------------------------------------------- rooms
 
 /// Tells the window something arrived, so it fetches it right away instead
@@ -572,6 +609,9 @@ fn main() {
             install_restart,
             dev_test_first_launch,
             dev_remove_test_install,
+            list_saves,
+            pick_save_game,
+            read_save_unlocks,
             room_host,
             room_join,
             room_leave,

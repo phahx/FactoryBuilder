@@ -133,6 +133,8 @@ pub fn planner(app: &mut FactoryApp, ui: &mut Ui) {
     let has_graph = !app.state.graph.nodes.is_empty();
     let mut changed = false;
     let mut plan = false;
+    let mut open_saves = false;
+    let mut said: Option<String> = None;
     {
         let FactoryApp {
             planner,
@@ -254,13 +256,19 @@ pub fn planner(app: &mut FactoryApp, ui: &mut Ui) {
             }
 
             widgets::divider(ui);
-            changed |= recipes(ui, assets, &game, planner);
+            changed |= recipes(ui, assets, &game, planner, &mut open_saves, &mut said);
             widgets::divider(ui);
             changed |= limits(ui, assets, &game, planner);
         });
     }
     if changed {
         app.changed();
+    }
+    if let Some(text) = said {
+        app.say(ui.ctx(), text, false);
+    }
+    if open_saves {
+        app.open_saves_dialog();
     }
     if plan {
         app.request_plan();
@@ -272,6 +280,8 @@ fn recipes(
     assets: &mut Assets,
     game: &GameData,
     planner: &mut crate::app::Planner,
+    open_saves: &mut bool,
+    said: &mut Option<String>,
 ) -> bool {
     let mut changed = false;
     let alts: Vec<&Recipe> = game.recipes.values().filter(|r| r.alternate).collect();
@@ -290,7 +300,11 @@ fn recipes(
         (n, off) => format!("{off} standard off · {n} of {} alternates on", alts.len()),
     };
     widgets::collapsible(ui, assets, "recipes", "Recipes", &summary, |ui, assets| {
-        widgets::caption(ui, "Which recipes the plan may use. Turn on the alternate recipes you have unlocked in your game; hover a recipe to see what it takes.");
+        widgets::caption(ui, "Which recipes the plan may use. Match them to your game from a save or a HUB tier, or tick them by hand; hover a recipe to see what it takes.");
+        if let Some(text) = crate::progress_ui::unlock_controls(ui, game, planner, open_saves) {
+            *said = Some(text);
+            changed = true;
+        }
         ui.horizontal(|ui| {
             if widgets::button(ui, "Enable all alternates").clicked() {
                 planner.enabled.extend(alts.iter().map(|r| r.class.clone()));

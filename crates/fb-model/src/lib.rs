@@ -94,6 +94,39 @@ pub struct GameData {
     pub buildings: BTreeMap<ClassName, Building>,
     /// Default extraction limits per minute (editable in the planner).
     pub resource_limits: BTreeMap<ClassName, f64>,
+    /// What unlocks recipes and buildings: HUB milestones, MAM research,
+    /// alternates (hard drives) and so on.
+    #[serde(default)]
+    pub schematics: BTreeMap<ClassName, Schematic>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SchematicKind {
+    /// HUB milestone (`EST_Milestone`).
+    Milestone,
+    /// MAM research (`EST_MAM`).
+    Mam,
+    /// Alternate recipe from a hard drive (`EST_Alternate`).
+    Alternate,
+    /// Tutorial (onboarding) step.
+    Tutorial,
+    /// Starting recipes and the game's internal unlock bundles (`EST_Custom`).
+    Custom,
+    /// AWESOME Shop, customization, events and anything else.
+    Other,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Schematic {
+    pub class: ClassName,
+    pub name: String,
+    pub kind: SchematicKind,
+    /// HUB tier (meaningful for milestones and the custom bundles).
+    pub tier: u32,
+    /// Production recipes it unlocks (classes in `GameData::recipes`).
+    pub recipes: Vec<ClassName>,
+    /// Buildings whose build recipe it unlocks (`Build_..._C`).
+    pub buildings: Vec<ClassName>,
 }
 
 impl GameData {
@@ -239,6 +272,34 @@ impl Default for Settings {
             setup_done: false,
             icons_stamp: None,
         }
+    }
+}
+
+// --------------------------------------------------------------------- saves
+
+/// Reading progress from the player's save files.
+pub mod saves {
+    use serde::{Deserialize, Serialize};
+
+    /// A save file, from its header only.
+    #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+    pub struct SaveSummary {
+        pub path: String,
+        pub session: String,
+        /// The save's own name (newer saves); otherwise the file name.
+        pub name: String,
+        /// Unix seconds (UTC) when it was saved.
+        pub saved_unix: i64,
+        pub play_seconds: i64,
+        pub header_version: i32,
+        pub save_version: i32,
+    }
+
+    /// The schematics bought in a save (milestones, research, alternates...).
+    #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+    pub struct SaveUnlocks {
+        pub save: SaveSummary,
+        pub schematics: Vec<String>,
     }
 }
 

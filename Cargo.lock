@@ -1356,6 +1356,7 @@ version = "0.1.0"
 dependencies = [
  "fb-model",
  "good_lp",
+ "miniz_oxide 0.9.1",
  "petgraph",
  "serde",
  "serde_json",
