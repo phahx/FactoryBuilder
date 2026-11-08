@@ -857,3 +857,37 @@ fn real_saves() {
     }
 }
 
+
+/// Power on the map, from late.sav: lines, circuits, the HUB.
+#[test]
+fn real_save_power() {
+    let Ok(dir) = std::env::var("FB_TEST_SAVES") else { return };
+    let Some(game) = real_game() else { return };
+    let Ok(bytes) = std::fs::read(std::path::Path::new(&dir).join("late.sav")) else { return };
+    let w = read_world(&bytes, &game).unwrap();
+    eprintln!("power lines {}, circuits {}, powered machines {}", w.power_lines.len(), w.circuits.len(), w.machine_circuit.len());
+    for (i, c) in w.circuits.iter().enumerate() {
+        eprintln!(
+            "circuit {i}: consumption {:.1} max {:.1} capacity {:.1} batteries {} ({:.1}/{:.1} MWh) consumers {} sources {:?}",
+            c.consumption, c.max_consumption, c.capacity, c.batteries, c.stored_mwh, c.battery_mwh, c.consumers,
+            c.sources.iter().map(|s| (s.class.as_str(), s.count, s.mw)).collect::<Vec<_>>()
+        );
+    }
+    // How far each line end is from the nearest pole, building or other line end.
+    let sites: Vec<[f32; 2]> = w.structures.iter().map(|s| [s.x, s.y]).chain(w.machines.iter().map(|m| [m.x, m.y])).collect();
+    let mut d: Vec<f32> = w
+        .power_lines
+        .iter()
+        .flat_map(|l| [l.a, l.b])
+        .map(|p| sites.iter().map(|s| (s[0] - p[0]).hypot(s[1] - p[1])).fold(f32::INFINITY, f32::min))
+        .collect();
+    d.sort_by(|a, b| a.total_cmp(b));
+    let pct = |q: f32| d[((d.len() - 1) as f32 * q) as usize];
+    eprintln!("line end to nearest site (cm): median {:.0}, 90% {:.0}, 99% {:.0}, max {:.0}", pct(0.5), pct(0.9), pct(0.99), pct(1.0));
+    let hub: Vec<_> = w.structures.iter().filter(|s| s.class == "Build_TradingPost_C").collect();
+    eprintln!("HUB: {hub:?}");
+    assert_eq!(w.power_lines.len(), 4521, "every power line in the save");
+    assert!(w.power_lines.iter().all(|l| l.circuit.is_some()));
+    assert_eq!(hub.len(), 1, "the HUB is on the map");
+    assert!(!w.machines.iter().any(|m| m.class.starts_with("Build_GeneratorIntegratedBiomass")), "its burners are part of it");
+}

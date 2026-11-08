@@ -1164,6 +1164,8 @@ impl FactoryApp {
             self.selftest_view = view.clone();
             self.finder = None;
             self.context_menu = None;
+            self.master_menu = None;
+            self.factory_menu = None;
             self.wizard = None;
             let first_recipe = self
                 .state

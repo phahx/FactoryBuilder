@@ -77,6 +77,7 @@ const PROBE_JS: &str = r#"
     ['map_zoom', 'tip_map_node_taken', 869, 433], ['map_zoom', 'tip_map_node_right', 1118, 633],
     ['map_close', 'tip_map_machine', 540, 300], ['map_close', 'tip_map_splitter', 463, 145],
     ['project_menu', 'hover_menu_row', 520, 270],
+    ['map_close', 'tip_power_line', 1130, 187],
   ];
   const hit = document.elementFromPoint(900, 400);
   r.hit_test = hit ? (hit.tagName + '#' + hit.id) : null;

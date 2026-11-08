@@ -192,6 +192,13 @@ pub struct GameData {
     /// aren't production machines (splitters, storage, miners...).
     #[serde(default)]
     pub building_names: BTreeMap<ClassName, String>,
+    /// `mPowerConsumption` (MW) of every buildable that has one (stations,
+    /// towers...), for circuits on the map.
+    #[serde(default)]
+    pub buildable_power: BTreeMap<ClassName, f64>,
+    /// `mPowerStoreCapacity` (MWh) of Power Storage.
+    #[serde(default)]
+    pub power_store_mwh: BTreeMap<ClassName, f64>,
     /// What unlocks recipes and buildings: HUB milestones, MAM research,
     /// alternates (hard drives) and so on.
     #[serde(default)]
@@ -644,6 +651,51 @@ pub mod world {
         pub node_overrides: Vec<NodeOverride>,
         /// Objects that couldn't be read fully (shown as a note, never fatal).
         pub skipped: usize,
+        /// Power lines, as drawn between their two ends.
+        #[serde(default)]
+        pub power_lines: Vec<PowerLine>,
+        /// Power circuits (indexes are what `circuit` fields refer to).
+        #[serde(default)]
+        pub circuits: Vec<Circuit>,
+        /// The circuit each powered machine is on (machine id -> circuit).
+        #[serde(default)]
+        pub machine_circuit: std::collections::BTreeMap<u32, u32>,
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+    pub struct PowerLine {
+        /// World X/Y of its two ends.
+        pub a: [f32; 2],
+        pub b: [f32; 2],
+        pub circuit: Option<u32>,
+    }
+
+    /// One power circuit: everything joined by power lines (and train tracks).
+    /// Consumption and capacity are the game's own figures from the save.
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+    pub struct Circuit {
+        /// MW drawn right now.
+        pub consumption: f32,
+        /// MW if everything on it ran at its clock speed.
+        pub max_consumption: f32,
+        /// MW the generators can make right now.
+        pub capacity: f32,
+        /// Power Storage on it and what they hold (MWh).
+        pub batteries: u32,
+        pub stored_mwh: f32,
+        pub battery_mwh: f32,
+        /// Generators, by building class.
+        pub sources: Vec<PowerSource>,
+        /// Buildings that draw power.
+        pub consumers: u32,
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+    pub struct PowerSource {
+        pub class: String,
+        pub count: u32,
+        /// MW they can make right now.
+        pub mw: f32,
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -699,6 +751,9 @@ pub mod world {
         /// Facing, degrees (see `Machine::yaw`).
         #[serde(default)]
         pub yaw: f32,
+        /// Power poles, switches and batteries: their circuit.
+        #[serde(default)]
+        pub circuit: Option<u32>,
     }
 
     /// Top-down renders of the game's own models, written by the icon helper

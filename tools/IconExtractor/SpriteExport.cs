@@ -67,6 +67,8 @@ static class SpriteExport
         "FGBuildableTrainPlatformCargo", "FGBuildableRailroadStation", "FGBuildableDockingStation", "FGBuildableDroneStation",
         "FGBuildableResourceSink", "FGBuildableSpaceElevator",
         "FGBuildableConveyorLift",
+        "FGBuildableTradingPost",
+        "FGBuildablePowerPole", "FGBuildablePowerStorage", "FGBuildableCircuitSwitch", "FGBuildablePriorityPowerSwitch",
     ];
     /// Docs native classes drawn as a repeated straight piece.
     static readonly string[] StripNatives = ["FGBuildableConveyorBelt", "FGBuildablePipeline"];

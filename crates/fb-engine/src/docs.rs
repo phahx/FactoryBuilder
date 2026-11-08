@@ -292,6 +292,16 @@ pub fn parse_docs(root: &Value) -> Result<GameData, DocsError> {
             if class.starts_with("Build_") && !name.is_empty() {
                 data.building_names.insert(class.to_string(), name.to_string());
             }
+            if class.starts_with("Build_") {
+                let power = f64_field(c, "mPowerConsumption");
+                if power > 0.0 {
+                    data.buildable_power.insert(class.to_string(), power);
+                }
+                let store = f64_field(c, "mPowerStoreCapacity");
+                if store > 0.0 {
+                    data.power_store_mwh.insert(class.to_string(), store);
+                }
+            }
         }
     }
     crate::extraction::parse_extraction(&by_native, &mut data);
