@@ -129,13 +129,18 @@ fn find(hay: &[u8], needle: &[u8], from: usize) -> Option<usize> {
 }
 
 /// The compressed chunks, inflated one by one.
-struct Chunks<'a> {
+pub(crate) struct Chunks<'a> {
     b: &'a [u8],
     o: usize,
 }
 
-impl Chunks<'_> {
-    fn next(&mut self) -> Option<Result<Vec<u8>, SaveError>> {
+impl<'a> Chunks<'a> {
+    /// The chunks that follow the header, which ends at `header_end`.
+    pub(crate) fn after_header(bytes: &'a [u8], header_end: usize) -> Option<Self> {
+        find(bytes, &TAG, header_end).map(|o| Chunks { b: bytes, o })
+    }
+
+    pub(crate) fn next(&mut self) -> Option<Result<Vec<u8>, SaveError>> {
         if self.o >= self.b.len() {
             return None;
         }
@@ -332,6 +337,9 @@ mod tests {
     fn real_saves() {
         let Ok(dir) = std::env::var("FB_TEST_SAVES") else { return };
         for e in std::fs::read_dir(dir).unwrap().filter_map(Result::ok) {
+            if !e.path().extension().is_some_and(|x| x.eq_ignore_ascii_case("sav")) {
+                continue;
+            }
             let bytes = std::fs::read(e.path()).unwrap();
             let (h, _) = read_header(&bytes).unwrap();
             let list = purchased_schematics(&bytes).unwrap();

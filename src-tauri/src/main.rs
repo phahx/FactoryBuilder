@@ -26,6 +26,7 @@ mod room;
 mod saves;
 mod selftest;
 mod setup;
+mod world;
 
 /// Development build (`--features dev`): Developer settings, and it never
 /// hands off to an installed copy (except in a test profile).
@@ -529,6 +530,42 @@ async fn read_save_unlocks(app: AppHandle, path: String) -> CmdResult<fb_model::
     .map_err(|e| e.to_string())?
 }
 
+// ----------------------------------------------------------------- world map
+
+/// The player's saves grouped by session, newest first.
+#[tauri::command]
+async fn world_sessions(app: AppHandle) -> CmdResult<Vec<fb_model::world::Session>> {
+    tauri::async_runtime::spawn_blocking(move || {
+        app.state::<AppState>().log("world_sessions");
+        world::sessions()
+    })
+    .await
+    .map_err(|e| e.to_string())
+}
+
+/// What a save has built (machines, belts and pipes, item flow).
+#[tauri::command]
+async fn world_load(app: AppHandle, path: String) -> CmdResult<fb_model::world::World> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        state.log("world_load");
+        world::load_for(&state, &path)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// The newest save of a session (headers only), so the window can follow it.
+#[tauri::command]
+async fn world_latest(app: AppHandle, session: String) -> CmdResult<Option<fb_model::saves::SaveSummary>> {
+    tauri::async_runtime::spawn_blocking(move || {
+        app.state::<AppState>().log("world_latest");
+        world::latest(&session)
+    })
+    .await
+    .map_err(|e| e.to_string())
+}
+
 // --------------------------------------------------------------------- rooms
 
 /// Tells the window something arrived, so it fetches it right away instead
@@ -673,6 +710,9 @@ fn main() {
             list_saves,
             pick_save_game,
             read_save_unlocks,
+            world_sessions,
+            world_load,
+            world_latest,
             room_host,
             room_join,
             room_leave,
