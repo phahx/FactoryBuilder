@@ -381,7 +381,8 @@ pub fn map_ui(app: &mut FactoryApp, ui: &mut egui::Ui) {
                 SiteKind::WellCore => "Resource Well",
             };
             let taken = if occupied.contains(n.id.as_str()) { " · has an extractor" } else { "" };
-            hover = Some(format!("{what} · {purity} {kind}{taken}"));
+            // Pressurizer sites have no purity in the game data.
+            hover = Some(if n.kind == SiteKind::WellCore { format!("{what} · {kind}{taken}") } else { format!("{what} · {purity} {kind}{taken}") });
         }
     }
 
