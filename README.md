@@ -69,6 +69,12 @@ to forward the port and for your public address; if the router can't say, the ad
 from api.ipify.org. The room dialog shows what worked and, if needed, which TCP port to
 forward by hand.
 
+In a room, Alt+click empty canvas to ping a spot, and press / to send everyone a short
+message (it shows by your cursor and under In this room in the right-hand panel). Click
+someone under In this room to follow their view; Esc, or panning, zooming or clicking
+yourself, stops. Nodes someone else has selected get an outline and a name chip in their
+colour.
+
 ## Layout
 
 - `crates/fb-engine`: Docs parser, LP planner (good_lp/microlp), layout and flow simulation (petgraph)

@@ -102,6 +102,8 @@ impl FactoryApp {
 
     /// Centres the view on a match (and selects it, if it's a node).
     fn show_hit(&mut self, hit: Hit) {
+        // Moving the view myself stops following someone's.
+        self.room.following = None;
         match hit {
             Hit::Node(id) => {
                 self.focus_node = Some(id);

@@ -361,6 +361,18 @@ pub fn list_row(ui: &mut Ui, height: f32, add: impl FnOnce(&mut Ui)) -> Response
     resp.on_hover_cursor(CursorIcon::PointingHand)
 }
 
+/// A row laid out like `list_row` but not clickable, so it has no hover
+/// look (for an entry in a list of clickable rows that can't be clicked).
+pub fn plain_row(ui: &mut Ui, height: f32, add: impl FnOnce(&mut Ui)) {
+    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), height), Sense::hover());
+    let mut child = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(rect.shrink2(vec2(6.0, 0.0)))
+            .layout(Layout::left_to_right(Align::Center)),
+    );
+    add(&mut child);
+}
+
 /// A non-interactive row: icon, label, value on the right.
 pub fn info_row(ui: &mut Ui, assets: &mut Assets, class: &str, label: &str, value: RichText) {
     split_row(ui, 26.0, |ui| {

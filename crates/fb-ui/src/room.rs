@@ -8,7 +8,7 @@
 use crate::app::Planner;
 use crate::graph::FactoryGraph;
 use crate::theme::*;
-use egui::{pos2, vec2, Align2, Color32, FontId, Pos2, Shape, Stroke};
+use egui::{pos2, vec2, Color32, FontId, Pos2, Shape, Stroke};
 use egui_node_graph2::NodeId;
 use fb_model::room::{HostInfo, Peer};
 use serde::{Deserialize, Serialize};
@@ -37,6 +37,63 @@ pub struct RoomUi {
     pub last_poll: f64,
     /// The backend pushed "something arrived" while a poll was running.
     pub wake_pending: bool,
+    /// Recent pings (mine included), oldest first.
+    pub pings: Vec<PingMark>,
+    /// The room's last `MESSAGES_KEPT` messages, oldest first (mine included).
+    pub messages: std::collections::VecDeque<ChatLine>,
+    /// Each person's latest message and when it arrived, for the bubble
+    /// beside their cursor.
+    pub bubbles: BTreeMap<u32, (String, f64)>,
+    /// What each other person is looking at.
+    pub views: BTreeMap<u32, PeerView>,
+    /// Each other person's selected nodes, on the document they're on.
+    pub selections: BTreeMap<u32, (u32, Vec<NodeId>)>,
+    /// The person whose view mine follows.
+    pub following: Option<u32>,
+    /// The message being typed (opened with /).
+    pub chat: Option<ChatDraft>,
+    /// The view and selection last sent, and when (sending is throttled).
+    pub sent_view: Option<(PeerView, f64)>,
+    pub sent_selection: Option<((u32, Vec<NodeId>), f64)>,
+    /// Self-test screenshots: pings and bubbles hold still instead of
+    /// animating and fading.
+    pub frozen: bool,
+}
+
+/// A ping on the canvas: who, where (graph coordinates), on which document, when.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PingMark {
+    pub id: u32,
+    pub pos: Pos2,
+    pub doc: u32,
+    pub at: f64,
+}
+
+/// One entry in the room's message list. The name and colour are kept so
+/// the line still reads right after its sender leaves.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ChatLine {
+    pub id: u32,
+    pub name: String,
+    pub color: [u8; 3],
+    pub text: String,
+}
+
+/// Someone's view: the document, the centre in graph coordinates, the zoom.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PeerView {
+    pub doc: u32,
+    pub center: Pos2,
+    pub zoom: f32,
+}
+
+/// The message box opened with /: where it sits (screen) and its text.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ChatDraft {
+    pub at: Pos2,
+    pub text: String,
+    /// Give the box keyboard focus on its next frame.
+    pub focus: bool,
 }
 
 impl Default for RoomUi {
@@ -52,6 +109,16 @@ impl Default for RoomUi {
             cursor_shown: BTreeMap::new(),
             last_poll: 0.0,
             wake_pending: false,
+            pings: Vec::new(),
+            messages: Default::default(),
+            bubbles: BTreeMap::new(),
+            views: BTreeMap::new(),
+            selections: BTreeMap::new(),
+            following: None,
+            chat: None,
+            sent_view: None,
+            sent_selection: None,
+            frozen: false,
         }
     }
 }
@@ -66,6 +133,59 @@ impl RoomUi {
     pub fn my_color(&self) -> Color32 {
         self.peers.get(&self.me).map(|p| rgb(p.color)).unwrap_or(ACCENT)
     }
+    /// Someone left: drop everything of theirs that's drawn or followed.
+    pub fn forget_peer(&mut self, id: u32) {
+        self.cursors.remove(&id);
+        self.cursor_doc.remove(&id);
+        self.cursor_shown.remove(&id);
+        self.bubbles.remove(&id);
+        self.views.remove(&id);
+        self.selections.remove(&id);
+        self.pings.retain(|p| p.id != id);
+        if self.following == Some(id) {
+            self.following = None;
+        }
+    }
+}
+
+/// Dark or light text, whichever reads on `bg` (perceived brightness).
+pub fn text_on(bg: Color32) -> Color32 {
+    let y = 0.299 * bg.r() as f32 + 0.587 * bg.g() as f32 + 0.114 * bg.b() as f32;
+    if y > 140.0 {
+        TEXT_DARK
+    } else {
+        TEXT
+    }
+}
+
+pub fn with_alpha(c: Color32, alpha: u8) -> Color32 {
+    Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), alpha)
+}
+
+/// The name tag under cursors (also beside pings): a dark box with a stripe
+/// of the person's colour. `alpha` fades the whole tag. Returns the box.
+pub fn paint_name_tag(painter: &egui::Painter, at: Pos2, name: &str, color: Color32, alpha: u8) -> egui::Rect {
+    let k = alpha as f32 / 255.0;
+    let text = with_alpha(TEXT, alpha);
+    let galley = painter.layout_no_wrap(name.to_string(), FontId::proportional(12.0), text);
+    let rect = egui::Rect::from_min_size(at, galley.size() + vec2(10.0, 4.0));
+    painter.rect_filled(rect, 0.0, Color32::from_rgba_unmultiplied(12, 12, 12, (200.0 * k) as u8));
+    painter.rect_filled(egui::Rect::from_min_size(rect.min, vec2(3.0, rect.height())), 0.0, with_alpha(color, (150.0 * k) as u8));
+    painter.galley(pos2(rect.min.x + 6.0, rect.min.y + 2.0), galley, text);
+    rect
+}
+
+/// Widest a message bubble gets before its text wraps.
+const BUBBLE_WIDTH: f32 = 240.0;
+
+/// A message in the sender's colour, its top-left at `at`.
+pub fn paint_bubble(painter: &egui::Painter, at: Pos2, text: &str, color: Color32) {
+    let fg = text_on(color);
+    let galley = painter.layout(text.to_string(), FontId::proportional(14.0), fg, BUBBLE_WIDTH);
+    let rect = egui::Rect::from_min_size(at, galley.size() + vec2(16.0, 10.0));
+    painter.rect_filled(rect.translate(vec2(0.0, 2.0)), 0.0, Color32::from_black_alpha(90));
+    painter.rect_filled(rect, 0.0, color);
+    painter.galley(rect.min + vec2(8.0, 5.0), galley, fg);
 }
 
 pub fn rgb([r, g, b]: [u8; 3]) -> Color32 {
@@ -105,8 +225,9 @@ pub struct SharedDoc {
 /// The standard arrow pointer, tip at the origin, 20 px tall.
 const ARROW: [[f32; 2]; 7] = [[0.0, 0.0], [0.0, 17.0], [4.5, 13.0], [7.5, 20.0], [10.0, 19.0], [7.0, 12.0], [12.5, 12.0]];
 
-/// Draws a cursor at `tip`; others' cursors are ghosted and named.
-pub fn paint_cursor(painter: &egui::Painter, tip: Pos2, color: Color32, name: Option<&str>) {
+/// Draws a cursor at `tip`; others' cursors are ghosted and named, with
+/// their latest message (if any) in a bubble under the name.
+pub fn paint_cursor(painter: &egui::Painter, tip: Pos2, color: Color32, name: Option<&str>, bubble: Option<&str>) {
     let alpha = if name.is_some() { 150 } else { 255 };
     let fill = Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), alpha);
     let outline = Color32::from_rgba_unmultiplied(12, 12, 12, alpha);
@@ -116,14 +237,10 @@ pub fn paint_cursor(painter: &egui::Painter, tip: Pos2, color: Color32, name: Op
     painter.add(Shape::convex_polygon(vec![pts[2], pts[3], pts[4], pts[5]], fill, Stroke::NONE));
     painter.add(Shape::closed_line(pts, Stroke::new(1.0_f32, outline)));
     if let Some(name) = name {
-        let font = FontId::proportional(12.0);
-        let galley = painter.layout_no_wrap(name.to_string(), font, TEXT);
-        let at = tip + vec2(10.0, 22.0);
-        let rect = egui::Rect::from_min_size(at, galley.size() + vec2(10.0, 4.0));
-        painter.rect_filled(rect, 0.0, Color32::from_rgba_unmultiplied(12, 12, 12, 200));
-        painter.rect_filled(egui::Rect::from_min_size(rect.min, vec2(3.0, rect.height())), 0.0, fill);
-        painter.galley(pos2(rect.min.x + 6.0, rect.min.y + 2.0), galley, TEXT);
-        let _ = Align2::LEFT_TOP;
+        let tag = paint_name_tag(painter, tip + vec2(10.0, 22.0), name, color, 255);
+        if let Some(text) = bubble {
+            paint_bubble(painter, pos2(tag.min.x, tag.max.y + 3.0), text, color);
+        }
     }
 }
 

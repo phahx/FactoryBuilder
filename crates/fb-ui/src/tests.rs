@@ -731,6 +731,8 @@ struct FakeNet {
     guest: std::collections::VecDeque<room::RoomEvent>,
     doc: Option<String>,
     rev: u64,
+    /// Everything relayed, in order (tests check what went out).
+    sent: Vec<room::Wire>,
 }
 
 fn test_code() -> String {
@@ -765,14 +767,18 @@ fn room_hook(net: Rc<RefCell<FakeNet>>, is_host: bool) -> RoomHook {
                 let wire: Wire = serde_json::from_value(args["wire"].clone()).unwrap();
                 let me = if is_host { 0 } else { 1 };
                 let out = match wire {
-                    Wire::Cursor { x, y, doc, .. } => Wire::Cursor { id: me, x, y, doc },
                     Wire::Doc { json, .. } => {
                         n.rev += 1;
                         n.doc = Some(json.clone());
                         Wire::Doc { from: me, rev: n.rev, json }
                     }
-                    other => other,
+                    // Cursor, ping, chat, view, selection: stamped and checked like the host does.
+                    other => match other.from_peer(me) {
+                        Some(w) => w,
+                        None => return Some(Ok(Value::Null)),
+                    },
                 };
+                n.sent.push(out.clone());
                 if is_host { n.guest.push_back(RoomEvent::Message(out)) } else { n.host.push_back(RoomEvent::Message(out)) }
                 Ok(Value::Null)
             }
@@ -832,6 +838,328 @@ fn room_shares_the_factory_and_cursors() {
     let seen = *host.room.cursors.get(&1).expect("host has the guest's cursor");
     let expected = guest.screen_to_graph_unzoomed(at);
     assert!((seen - expected).length() < 0.5, "cursor {seen:?} vs {expected:?}");
+}
+
+/// A host who planned iron plates and a guest who joined, over a fake relay.
+fn room_pair() -> Option<(Rc<RefCell<FakeNet>>, egui::Context, FactoryApp, egui::Context, FactoryApp)> {
+    let net: Rc<RefCell<FakeNet>> = Default::default();
+    let (hctx, mut host, _) = harness_with(Some(room_hook(net.clone(), true)))?;
+    let (gctx, mut guest, _) = harness_with(Some(room_hook(net.clone(), false))).unwrap();
+    frames(&hctx, &mut host, 2);
+    frames(&gctx, &mut guest, 2);
+    host.open_room("Hoster".into());
+    frames(&hctx, &mut host, 2);
+    host.dialog = crate::dialogs::Dialog::None;
+    host.planner_mut().targets = vec![Target { item: "Desc_IronPlate_C".into(), rate: 60.0 }];
+    host.press_plan();
+    frames(&hctx, &mut host, 8);
+    guest.join_room("Guesty".into(), test_code());
+    frames(&gctx, &mut guest, 6);
+    frames(&hctx, &mut host, 3);
+    assert_eq!(guest.node_count(), host.node_count());
+    Some((net, hctx, host, gctx, guest))
+}
+
+/// One frame with these events and modifier keys held.
+fn frame_mods(ctx: &egui::Context, app: &mut FactoryApp, events: Vec<egui::Event>, modifiers: egui::Modifiers) {
+    crate::widgets::TEST_BUTTONS.with(|b| b.borrow_mut().clear());
+    let input = egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1600.0, 960.0))),
+        events,
+        modifiers,
+        focused: true,
+        ..Default::default()
+    };
+    let _ = ctx.run(input, |ctx| app.ui(ctx));
+}
+
+fn alt_click(ctx: &egui::Context, app: &mut FactoryApp, at: egui::Pos2) {
+    let alt = egui::Modifiers::ALT;
+    let ev = |pressed| egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: alt };
+    frame_mods(ctx, app, vec![egui::Event::PointerMoved(at)], alt);
+    frame_mods(ctx, app, vec![ev(true)], alt);
+    frame_mods(ctx, app, vec![ev(false)], alt);
+    frames(ctx, app, 2);
+}
+
+fn key(k: egui::Key) -> Vec<egui::Event> {
+    vec![
+        egui::Event::Key { key: k, physical_key: None, pressed: true, repeat: false, modifiers: Default::default() },
+        egui::Event::Key { key: k, physical_key: None, pressed: false, repeat: false, modifiers: Default::default() },
+    ]
+}
+
+/// A point on the canvas, well inside it, that no node covers.
+fn empty_spot(app: &FactoryApp) -> egui::Pos2 {
+    let r = app.editor_rect.shrink(60.0);
+    let mut y = r.top();
+    while y < r.bottom() {
+        let mut x = r.left();
+        while x < r.right() {
+            let p = egui::pos2(x, y);
+            if !app.node_rects.values().any(|n| n.expand(20.0).contains(p)) {
+                return p;
+            }
+            x += 40.0;
+        }
+        y += 40.0;
+    }
+    panic!("no empty canvas");
+}
+
+/// Every shape drawn on one frame (flattened).
+fn drawn_shapes(ctx: &egui::Context, app: &mut FactoryApp) -> Vec<egui::Shape> {
+    fn walk(shape: &egui::Shape, out: &mut Vec<egui::Shape>) {
+        match shape {
+            egui::Shape::Vec(v) => v.iter().for_each(|s| walk(s, out)),
+            s => out.push(s.clone()),
+        }
+    }
+    crate::widgets::TEST_BUTTONS.with(|b| b.borrow_mut().clear());
+    let input = egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1600.0, 960.0))), focused: true, ..Default::default() };
+    let out = ctx.run(input, |ctx| app.ui(ctx));
+    let mut shapes = Vec::new();
+    for s in &out.shapes {
+        walk(&s.shape, &mut shapes);
+    }
+    shapes
+}
+
+fn graph_centre(app: &FactoryApp) -> egui::Pos2 {
+    app.screen_to_graph_unzoomed(app.editor_rect.center())
+}
+
+#[test]
+fn room_pings_and_messages_arrive_and_show() {
+    let Some((net, hctx, mut host, gctx, mut guest)) = room_pair() else { return };
+    // Alt+click on empty canvas pings, and doesn't drop the guest's selection.
+    let node = guest.graph().iter_nodes().next().unwrap();
+    guest.state.selected_nodes = vec![node];
+    let spot = empty_spot(&guest);
+    alt_click(&gctx, &mut guest, spot);
+    assert_eq!(guest.selected(), vec![node], "Alt+click is a ping, not a deselect");
+    let at = guest.screen_to_graph_unzoomed(spot);
+    let mine = guest.room.pings.last().expect("my own ping shows too").clone();
+    assert_eq!((mine.id, mine.doc), (1, guest.active));
+    frames(&hctx, &mut host, 2);
+    let ping = host.room.pings.last().expect("the host got the ping").clone();
+    assert_eq!((ping.id, ping.doc), (1, host.active));
+    assert!((ping.pos - at).length() < 0.5, "{:?} vs {at:?}", ping.pos);
+    // Drawn on the host's canvas where the guest clicked (same view here).
+    let expected = host.editor_rect.min + host.state.pan_zoom.pan + ping.pos.to_vec2() * host.state.pan_zoom.zoom;
+    let rings = drawn_shapes(&hctx, &mut host).into_iter().filter(|s| matches!(s, egui::Shape::Circle(c) if (c.center - expected).length() < 1.0)).count();
+    assert!(rings >= 2, "a ring and a dot at the ping");
+    // Gone after about 2 s (frames are 1/60 s apart here).
+    frames(&hctx, &mut host, 130);
+    assert!(host.room.pings.is_empty(), "pings fade after 2 s");
+
+    // / opens a box at the pointer (without typing the /); Enter sends.
+    frame_with(&gctx, &mut guest, vec![egui::Event::PointerMoved(spot)]);
+    frame_with(&gctx, &mut guest, vec![egui::Event::Text("/".into())]);
+    frames(&gctx, &mut guest, 1);
+    let draft = guest.room.chat.clone().expect("the message box opened");
+    assert_eq!(draft.text, "", "the / isn't typed into the box");
+    assert_eq!(draft.at, spot);
+    frame_with(&gctx, &mut guest, vec![egui::Event::Text("Over here".into())]);
+    frame_with(&gctx, &mut guest, key(egui::Key::Enter));
+    frames(&gctx, &mut guest, 1);
+    assert!(guest.room.chat.is_none(), "Enter sent it and closed the box");
+    frames(&hctx, &mut host, 2);
+    let last = host.room.messages.back().expect("the host got the message").clone();
+    assert_eq!((last.id, last.name.as_str(), last.text.as_str()), (1, "Guesty", "Over here"));
+    assert!(host.room.bubbles.contains_key(&1));
+    // Shown beside the guest's cursor and in the overview's Messages list.
+    let texts = drawn_texts(&hctx, &mut host);
+    assert!(texts.iter().filter(|t| t.contains("Over here")).count() >= 2, "bubble and list: {texts:?}");
+    assert!(texts.iter().any(|t| t == "Messages"));
+    // Esc cancels without sending.
+    let before = net.borrow().sent.len();
+    frame_with(&gctx, &mut guest, vec![egui::Event::Text("/".into())]);
+    frames(&gctx, &mut guest, 1);
+    frame_with(&gctx, &mut guest, vec![egui::Event::Text("never mind".into())]);
+    frame_with(&gctx, &mut guest, key(egui::Key::Escape));
+    frames(&gctx, &mut guest, 1);
+    assert!(guest.room.chat.is_none());
+    assert!(!net.borrow().sent[before..].iter().any(|w| matches!(w, room::Wire::Chat { .. })), "Esc sent nothing");
+    // The bubble goes after about 6 s; the list keeps it.
+    frames(&hctx, &mut host, 370);
+    assert!(!host.room.bubbles.contains_key(&1));
+    assert_eq!(host.room.messages.len(), 1);
+}
+
+#[test]
+fn chat_text_is_cleaned_and_capped() {
+    let Some((net, hctx, mut host, gctx, mut guest)) = room_pair() else { return };
+    // Sending: control characters out, at most 200 characters.
+    let mid = guest.editor_rect.center();
+    frame_with(&gctx, &mut guest, vec![egui::Event::PointerMoved(mid)]);
+    frame_with(&gctx, &mut guest, vec![egui::Event::Text("/".into())]);
+    frames(&gctx, &mut guest, 1);
+    guest.room.chat.as_mut().unwrap().text = format!("hi\u{0007}\u{001B}[31m{}", "y".repeat(300));
+    frame_with(&gctx, &mut guest, key(egui::Key::Enter));
+    frames(&gctx, &mut guest, 1);
+    let sent = net.borrow().sent.iter().rev().find_map(|w| match w {
+        room::Wire::Chat { text, .. } => Some(text.clone()),
+        _ => None,
+    });
+    let sent = sent.expect("sent");
+    assert!(sent.starts_with("hi[31myyy"), "{sent}");
+    assert_eq!(sent.chars().count(), room::MAX_CHAT);
+    frames(&hctx, &mut host, 2);
+    assert_eq!(host.room.messages.back().unwrap().text, sent);
+
+    // Receiving: whatever a (hostile) host sends is cleaned and capped too,
+    // and an empty one is dropped.
+    let raw = format!("\u{202E}evil\r\n{}", "z".repeat(1000));
+    net.borrow_mut().guest.push_back(room::RoomEvent::Message(room::Wire::Chat { id: 0, text: raw }));
+    net.borrow_mut().guest.push_back(room::RoomEvent::Message(room::Wire::Chat { id: 0, text: "\u{0000}\u{0008}".into() }));
+    frames(&gctx, &mut guest, 2);
+    let got: Vec<String> = guest.room.messages.iter().filter(|m| m.id == 0).map(|m| m.text.clone()).collect();
+    assert_eq!(got.len(), 1, "the empty one was dropped");
+    assert!(got[0].starts_with("evilzzz"), "{}", got[0]);
+    assert_eq!(got[0].chars().count(), room::MAX_CHAT);
+    // The list keeps the last 20.
+    for k in 0..25 {
+        net.borrow_mut().guest.push_back(room::RoomEvent::Message(room::Wire::Chat { id: 0, text: format!("m{k}") }));
+    }
+    frames(&gctx, &mut guest, 2);
+    assert_eq!(guest.room.messages.len(), crate::room_extras::MESSAGES_KEPT);
+    assert_eq!(guest.room.messages.back().unwrap().text, "m24");
+}
+
+#[test]
+fn following_switches_document_tracks_the_view_and_stops_when_i_pan() {
+    let Some((_net, hctx, mut host, gctx, mut guest)) = room_pair() else { return };
+    // The host opens a second factory; the guest stays on the first.
+    let first = host.active;
+    host.add_factory_file(&hctx, &ingot_factory("Smelting", 2.0));
+    let second = host.active;
+    assert_ne!(first, second);
+    frames(&hctx, &mut host, 8);
+    frames(&gctx, &mut guest, 4);
+    assert!(guest.doc(second).is_some(), "the guest has the new factory");
+    assert_eq!(guest.active, first);
+
+    // The host zooms in somewhere.
+    let wheel = |dy: f32| egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: egui::vec2(0.0, dy), modifiers: Default::default() };
+    let at = host.editor_rect.center() + egui::vec2(150.0, 40.0);
+    frame_with(&hctx, &mut host, vec![egui::Event::PointerMoved(at)]);
+    frame_with(&hctx, &mut host, vec![wheel(120.0)]);
+    frames(&hctx, &mut host, 60); // smooth zooming settles, the last view goes out
+
+    // The guest clicks the host in "In this room" (their own row isn't clickable).
+    frames(&gctx, &mut guest, 1); // buttons are per thread: the guest's frame last
+    assert!(button("Follow Guesty").is_none(), "no following myself");
+    press(&gctx, &mut guest, "Follow Hoster");
+    assert_eq!(guest.room.following, Some(0));
+    frames(&gctx, &mut guest, 3);
+    assert_eq!(guest.active, second, "switched to the host's document");
+    let close = |a: &FactoryApp, b: &FactoryApp| (graph_centre(a) - graph_centre(b)).length() < 0.5 && (a.state.pan_zoom.zoom - b.state.pan_zoom.zoom).abs() < 1e-4;
+    assert!(close(&host, &guest), "same view: host {:?} @ {}, guest {:?} @ {}", graph_centre(&host), host.state.pan_zoom.zoom, graph_centre(&guest), guest.state.pan_zoom.zoom);
+    // A bar names who I'm following.
+    let texts = drawn_texts(&gctx, &mut guest);
+    assert!(texts.iter().any(|t| t == "Following Hoster"), "{texts:?}");
+    assert!(button("Stop following").is_some());
+
+    // The host moves on: zooms out and pans (Ctrl+drag); the guest keeps up.
+    frame_with(&hctx, &mut host, vec![wheel(-200.0)]);
+    frames(&hctx, &mut host, 60); // smooth zooming settles, the last view goes out
+    let from = empty_spot(&host);
+    let ctrl = egui::Modifiers::COMMAND;
+    frame_mods(&hctx, &mut host, vec![egui::Event::PointerMoved(from)], ctrl);
+    frame_mods(&hctx, &mut host, vec![egui::Event::PointerButton { pos: from, button: egui::PointerButton::Primary, pressed: true, modifiers: ctrl }], ctrl);
+    for k in 1..=6 {
+        frame_mods(&hctx, &mut host, vec![egui::Event::PointerMoved(from + egui::vec2(20.0 * k as f32, 10.0 * k as f32))], ctrl);
+    }
+    frame_mods(&hctx, &mut host, vec![egui::Event::PointerButton { pos: from + egui::vec2(120.0, 60.0), button: egui::PointerButton::Primary, pressed: false, modifiers: ctrl }], ctrl);
+    frames(&hctx, &mut host, 60); // smooth zooming settles, the last view goes out
+    frames(&gctx, &mut guest, 3);
+    assert!(close(&host, &guest), "still the same view: host {:?} @ {}, guest {:?} @ {}", graph_centre(&host), host.state.pan_zoom.zoom, graph_centre(&guest), guest.state.pan_zoom.zoom);
+
+    // The guest scrolls on the canvas: following stops and the view stays theirs.
+    let mid = guest.editor_rect.center();
+    frame_with(&gctx, &mut guest, vec![egui::Event::PointerMoved(mid)]);
+    frame_with(&gctx, &mut guest, vec![wheel(60.0)]);
+    frames(&gctx, &mut guest, 3);
+    assert_eq!(guest.room.following, None, "my own zoom stops following");
+    frames(&gctx, &mut guest, 60);
+    let mine = (graph_centre(&guest), guest.state.pan_zoom.zoom);
+    let mid = host.editor_rect.center();
+    frame_with(&hctx, &mut host, vec![egui::Event::PointerMoved(mid)]);
+    frame_with(&hctx, &mut host, vec![wheel(150.0)]);
+    frames(&hctx, &mut host, 60); // smooth zooming settles, the last view goes out
+    frames(&gctx, &mut guest, 3);
+    assert!((guest.state.pan_zoom.zoom - mine.1).abs() < 1e-4, "no longer tracking");
+    assert!(!drawn_texts(&gctx, &mut guest).iter().any(|t| t.starts_with("Following")));
+
+    // Following again, then a click on the canvas or Esc stops it.
+    frames(&gctx, &mut guest, 1); // buttons are per thread: the guest's frame last
+    press(&gctx, &mut guest, "Follow Hoster");
+    frames(&gctx, &mut guest, 2);
+    assert_eq!(guest.room.following, Some(0));
+    let spot = empty_spot(&guest);
+    click(&gctx, &mut guest, spot, egui::PointerButton::Primary);
+    assert_eq!(guest.room.following, None, "a click on the canvas stops it");
+    frames(&gctx, &mut guest, 1); // buttons are per thread: the guest's frame last
+    press(&gctx, &mut guest, "Follow Hoster");
+    frames(&gctx, &mut guest, 2);
+    frame_with(&gctx, &mut guest, key(egui::Key::Escape));
+    assert_eq!(guest.room.following, None, "Esc stops it");
+    // And so does the person leaving.
+    frames(&gctx, &mut guest, 1); // buttons are per thread: the guest's frame last
+    press(&gctx, &mut guest, "Follow Hoster");
+    assert_eq!(guest.room.following, Some(0));
+    _net.borrow_mut().guest.push_back(room::RoomEvent::Message(room::Wire::Left { id: 0 }));
+    frames(&gctx, &mut guest, 2);
+    assert_eq!(guest.room.following, None);
+}
+
+#[test]
+fn others_selections_are_outlined_with_name_chips() {
+    let Some((_net, hctx, mut host, gctx, mut guest)) = room_pair() else { return };
+    let nodes: Vec<_> = host.graph().iter_nodes().collect();
+    host.state.selected_nodes = vec![nodes[0], nodes[1]];
+    frames(&hctx, &mut host, 8);
+    frames(&gctx, &mut guest, 2);
+    let (doc, got) = guest.room.selections.get(&0).cloned().expect("the guest knows the host's selection");
+    assert_eq!(doc, guest.active);
+    assert_eq!(got, vec![nodes[0], nodes[1]]);
+
+    let host_color = egui::Color32::from_rgb(0xFA, 0x95, 0x49);
+    let shapes = drawn_shapes(&gctx, &mut guest);
+    for n in [nodes[0], nodes[1]] {
+        let r = guest.node_rects[&n];
+        let outline = shapes.iter().any(|s| matches!(s, egui::Shape::Rect(x) if x.stroke.width == 2.0 && x.stroke.color == host_color && (x.rect.min - (r.min - egui::vec2(1.0, 1.0))).length() < 0.01));
+        assert!(outline, "a 2 px outline in the host's colour round {n:?}");
+        let chip = shapes.iter().any(|s| matches!(s, egui::Shape::Rect(x) if x.fill == host_color && (x.rect.left_bottom() - (r.left_top() - egui::vec2(2.0, 2.0))).length() < 0.01));
+        assert!(chip, "a name chip sitting on {n:?}'s top-left corner");
+    }
+    assert!(!shapes.iter().any(|s| matches!(s, egui::Shape::Rect(x) if x.stroke.color == host_color && x.rect.contains_rect(guest.node_rects[&nodes[2]]))), "unselected nodes have no outline");
+
+    // A node two people have selected: both chips, side by side.
+    net_select(&_net, 5, nodes[0], guest.active);
+    guest.room.peers.insert(5, room::Peer { id: 5, name: "Ada".into(), color: [0x86, 0xC7, 0xF2] });
+    frames(&gctx, &mut guest, 2);
+    let shapes = drawn_shapes(&gctx, &mut guest);
+    let r = guest.node_rects[&nodes[0]];
+    let chips: Vec<egui::Rect> = shapes.iter().filter_map(|s| match s {
+        egui::Shape::Rect(x) if (x.fill == host_color || x.fill == egui::Color32::from_rgb(0x86, 0xC7, 0xF2)) && (x.rect.bottom() - (r.top() - 4.0)).abs() < 0.01 => Some(x.rect),
+        _ => None,
+    }).collect();
+    assert_eq!(chips.len(), 2, "{chips:?}");
+    assert!((chips[1].left() - chips[0].right() - 2.0).abs() < 0.01 || (chips[0].left() - chips[1].right() - 2.0).abs() < 0.01, "side by side: {chips:?}");
+
+    // Deselecting clears it.
+    host.state.selected_nodes.clear();
+    frames(&hctx, &mut host, 8);
+    frames(&gctx, &mut guest, 2);
+    assert_eq!(guest.room.selections.get(&0).map(|s| s.1.len()), Some(0));
+}
+
+/// Someone (by id) selecting `node` on `doc`, arriving at the guest.
+fn net_select(net: &Rc<RefCell<FakeNet>>, id: u32, node: egui_node_graph2::NodeId, doc: u32) {
+    let r = crate::room_extras::node_ref(node).unwrap();
+    net.borrow_mut().guest.push_back(room::RoomEvent::Message(room::Wire::Selection { id, doc, nodes: vec![r] }));
 }
 
 /// Structure of a graph that doesn't depend on ids: per node (kind, numbers,

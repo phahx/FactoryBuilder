@@ -5,7 +5,9 @@
 //! forward the port (renewed while open, removed on close); if the router
 //! can't say, it asks api.ipify.org for the public address. The room code
 //! holds the local and public addresses and the port; a guest tries both and
-//! keeps the first that answers. The host relays cursors and keeps the
+//! keeps the first that answers. The host relays each person's cursor,
+//! pings, messages, view and selection (stamped with the real sender and
+//! checked by `Wire::from_peer`) and keeps the
 //! authoritative copy of the shared document: every edited document gets a
 //! new revision and goes to everyone else. Messages are JSON
 //! `fb_model::room::Wire` values. Each incoming message calls `notify` so the
@@ -272,14 +274,18 @@ impl Host {
     pub fn send(&self, wire: Wire) {
         let mut st = self.state.lock().unwrap();
         match wire {
-            Wire::Cursor { x, y, doc, .. } => broadcast(&st, None, &Wire::Cursor { id: HOST_ID, x, y, doc }),
             Wire::Doc { json, .. } => {
                 st.rev += 1;
                 st.doc = Some(json.clone());
                 let msg = Wire::Doc { from: HOST_ID, rev: st.rev, json };
                 broadcast(&st, None, &msg);
             }
-            _ => {}
+            // Cursor, ping, chat, view, selection: checked like a guest's.
+            other => {
+                if let Some(m) = other.from_peer(HOST_ID) {
+                    broadcast(&st, None, &m);
+                }
+            }
         }
     }
 
@@ -360,11 +366,6 @@ async fn serve_guest(stream: TcpStream, state: Arc<Mutex<HostState>>, events: Ev
         let Ok(wire) = serde_json::from_str::<Wire>(t.as_str()) else { continue };
         let mut st = state.lock().unwrap();
         match wire {
-            Wire::Cursor { x, y, doc, .. } if x.is_finite() && y.is_finite() => {
-                let m = Wire::Cursor { id, x, y, doc };
-                broadcast(&st, Some(id), &m);
-                events.push(RoomEvent::Message(m));
-            }
             Wire::Doc { json, .. } => {
                 st.rev += 1;
                 st.doc = Some(json.clone());
@@ -372,7 +373,16 @@ async fn serve_guest(stream: TcpStream, state: Arc<Mutex<HostState>>, events: Ev
                 broadcast(&st, Some(id), &m);
                 events.push(RoomEvent::Message(m));
             }
-            _ => {}
+            // Cursor, ping, chat, view, selection: stamped with the real
+            // sender, checked (finite numbers, sane zoom, cleaned text, a
+            // capped node list) and passed to everyone else. Anything else a
+            // guest sends (Hello again, Welcome, Joined...) is dropped.
+            other => {
+                if let Some(m) = other.from_peer(id) {
+                    broadcast(&st, Some(id), &m);
+                    events.push(RoomEvent::Message(m));
+                }
+            }
         }
     }
 
@@ -563,6 +573,104 @@ mod tests {
 
         drop(host);
         wait_for(a.events(), |e| matches!(e, RoomEvent::Closed(_))).await;
+    }
+
+    /// Two guests and the host, everyone welcomed and known to each other.
+    async fn room_of_three() -> (Host, Guest, Guest) {
+        let host = Host::open_on(Ipv4Addr::LOCALHOST, "Hoster", 0, false, quiet()).await.unwrap();
+        let a = Guest::join(code_for(host.info.port), "Ada", quiet()).await.unwrap();
+        wait_for(a.events(), |e| matches!(e, RoomEvent::Message(Wire::Welcome { .. }))).await;
+        let b = Guest::join(code_for(host.info.port), "Bo", quiet()).await.unwrap();
+        wait_for(b.events(), |e| matches!(e, RoomEvent::Message(Wire::Welcome { .. }))).await;
+        wait_for(a.events(), |e| matches!(e, RoomEvent::Message(Wire::Joined { peer }) if peer.name == "Bo")).await;
+        wait_for(host.events(), |e| matches!(e, RoomEvent::Message(Wire::Joined { peer }) if peer.name == "Bo")).await;
+        (host, a, b)
+    }
+
+    /// Nothing matching `pred` arrives at `events` (after letting the relay run).
+    async fn never(events: &Events, pred: impl Fn(&RoomEvent) -> bool) {
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        let q = events.queue().lock().unwrap();
+        assert!(!q.iter().any(pred), "unexpected: {q:?}");
+    }
+
+    fn is_extra(e: &RoomEvent) -> bool {
+        matches!(e, RoomEvent::Message(Wire::Ping { .. } | Wire::Chat { .. } | Wire::View { .. } | Wire::Selection { .. }))
+    }
+
+    #[tokio::test]
+    async fn pings_messages_views_and_selections_are_relayed_with_the_real_sender() {
+        use fb_model::room::NodeRef;
+        let (host, a, b) = room_of_three().await;
+        let nodes = vec![NodeRef { idx: 3, version: 1 }, NodeRef { idx: 7, version: 5 }];
+        let sent = [
+            Wire::Ping { id: 77, x: 10.0, y: -4.5, doc: 2 },
+            Wire::Chat { id: 77, text: "over here".into() },
+            Wire::View { id: 77, doc: 2, x: 300.0, y: 120.0, zoom: 0.5 },
+            Wire::Selection { id: 77, doc: 2, nodes: nodes.clone() },
+        ];
+        for w in sent.clone() {
+            a.send(w);
+        }
+        // Everyone else gets each one, with Ada's real id (1), not the one she claimed.
+        for w in sent {
+            let want = w.from_peer(1).unwrap();
+            wait_for(b.events(), |e| *e == RoomEvent::Message(want.clone())).await;
+            wait_for(host.events(), |e| *e == RoomEvent::Message(want.clone())).await;
+        }
+        never(a.events(), is_extra).await;
+
+        // The host's own go to every guest as the host (id 0).
+        host.send(Wire::Chat { id: 5, text: "hello all".into() });
+        host.send(Wire::View { id: 5, doc: 0, x: 1.0, y: 2.0, zoom: 2.0 });
+        for g in [&a, &b] {
+            wait_for(g.events(), |e| *e == RoomEvent::Message(Wire::Chat { id: 0, text: "hello all".into() })).await;
+            wait_for(g.events(), |e| *e == RoomEvent::Message(Wire::View { id: 0, doc: 0, x: 1.0, y: 2.0, zoom: 2.0 })).await;
+        }
+        never(host.events(), is_extra).await;
+    }
+
+    #[tokio::test]
+    async fn bad_extras_are_dropped_and_messages_cleaned() {
+        use fb_model::room::{NodeRef, MAX_CHAT, MAX_SELECTION};
+        let (host, a, b) = room_of_three().await;
+        // Malformed: none of these may reach anyone. (JSON has no NaN or
+        // infinity, so a hostile peer's best tries are huge or out-of-range numbers.)
+        for raw in [
+            r#"{"t":"Ping","id":1,"x":1e39,"y":0,"doc":0}"#,
+            r#"{"t":"Ping","id":1,"x":5e7,"y":0,"doc":0}"#,
+            r#"{"t":"View","id":1,"doc":0,"x":0,"y":0,"zoom":0}"#,
+            r#"{"t":"View","id":1,"doc":0,"x":0,"y":0,"zoom":1e30}"#,
+            r#"{"t":"View","id":1,"doc":0,"x":0,"y":0,"zoom":-1}"#,
+            r#"{"t":"Chat","id":1,"text":"\u0000\u0007\r\n  "}"#,
+            r#"{"t":"Selection","id":1,"doc":0,"nodes":[{"idx":1}]}"#,
+        ] {
+            let _ = a.tx.send(raw.to_string());
+        }
+        a.send(Wire::Selection { id: 1, doc: 0, nodes: vec![NodeRef { idx: 1, version: 1 }; MAX_SELECTION + 1] });
+        // A good one afterwards still gets through, so the link is fine.
+        a.send(Wire::Ping { id: 1, x: 1.0, y: 1.0, doc: 0 });
+        wait_for(b.events(), |e| matches!(e, RoomEvent::Message(Wire::Ping { x, .. }) if *x == 1.0)).await;
+        wait_for(host.events(), |e| matches!(e, RoomEvent::Message(Wire::Ping { x, .. }) if *x == 1.0)).await;
+        never(b.events(), is_extra).await;
+        never(host.events(), is_extra).await;
+
+        // The biggest selection allowed goes through.
+        a.send(Wire::Selection { id: 1, doc: 0, nodes: vec![NodeRef { idx: 2, version: 1 }; MAX_SELECTION] });
+        wait_for(b.events(), |e| matches!(e, RoomEvent::Message(Wire::Selection { nodes, .. }) if nodes.len() == MAX_SELECTION)).await;
+
+        // Control and direction-override characters go; the rest is capped.
+        let long = format!("\u{202E}hi\u{0007}\n{}", "x".repeat(400));
+        a.send(Wire::Chat { id: 1, text: long });
+        let RoomEvent::Message(Wire::Chat { text, .. }) = wait_for(b.events(), |e| matches!(e, RoomEvent::Message(Wire::Chat { .. }))).await else { unreachable!() };
+        assert_eq!(text.chars().count(), MAX_CHAT);
+        assert!(text.starts_with("hixxx"), "{text}");
+        assert!(!text.chars().any(|c| c.is_control()));
+
+        // The host's own messages are checked the same way.
+        host.send(Wire::View { id: 0, doc: 0, x: 0.0, y: 0.0, zoom: 9.0 });
+        host.send(Wire::Chat { id: 0, text: "\u{0008}".into() });
+        never(a.events(), is_extra).await;
     }
 
     #[tokio::test]

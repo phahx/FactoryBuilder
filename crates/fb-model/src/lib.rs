@@ -963,9 +963,82 @@ pub mod room {
         /// The shared document after an edit. Guests send it with `rev` = the
         /// revision they edited; the host stamps a new one and relays it.
         Doc { from: u32, rev: u64, json: String },
+        /// "Look here": a spot in graph coordinates on document `doc`.
+        Ping { id: u32, x: f32, y: f32, doc: u32 },
+        /// A short message, shown beside the sender's cursor and in the
+        /// room's message list. At most `MAX_CHAT` characters, no control
+        /// characters (see `clean_chat`).
+        Chat { id: u32, text: String },
+        /// What the sender is looking at: document `doc`, the centre of
+        /// their view in graph coordinates (unzoomed, unpanned) and their
+        /// zoom. Lets others follow them.
+        View { id: u32, doc: u32, x: f32, y: f32, zoom: f32 },
+        /// The nodes the sender has selected on document `doc` (at most
+        /// `MAX_SELECTION`).
+        Selection { id: u32, doc: u32, nodes: Vec<NodeRef> },
     }
 
-    pub const PROTOCOL_VERSION: u32 = 1;
+    /// A node of the shared graph. The graph's node ids are slotmap keys,
+    /// identical for everyone in the room because the whole graph (ids
+    /// included) is shared; this is their serde form, `{"idx", "version"}`,
+    /// so the model doesn't need the node editor crate. Anything that isn't
+    /// a node of the graph on screen is simply not drawn.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+    pub struct NodeRef {
+        pub idx: u32,
+        pub version: u32,
+    }
+
+    /// Version 2 added pings, messages, views and selections. Version 1
+    /// builds would drop those silently (half a room seeing them), so the
+    /// host turns away other versions instead.
+    pub const PROTOCOL_VERSION: u32 = 2;
+
+    /// Longest message, in characters.
+    pub const MAX_CHAT: usize = 200;
+    /// Most nodes in one `Selection`.
+    pub const MAX_SELECTION: usize = 500;
+    /// The node editor's zoom limits; a `View` outside them is refused.
+    pub const MIN_VIEW_ZOOM: f32 = 0.2;
+    pub const MAX_VIEW_ZOOM: f32 = 2.0;
+    /// Graph coordinates beyond this are refused (no factory is that big;
+    /// it keeps panning arithmetic well inside f32 precision).
+    pub const MAX_COORD: f32 = 1.0e7;
+
+    /// A message as it may be shown: no control or text-direction override
+    /// characters, trimmed, at most `MAX_CHAT` characters.
+    pub fn clean_chat(text: &str) -> String {
+        let bidi = |c: char| matches!(c, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{200E}' | '\u{200F}');
+        let kept: String = text.chars().filter(|c| !c.is_control() && !bidi(*c)).collect();
+        kept.trim().chars().take(MAX_CHAT).collect::<String>().trim_end().to_string()
+    }
+
+    fn coord_ok(v: f32) -> bool {
+        v.is_finite() && v.abs() <= MAX_COORD
+    }
+
+    impl Wire {
+        /// A per-person message (cursor, ping, chat, view, selection) as the
+        /// room passes it on: stamped with `id`, the real sender, and
+        /// checked. None when it's malformed (non-finite or out-of-range
+        /// numbers, an empty message after cleaning, too many nodes) or not
+        /// a per-person message. The host runs every guest's message through
+        /// this; the UI runs everything it receives through it too, since a
+        /// host can't be trusted either.
+        pub fn from_peer(self, id: u32) -> Option<Wire> {
+            match self {
+                Wire::Cursor { x, y, doc, .. } if coord_ok(x) && coord_ok(y) => Some(Wire::Cursor { id, x, y, doc }),
+                Wire::Ping { x, y, doc, .. } if coord_ok(x) && coord_ok(y) => Some(Wire::Ping { id, x, y, doc }),
+                Wire::Chat { text, .. } => {
+                    let text = clean_chat(&text);
+                    (!text.is_empty()).then_some(Wire::Chat { id, text })
+                }
+                Wire::View { doc, x, y, zoom, .. } if coord_ok(x) && coord_ok(y) && (MIN_VIEW_ZOOM..=MAX_VIEW_ZOOM).contains(&zoom) => Some(Wire::View { id, doc, x, y, zoom }),
+                Wire::Selection { doc, nodes, .. } if nodes.len() <= MAX_SELECTION => Some(Wire::Selection { id, doc, nodes }),
+                _ => None,
+            }
+        }
+    }
 
     /// What the UI sees, from `room_poll`.
     #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1028,6 +1101,32 @@ pub mod room {
             for ip in ["86.12.200.7", "100.128.0.1", "8.8.8.8"] {
                 assert!(!is_shared_or_private(ip.parse().unwrap()), "{ip}");
             }
+        }
+
+        #[test]
+        fn chat_is_cleaned_and_capped() {
+            assert_eq!(clean_chat("  hi\u{0007}\n there\u{202E}  "), "hi there");
+            assert_eq!(clean_chat(&"é".repeat(300)).chars().count(), MAX_CHAT);
+            assert_eq!(clean_chat("\r\n\t"), "");
+        }
+
+        #[test]
+        fn peer_messages_are_stamped_and_checked() {
+            let ok = Wire::View { id: 9, doc: 2, x: 1.0, y: 2.0, zoom: 1.0 };
+            assert_eq!(ok.from_peer(3), Some(Wire::View { id: 3, doc: 2, x: 1.0, y: 2.0, zoom: 1.0 }));
+            for bad in [
+                Wire::View { id: 0, doc: 0, x: 0.0, y: 0.0, zoom: 50.0 },
+                Wire::View { id: 0, doc: 0, x: f32::NAN, y: 0.0, zoom: 1.0 },
+                Wire::Ping { id: 0, x: f32::INFINITY, y: 0.0, doc: 0 },
+                Wire::Ping { id: 0, x: 0.0, y: 2.0e7, doc: 0 },
+                Wire::Chat { id: 0, text: "\u{0000}\u{001B} ".into() },
+                Wire::Selection { id: 0, doc: 0, nodes: vec![NodeRef { idx: 1, version: 1 }; MAX_SELECTION + 1] },
+                Wire::Left { id: 1 },
+            ] {
+                assert_eq!(bad.clone().from_peer(1), None, "{bad:?}");
+            }
+            // A node reference has the node editor's (slotmap's) serde form.
+            assert_eq!(serde_json::to_string(&NodeRef { idx: 4, version: 7 }).unwrap(), r#"{"idx":4,"version":7}"#);
         }
 
         #[test]
