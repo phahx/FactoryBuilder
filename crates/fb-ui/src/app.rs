@@ -1212,6 +1212,13 @@ impl FactoryApp {
                     f.query = "iron plate".into();
                     self.finder = Some(f);
                 }
+                // A wire from the first recipe's first output let go on the canvas.
+                "finder_wire" => {
+                    let out = first_recipe.and_then(|n| self.state.graph.nodes.get(n)).and_then(|n| n.outputs.first().map(|o| o.1));
+                    if let (Some(n), Some(o)) = (first_recipe, out) {
+                        self.open_finder_for_wire(n, egui_node_graph2::AnyParameterId::Output(o), center - vec2(220.0, 260.0));
+                    }
+                }
                 "menu" => {
                     if let Some(id) = first_recipe {
                         let r = self
@@ -1620,6 +1627,10 @@ impl FactoryApp {
                 _ => {}
             }
         }
+        // A wire let go on empty canvas: Add node, showing only what fits it.
+        if let Some((node, port, at)) = resp.wire_dropped.filter(|_| !self.on_master()) {
+            self.open_finder_for_wire(node, port, at);
+        }
         if let Some(menu) = resp.node_context_menu {
             self.context_menu = Some(menu);
             self.context_targets = self.state.selected_nodes.clone();
@@ -1892,6 +1903,47 @@ impl FactoryApp {
         }
     }
 
+    /// Add node for a wire let go on empty canvas from `port` of `node`.
+    pub(crate) fn open_finder_for_wire(&mut self, node: NodeId, port: egui_node_graph2::AnyParameterId, at: egui::Pos2) {
+        let Some(item) = self.state.graph.any_param_type(port).ok().map(|t| t.0.clone()) else { return };
+        if item.is_empty() {
+            return;
+        }
+        let item_name = self.user.game.item_name(&item).to_string();
+        let from_output = matches!(port, egui_node_graph2::AnyParameterId::Output(_));
+        let mut f = crate::finder::FinderState::new(at);
+        f.wire = Some(crate::finder::WireDrop { node, port, item, item_name, from_output });
+        self.finder = Some(f);
+        self.context_menu = None;
+    }
+
+    /// Joins a node added from a dropped wire to where the wire came from:
+    /// its first port of the same item, on the other side.
+    fn connect_dropped_wire(&mut self, w: &crate::finder::WireDrop, new: NodeId) {
+        use egui_node_graph2::AnyParameterId as P;
+        let g = &mut self.state.graph;
+        if !g.nodes.contains_key(w.node) {
+            return;
+        }
+        let same = |t: &crate::graph::ItemType| t.0 == w.item;
+        match w.port {
+            P::Output(output) => {
+                let input = g[new].inputs.iter().map(|(_, id)| *id).find(|id| same(&g[*id].typ));
+                if let Some(input) = input {
+                    let at = g.connections(input).len();
+                    g.add_connection(output, input, at);
+                }
+            }
+            P::Input(input) => {
+                let output = g[new].outputs.iter().map(|(_, id)| *id).find(|id| same(&g[*id].typ));
+                if let Some(output) = output {
+                    let at = g.connections(input).len();
+                    g.add_connection(output, input, at);
+                }
+            }
+        }
+    }
+
     /// The Add node menu (right-click on empty canvas).
     fn add_node_menu(&mut self, ctx: &egui::Context) {
         let (Some(state), Some(catalog)) = (self.finder.as_mut(), self.catalog.as_ref()) else {
@@ -1903,9 +1955,13 @@ impl FactoryApp {
             crate::finder::FinderResult::Close => self.finder = None,
             crate::finder::FinderResult::Add(template) => {
                 let at = state.pos;
+                let wire = state.wire.take();
                 self.finder = None;
                 let graph_pos = at - self.state.pan_zoom.pan - self.editor_rect.min.to_vec2();
                 let id = self.add_node(template, graph_pos);
+                if let Some(w) = wire {
+                    self.connect_dropped_wire(&w, id);
+                }
                 self.state.selected_nodes = vec![id];
                 self.changed();
             }

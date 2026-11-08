@@ -180,8 +180,8 @@ fn chevron(out: &mut Vec<Shape>, p: Pos2, dir: egui::Vec2, size: f32) {
     let tip = p + dir * size * 0.5;
     let back = p - dir * size * 0.5;
     let pts = vec![back + across, tip, back - across];
-    out.push(Shape::line(pts.clone(), Stroke::new(3.5, Color32::from_black_alpha(150))));
-    out.push(Shape::line(pts, Stroke::new(1.75, Color32::from_gray(240))));
+    out.push(Shape::line(pts.clone(), Stroke::new(3.5_f32, Color32::from_black_alpha(150))));
+    out.push(Shape::line(pts, Stroke::new(1.75_f32, Color32::from_gray(240))));
 }
 
 /// One straight stretch of belt: as many rendered pieces as fit, the last

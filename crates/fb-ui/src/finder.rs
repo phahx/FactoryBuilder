@@ -1,7 +1,8 @@
 //! "Add node" menu (right-click on empty canvas). Replaces the node graph's
 //! built-in finder: every entry has an icon, a name and a one-line
 //! description; groups show their size; typing gives one flat, ranked list;
-//! Up/Down + Enter work, Escape closes.
+//! Up/Down + Enter work, Escape closes. Opened by letting go of a wire on
+//! empty canvas, it lists only what fits that wire, and connects it.
 
 use crate::assets::{Assets, UiIcon};
 use crate::fmt::fmt_num;
@@ -20,6 +21,9 @@ pub struct Entry {
     pub icon: String,
     alternate: bool,
     search: String,
+    /// Items it takes in, and puts out (for wires dropped on the canvas).
+    takes: Vec<String>,
+    makes: Vec<String>,
 }
 
 pub struct Group {
@@ -75,6 +79,8 @@ impl Catalog {
                 icon,
                 alternate: r.alternate,
                 search: String::new(),
+                takes: r.ingredients.iter().map(|a| a.item.clone()).collect(),
+                makes: r.products.iter().map(|a| a.item.clone()).collect(),
             });
         }
         for (class, item) in &game.items {
@@ -92,6 +98,8 @@ impl Catalog {
                     icon: class.clone(),
                     alternate: false,
                     search: String::new(),
+                    takes: vec![],
+                    makes: vec![class.clone()],
                 });
             }
             for (template, group, subtitle) in [
@@ -111,6 +119,10 @@ impl Catalog {
                     "Leftovers, sunk or stored",
                 ),
             ] {
+                let (takes, makes) = match template {
+                    Template::Input(_) => (vec![], vec![class.clone()]),
+                    _ => (vec![class.clone()], vec![]),
+                };
                 entries.push(Entry {
                     template,
                     title: item.name.clone(),
@@ -119,6 +131,8 @@ impl Catalog {
                     icon: class.clone(),
                     alternate: false,
                     search: String::new(),
+                    takes,
+                    makes,
                 });
             }
         }
@@ -160,8 +174,8 @@ impl Catalog {
     }
 
     /// Ranked matches: every word must appear; title prefix matches first,
-    /// standard recipes before alternates.
-    pub fn search(&self, query: &str) -> Vec<usize> {
+    /// standard recipes before alternates. With a wire, only what fits it.
+    pub fn search(&self, query: &str, wire: Option<&WireDrop>) -> Vec<usize> {
         let words: Vec<String> = query
             .to_lowercase()
             .split_whitespace()
@@ -173,6 +187,7 @@ impl Catalog {
             .iter()
             .enumerate()
             .filter(|(_, e)| words.iter().all(|w| e.search.contains(w.as_str())))
+            .filter(|(_, e)| wire.is_none_or(|w| w.fits(e)))
             .map(|(i, e)| {
                 let t = e.title.to_lowercase();
                 let rank = if t == q {
@@ -192,12 +207,31 @@ impl Catalog {
     }
 }
 
+/// A wire let go on empty canvas: the item on it, and whether it comes from
+/// an output (so the new node takes the item in) or an input (it makes it).
+#[derive(Clone)]
+pub struct WireDrop {
+    pub node: egui_node_graph2::NodeId,
+    pub port: egui_node_graph2::AnyParameterId,
+    pub item: String,
+    pub item_name: String,
+    pub from_output: bool,
+}
+
+impl WireDrop {
+    fn fits(&self, e: &Entry) -> bool {
+        let list = if self.from_output { &e.takes } else { &e.makes };
+        list.contains(&self.item)
+    }
+}
+
 pub struct FinderState {
     /// Screen position the menu opened at (also where the node goes).
     pub pos: Pos2,
     pub query: String,
     pub highlight: usize,
     pub just_opened: bool,
+    pub wire: Option<WireDrop>,
 }
 
 impl FinderState {
@@ -207,6 +241,7 @@ impl FinderState {
             query: String::new(),
             highlight: 0,
             just_opened: true,
+            wire: None,
         }
     }
 }
@@ -279,9 +314,10 @@ pub fn show(
         state.pos.x.min(screen.right() - WIDTH - 8.0).max(8.0),
         state.pos.y.min(screen.bottom() - height - 8.0).max(8.0),
     );
-    let searching = !state.query.trim().is_empty();
+    // A flat list when searching, or for a dropped wire (only what fits).
+    let searching = !state.query.trim().is_empty() || state.wire.is_some();
     let hits = if searching {
-        catalog.search(&state.query)
+        catalog.search(&state.query, state.wire.as_ref())
     } else {
         Vec::new()
     };
@@ -315,7 +351,11 @@ pub fn show(
         egui::Frame::none().fill(CONTENT).stroke(ui.visuals().window_stroke).shadow(ui.visuals().popup_shadow).show(ui, |ui| {
             ui.set_width(WIDTH);
             ui.spacing_mut().item_spacing.y = 0.0;
-            widgets::panel_header(ui, "Add node");
+            match &state.wire {
+                Some(w) if w.from_output => widgets::panel_header(ui, &format!("Add node that takes {}", w.item_name)),
+                Some(w) => widgets::panel_header(ui, &format!("Add node that makes {}", w.item_name)),
+                None => widgets::panel_header(ui, "Add node"),
+            }
             egui::Frame::none().inner_margin(egui::Margin::same(8.0)).show(ui, |ui| {
                 ui.horizontal(|ui| {
                     assets.ui(ui, UiIcon::Search, 16.0, TEXT_DIM);
@@ -336,10 +376,15 @@ pub fn show(
                 ui.set_width(WIDTH);
                 if searching {
                     if hits.is_empty() {
+                        let text = match &state.wire {
+                            Some(_) if state.query.trim().is_empty() => "Nothing in the game fits this wire.",
+                            Some(_) => "Nothing that fits this wire matches.",
+                            None => "Nothing matches. Try an item name, like “Iron Plate”.",
+                        };
                         ui.add_space(12.0);
                         ui.horizontal(|ui| {
                             ui.add_space(12.0);
-                            ui.label(RichText::new("Nothing matches. Try an item name, like “Iron Plate”.").color(TEXT_DIM));
+                            ui.label(RichText::new(text).color(TEXT_DIM));
                         });
                         ui.add_space(12.0);
                     }

@@ -94,6 +94,9 @@ pub struct GraphResponse<UserResponse: UserResponseTrait, NodeData: NodeDataTrai
     /// FactoryBuilder: every wire drawn this frame with its cubic bezier
     /// points (screen space), for labels on wires.
     pub wires: Vec<(InputId, OutputId, [Pos2; 4])>,
+    /// FactoryBuilder: a wire being dragged from this port was let go on
+    /// empty canvas, at this screen position.
+    pub wire_dropped: Option<(NodeId, AnyParameterId, Pos2)>,
 }
 impl<UserResponse: UserResponseTrait, NodeData: NodeDataTrait> Default
     for GraphResponse<UserResponse, NodeData>
@@ -107,6 +110,7 @@ impl<UserResponse: UserResponseTrait, NodeData: NodeDataTrait> Default
             node_rects: Default::default(),
             port_locations: Default::default(),
             wires: Vec::new(),
+            wire_dropped: None,
         }
     }
 }
@@ -565,7 +569,14 @@ where
         // This locks the context, so don't hold on to it for too long.
         let mouse = &ui.ctx().input(|i| i.pointer.clone());
 
+        // FactoryBuilder: let go on empty canvas (not on a port, not on a node).
+        let mut wire_dropped = None;
         if mouse.any_released() && self.connection_in_progress.is_some() {
+            let ended = delayed_responses.iter().any(|r| matches!(r, NodeResponse::ConnectEventEnded { .. }));
+            let on_node = node_rects_for_menu.values().any(|r| r.contains(cursor_pos));
+            if !ended && !on_node && cursor_in_editor && !cursor_in_finder {
+                wire_dropped = self.connection_in_progress.map(|(n, p)| (n, p, cursor_pos));
+            }
             self.connection_in_progress = None;
         }
 
@@ -627,6 +638,7 @@ where
             node_rects: node_rects_for_menu,
             port_locations: port_locations.clone(),
             wires,
+            wire_dropped,
         }
     }
 }

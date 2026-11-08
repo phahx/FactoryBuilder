@@ -525,6 +525,50 @@ fn each_output_bubble_pulls_its_own_wire() {
 }
 
 #[test]
+fn a_wire_let_go_on_the_canvas_offers_what_fits_and_connects_it() {
+    use egui_node_graph2::AnyParameterId;
+    let Some((ctx, mut app, _)) = harness() else {
+        return;
+    };
+    frames(&ctx, &mut app, 2);
+    app.minimap = false;
+    app.planner_mut().targets = vec![Target { item: "Desc_IronRod_C".into(), rate: 15.0 }];
+    app.press_plan();
+    frames(&ctx, &mut app, 8);
+    let g = app.graph();
+    let output = g.outputs.iter().find(|(_, o)| o.typ.0 == "Desc_IronIngot_C").map(|(id, _)| id).expect("the smelter's ingots");
+    let nodes_before = g.nodes.len();
+    let ring = *app.port_hooks[&AnyParameterId::Output(output)].last().unwrap();
+    drag(&ctx, &mut app, ring, egui::pos2(ring.x + 60.0, 920.0));
+    let wire = app.finder.as_ref().and_then(|f| f.wire.clone()).expect("Add node opened for the wire");
+    assert_eq!((wire.item.as_str(), wire.from_output), ("Desc_IronIngot_C", true));
+    // Only what takes Iron Ingot in.
+    let catalog = app.catalog.as_ref().unwrap();
+    let hits = catalog.search("", Some(&wire));
+    assert!(hits.len() > 3, "{}", hits.len());
+    let game = app.user.game.clone();
+    for &i in &hits {
+        let ok = match &catalog.entries[i].template {
+            crate::graph::Template::Recipe(r) => game.recipes[r].ingredients.iter().any(|a| a.item == "Desc_IronIngot_C"),
+            crate::graph::Template::Output(x) | crate::graph::Template::Sink(x) => x == "Desc_IronIngot_C",
+            _ => false,
+        };
+        assert!(ok, "{} doesn't take Iron Ingot", catalog.entries[i].title);
+    }
+    // Enter adds the first one, wired to the ingots.
+    let wires_before = app.graph().output_connections(output).len();
+    press_key(&ctx, &mut app, egui::Key::Enter);
+    frames(&ctx, &mut app, 2);
+    assert!(app.finder.is_none());
+    let g = app.graph();
+    assert_eq!(g.nodes.len(), nodes_before + 1);
+    let wires = g.output_connections(output);
+    assert_eq!(wires.len(), wires_before + 1, "the new node is wired to the ingots");
+    let new = g[*wires.last().unwrap()].node;
+    assert!(app.state.selected_nodes == vec![new]);
+}
+
+#[test]
 fn input_bubble_pulls_its_own_wire() {
     use egui_node_graph2::AnyParameterId;
     let Some((ctx, mut app, _)) = harness() else {
