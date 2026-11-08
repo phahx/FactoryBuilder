@@ -7,6 +7,8 @@ pub mod assets;
 pub mod backend;
 pub mod dialogs;
 pub mod finder;
+pub mod map;
+pub mod map_import;
 pub mod fmt;
 pub mod graph;
 pub mod menu;

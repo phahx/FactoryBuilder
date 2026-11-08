@@ -122,6 +122,10 @@ impl FactoryApp {
 }
 
 /// "2026-11-07" (UTC) from Unix seconds.
+pub(crate) fn date_text(unix: i64) -> String {
+    date(unix)
+}
+
 fn date(unix: i64) -> String {
     // Civil-from-days (Howard Hinnant's algorithm).
     let z = unix.div_euclid(86_400) + 719_468;

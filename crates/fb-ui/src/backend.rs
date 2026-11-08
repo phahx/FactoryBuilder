@@ -76,6 +76,14 @@ pub enum Msg {
     Saves(Result<Vec<fb_model::saves::SaveSummary>, String>),
     PickedSaveGame(Result<Option<String>, String>),
     SaveUnlocks(Result<fb_model::saves::SaveUnlocks, String>),
+    // World map (map.rs).
+    MapInfo(Result<fb_model::world::MapInfo, String>),
+    WorldSessions(Result<Vec<fb_model::world::Session>, String>),
+    WorldLoaded {
+        path: String,
+        result: Result<fb_model::world::World, String>,
+    },
+    WorldLatest(Result<Option<fb_model::saves::SaveSummary>, String>),
 }
 
 #[cfg(not(target_arch = "wasm32"))]

@@ -132,6 +132,9 @@ pub struct FactoryApp {
     pub(crate) wire_flow: std::collections::HashMap<(egui_node_graph2::InputId, egui_node_graph2::OutputId), f64>,
     /// View > Belt and pipe labels.
     pub(crate) wire_labels: bool,
+    /// Graph or Map tab.
+    pub(crate) view: crate::map::View,
+    pub(crate) map: crate::map::MapState,
     #[cfg(test)]
     pub(crate) wire_label_texts: Vec<String>,
     /// "Not now" on the icons notice, for this session.
@@ -219,6 +222,8 @@ impl FactoryApp {
             notice_dismissed: false,
             wire_flow: Default::default(),
             wire_labels: true,
+            view: Default::default(),
+            map: Default::default(),
             #[cfg(test)]
             wire_label_texts: Vec::new(),
         };
@@ -507,6 +512,7 @@ impl FactoryApp {
                 | Msg::Extract(_)
                 | Msg::DevDone(_)) => self.on_setup_msg(ctx, m),
                 m @ (Msg::Saves(_) | Msg::PickedSaveGame(_) | Msg::SaveUnlocks(_)) => self.on_progress_msg(ctx, m),
+                m @ (Msg::MapInfo(_) | Msg::WorldSessions(_) | Msg::WorldLoaded { .. } | Msg::WorldLatest(_)) => self.on_map_msg(m),
                 Msg::Solved(r) => {
                     self.solving = false;
                     match r {
@@ -1133,7 +1139,28 @@ impl FactoryApp {
             .show(ctx, |ui| crate::panels::overview(self, ui));
         egui::CentralPanel::default()
             .frame(egui::Frame::none().fill(BACKDROP))
-            .show(ctx, |ui| self.editor_ui(ui));
+            .show(ctx, |ui| {
+                // Graph | Map tabs, then the chosen view below them.
+                let full = ui.max_rect();
+                let (bar, _) = ui.allocate_exact_size(vec2(full.width(), 34.0), egui::Sense::hover());
+                ui.painter().rect_filled(bar, 0.0, CONTENT);
+                let mut tabs = ui.new_child(egui::UiBuilder::new().max_rect(egui::Rect::from_min_size(bar.min + vec2(8.0, 4.0), vec2(200.0, 26.0))));
+                crate::widgets::tabs(
+                    &mut tabs,
+                    &mut self.view,
+                    &[
+                        (crate::map::View::Graph, "Graph", "The factory graph"),
+                        (crate::map::View::Map, "Map", "Your save on the game's map"),
+                    ],
+                );
+                let content = egui::Rect::from_min_max(egui::pos2(full.min.x, bar.max.y), full.max);
+                let mut view = ui.new_child(egui::UiBuilder::new().max_rect(content));
+                view.set_clip_rect(content);
+                match self.view {
+                    crate::map::View::Graph => self.editor_ui(&mut view),
+                    crate::map::View::Map => crate::map::map_ui(self, &mut view),
+                }
+            });
         self.node_menu(ctx);
         self.add_node_menu(ctx);
         crate::dialogs::show(self, ctx);
@@ -1307,8 +1334,8 @@ impl FactoryApp {
         if hit(cmd(Key::O)) {
             self.guard(Pending::OpenDialog);
         }
-        if ctx.wants_keyboard_input() {
-            return; // typing in a field: leave editing keys to the field
+        if ctx.wants_keyboard_input() || self.view == crate::map::View::Map {
+            return; // typing in a field, or on the map: no graph editing keys
         }
         if hit(cmd_shift(Key::Z)) || hit(cmd(Key::Y)) {
             self.redo();
@@ -1888,7 +1915,7 @@ impl FactoryApp {
         let pan = self.state.pan_zoom.pan;
         let dt = ctx.input(|i| i.stable_dt).clamp(0.0, 0.1);
         let ease = 1.0 - (-dt / 0.025).exp();
-        let dialog_open = !matches!(self.dialog, Dialog::None) || self.wizard.is_some();
+        let dialog_open = !matches!(self.dialog, Dialog::None) || self.wizard.is_some() || self.view == crate::map::View::Map;
         let mut moving = false;
         for (id, target) in self.room.cursors.clone() {
             let shown = self.room.cursor_shown.entry(id).or_insert(target);

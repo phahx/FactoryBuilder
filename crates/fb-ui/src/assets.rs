@@ -166,6 +166,16 @@ impl Assets {
         Self::draw(ui, uri, size, None)
     }
 
+    /// URI of an item or building icon, once loaded (for painting at a rect).
+    pub fn item_uri(&mut self, class: &str) -> Option<String> {
+        self.uri(&format!("icon/{class}.png"), "icon", serde_json::json!({ "class": class }))
+    }
+
+    /// URI of a map tile (`<icons>/map/<z>/<x>_<y>.png`), once loaded.
+    pub fn map_tile_uri(&mut self, z: u32, x: u32, y: u32) -> Option<String> {
+        self.uri(&format!("map/{z}/{x}_{y}.png"), "map_tile", serde_json::json!({ "z": z, "x": x, "y": y }))
+    }
+
     /// One of the game's monochrome UI icons, tinted.
     pub fn ui(&mut self, ui: &mut Ui, icon: UiIcon, size: f32, tint: Color32) -> egui::Response {
         let uri = self.ui_uri(icon);

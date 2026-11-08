@@ -1450,3 +1450,103 @@ fn somersloops_and_shards_change_output_power_and_totals() {
     frames(&ctx, &mut app, 2);
     assert_eq!(app.summary.power_shards, 3, "one machine at 250% takes 3 Power Shards");
 }
+
+// ------------------------------------------------------------------ map
+
+fn sample_world() -> (fb_model::world::World, fb_model::world::MapInfo) {
+    use fb_model::world::*;
+    let m = |id: u32, class: &str, recipe: Option<&str>, x: f32, node: Option<&str>| Machine {
+        id,
+        class: class.into(),
+        recipe: recipe.map(Into::into),
+        clock: 1.0,
+        boost: 1.0,
+        x,
+        y: 50_000.0,
+        z: 0.0,
+        yaw: 0.0,
+        node: node.map(Into::into),
+    };
+    let world = World {
+        save: fb_model::saves::SaveSummary { path: "D:/Saves/test.sav".into(), session: "Test".into(), name: "Test".into(), ..Default::default() },
+        machines: vec![
+            m(0, "Build_MinerMk1_C", None, 40_000.0, Some("BP_ResourceNode1")),
+            m(1, "Build_SmelterMk1_C", Some("Recipe_IngotIron_C"), 45_000.0, None),
+            m(2, "Build_SmelterMk1_C", Some("Recipe_IngotIron_C"), 46_000.0, None),
+            m(3, "Build_ConstructorMk1_C", Some("Recipe_IronPlate_C"), 50_000.0, None),
+            m(4, "Build_ConstructorMk1_C", Some("Recipe_IronPlate_C"), 51_000.0, None),
+            m(5, "Build_ConstructorMk1_C", Some("Recipe_IronPlate_C"), 52_000.0, None),
+            // Outside the selection in the import test.
+            m(6, "Build_AssemblerMk1_C", Some("Recipe_IronPlateReinforced_C"), 90_000.0, None),
+        ],
+        links: vec![
+            Link { from: 0, to: 1, item: Some("Desc_OreIron_C".into()) },
+            Link { from: 0, to: 2, item: Some("Desc_OreIron_C".into()) },
+            Link { from: 1, to: 3, item: Some("Desc_IronIngot_C".into()) },
+            Link { from: 2, to: 4, item: Some("Desc_IronIngot_C".into()) },
+            Link { from: 2, to: 5, item: Some("Desc_IronIngot_C".into()) },
+            Link { from: 5, to: 6, item: Some("Desc_IronPlate_C".into()) },
+        ],
+        ..Default::default()
+    };
+    let map = MapInfo {
+        x_min: 0.0,
+        y_min: 0.0,
+        size: 100_000.0,
+        tile_px: 1024,
+        levels: 1,
+        nodes: vec![MapNode { id: "BP_ResourceNode1".into(), kind: SiteKind::Node, resource: Some("Desc_OreIron_C".into()), purity: fb_model::Purity::Pure, x: 40_000.0, y: 50_000.0, z: 0.0 }],
+    };
+    (world, map)
+}
+
+#[test]
+fn importing_groups_machines_by_recipe() {
+    let Some((ctx, mut app, _)) = harness() else { return };
+    frames(&ctx, &mut app, 2);
+    let game = app.user.game.clone();
+    let (world, map) = sample_world();
+    let selected: std::collections::BTreeSet<u32> = (0..=5).collect();
+    let (f, report) = crate::map_import::import(&world, &selected, &game, Some(&map));
+    assert_eq!(report.machines, 6);
+    let find = |kind: crate::portable::Kind, class: &str| f.nodes.iter().position(|n| n.kind == kind && n.class == class).unwrap_or_else(|| panic!("{class}"));
+    let ingots = find(crate::portable::Kind::Recipe, "Recipe_IngotIron_C");
+    let plates = find(crate::portable::Kind::Recipe, "Recipe_IronPlate_C");
+    let ore = find(crate::portable::Kind::Resource, "Desc_OreIron_C");
+    let out = find(crate::portable::Kind::Output, "Desc_IronPlate_C");
+    assert_eq!(f.nodes[ingots].machines, Some(2.0));
+    assert_eq!(f.nodes[plates].machines, Some(3.0));
+    // Miner Mk.1 (60/min from the Docs) on a Pure node (x2) at 100%.
+    assert_eq!(f.nodes[ore].rate, Some(120.0));
+    assert_eq!(f.nodes.len(), 4, "ore, ingots, plates, and the plates leaving the selection");
+    let wire = |from: usize, to: usize| f.wires.iter().any(|w| w.from == from && w.to == to);
+    assert!(wire(ore, ingots) && wire(ingots, plates) && wire(plates, out));
+}
+
+#[test]
+fn map_tab_selects_and_imports() {
+    let (world, map) = sample_world();
+    let hook: RoomHook = Rc::new(move |cmd: &str, _args: &Value| match cmd {
+        "map_info" => Some(Ok(serde_json::to_value(&map).unwrap())),
+        "map_tile" => Some(Err("no tiles in tests".into())),
+        "world_sessions" => Some(Ok(json!([{ "session": "Test", "saves": [world.save.clone()] }]))),
+        "world_load" => Some(Ok(serde_json::to_value(&world).unwrap())),
+        "world_latest" => Some(Ok(serde_json::to_value(&world.save).unwrap())),
+        _ => None,
+    });
+    let Some((ctx, mut app, _)) = harness_with(Some(hook)) else { return };
+    frames(&ctx, &mut app, 2);
+    press(&ctx, &mut app, "Map");
+    frames(&ctx, &mut app, 3);
+    assert_eq!(app.view, crate::map::View::Map);
+    assert!(app.map.world.is_some(), "the newest save of the first session loads");
+    assert!(!button("Import into planner").unwrap().1, "nothing selected yet");
+    // Drag across the whole map area (below the tabs and toolbar).
+    let r = app.map.rect.expect("map drawn");
+    drag(&ctx, &mut app, r.min + egui::vec2(5.0, 5.0), r.max - egui::vec2(5.0, 5.0));
+    assert_eq!(app.map.selected.len(), 7, "every machine inside the box");
+    let before = app.node_count();
+    press(&ctx, &mut app, "Import into planner");
+    assert_eq!(app.view, crate::map::View::Graph, "back to the graph to see the import");
+    assert!(app.node_count() > before);
+}
