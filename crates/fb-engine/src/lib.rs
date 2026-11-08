@@ -22,3 +22,5 @@ pub mod power;
 pub mod sim;
 #[cfg(feature = "solver")]
 pub mod solver;
+#[cfg(feature = "solver")]
+pub mod world;

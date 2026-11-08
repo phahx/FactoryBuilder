@@ -20,7 +20,12 @@ pub fn saves_root() -> Option<PathBuf> {
 fn summary(path: &Path) -> Option<SaveSummary> {
     let mut head = Vec::new();
     std::fs::File::open(path).ok()?.take(HEADER_BYTES).read_to_end(&mut head).ok()?;
-    let (mut s, _) = fb_engine::save::read_header(&head).ok()?;
+    summary_from(path, &head)
+}
+
+/// The summary of the save at `path` whose bytes (or first bytes) are `head`.
+fn summary_from(path: &Path, head: &[u8]) -> Option<SaveSummary> {
+    let (mut s, _) = fb_engine::save::read_header(head).ok()?;
     s.path = path.to_string_lossy().into_owned();
     if s.name.is_empty() {
         s.name = path.file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
@@ -61,7 +66,8 @@ fn may_read(allowed: &Allowed, path: &Path) -> bool {
     }
 }
 
-pub fn unlocks(allowed: &Allowed, path: &str) -> Result<SaveUnlocks, String> {
+/// The whole file of a save the window may read, and its summary.
+pub(crate) fn read_allowed(allowed: &Allowed, path: &str) -> Result<(Vec<u8>, SaveSummary), String> {
     let p = PathBuf::from(path);
     if !p.extension().is_some_and(|x| x.eq_ignore_ascii_case("sav")) || !may_read(allowed, &p) {
         return Err("That file can't be opened here.".into());
@@ -71,8 +77,13 @@ pub fn unlocks(allowed: &Allowed, path: &str) -> Result<SaveUnlocks, String> {
         return Err("That file is too big to be a save.".into());
     }
     let bytes = std::fs::read(&p).map_err(|e| format!("Couldn't read the save: {e}"))?;
+    let save = summary_from(&p, &bytes).ok_or("That isn't a Satisfactory save file.")?;
+    Ok((bytes, save))
+}
+
+pub fn unlocks(allowed: &Allowed, path: &str) -> Result<SaveUnlocks, String> {
+    let (bytes, save) = read_allowed(allowed, path)?;
     let schematics = fb_engine::save::purchased_schematics(&bytes).map_err(|e| e.to_string())?;
-    let save = summary(&p).ok_or("That isn't a Satisfactory save file.")?;
     Ok(SaveUnlocks { save, schematics })
 }
 
