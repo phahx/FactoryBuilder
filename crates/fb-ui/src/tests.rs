@@ -2345,3 +2345,51 @@ fn find_steps_through_matches_and_the_minimap_moves_the_view() {
     frames(&ctx, &mut app, 1);
     assert!(button("Minimap").is_none(), "View › Minimap hides it");
 }
+
+#[test]
+fn right_click_on_the_master_graph_adds_a_factory_there() {
+    let Some((ctx, mut app, store)) = harness() else { return };
+    frames(&ctx, &mut app, 2);
+    press(&ctx, &mut app, "Project");
+    frames(&ctx, &mut app, 3);
+    assert_eq!(app.factory_count(), 1);
+    // Empty canvas: right of the one block.
+    let only = app.node_rects.values().next().copied().expect("one block");
+    let spot = egui::pos2(only.right() + 150.0, only.top() + 20.0);
+    assert!(!app.node_rects.values().any(|r| r.contains(spot)), "the spot is empty canvas");
+    click(&ctx, &mut app, spot, egui::PointerButton::Secondary);
+    assert!(app.master_menu.is_some(), "the canvas menu opened");
+    assert!(app.finder.is_none(), "not the Add node menu");
+    // The menu's item (the tab strip's + has the same name).
+    let item = crate::widgets::TEST_BUTTONS.with(|b| b.borrow().iter().find(|(l, r, _)| l == "New factory" && r.top() >= spot.y - 1.0).map(|(_, r, _)| *r)).expect("menu item");
+    click(&ctx, &mut app, item.center(), egui::PointerButton::Primary);
+    assert!(app.master_menu.is_none(), "menu closed");
+    assert_eq!(app.factory_count(), 2);
+    assert_eq!(app.active, crate::project::MASTER, "stays on the master graph");
+    let new = *app.factory_ids().last().unwrap();
+    let block = crate::project::block_of(&app.state.graph, new).expect("its block");
+    assert_eq!(app.selected(), vec![block], "the new block is selected");
+    let at = app.screen_to_graph_unzoomed(spot);
+    assert!((app.node_pos_unzoomed(block) - at).length() < 1.0, "placed where the menu was opened");
+    assert!(app.is_dirty());
+
+    // From a file: the block goes to the menu's spot too, once the file is read.
+    let mut f = crate::portable::FactoryFile::new(Some("Smelting".into()));
+    f.nodes.push(crate::portable::Node { kind: crate::portable::Kind::Resource, class: "Desc_OreIron_C".into(), machines: None, clock: None, sloops: None, rate: Some(60.0), color: None, x: 0.0, y: 0.0 });
+    store.borrow_mut().insert("C:/Factories/Smelting.fbfactory".into(), f.to_json(false));
+    let spot2 = egui::pos2(only.right() + 150.0, only.bottom() + 200.0);
+    assert!(!app.node_rects.values().any(|r| r.contains(spot2)));
+    click(&ctx, &mut app, spot2, egui::PointerButton::Secondary);
+    let at2 = app.master_menu.expect("menu").1;
+    app.master_menu = None;
+    app.block_spot = Some(at2);
+    app.read_file(crate::app_files::OpenPurpose::AddFactory, "C:/Factories/Smelting.fbfactory".into());
+    frames(&ctx, &mut app, 3);
+    assert_eq!(app.factory_count(), 3);
+    assert_eq!(app.active, crate::project::MASTER);
+    let smelting = *app.factory_ids().last().unwrap();
+    assert_eq!(app.doc_name(smelting), "Smelting");
+    let b2 = crate::project::block_of(&app.state.graph, smelting).unwrap();
+    assert!((app.node_pos_unzoomed(b2) - at2).length() < 1.0);
+    assert!(app.block_spot.is_none());
+}

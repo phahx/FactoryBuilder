@@ -129,10 +129,10 @@ impl FactoryApp {
         let mut close = false;
         egui::Area::new(egui::Id::new("find_bar"))
             .order(egui::Order::Foreground)
-            .fixed_pos(pos2(rect.right() - 380.0 - MAP_MARGIN, rect.top() + MAP_MARGIN))
+            .fixed_pos(pos2(rect.right() - 424.0 - MAP_MARGIN, rect.top() + MAP_MARGIN))
             .show(ui.ctx(), |ui| {
                 egui::Frame::popup(ui.style()).show(ui, |ui| {
-                    ui.set_width(356.0);
+                    ui.set_width(400.0);
                     ui.horizontal(|ui| {
                         let edit = ui.add(egui::TextEdit::singleline(&mut find.query).hint_text("Find nodes and frames").desired_width(170.0));
                         if !find.focused {
@@ -150,7 +150,8 @@ impl FactoryApp {
                         } else {
                             format!("{} of {}", find.current.min(matches.len() - 1) + 1, matches.len())
                         };
-                        ui.label(RichText::new(count).small().color(if matches.is_empty() && !find.query.trim().is_empty() { ACCENT } else { TEXT_DIM }));
+                        let count_color = if matches.is_empty() && !find.query.trim().is_empty() { ACCENT } else { TEXT_DIM };
+                        // Right to left, so the count never runs into the buttons.
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if let Some(a) = assets.as_mut() {
                                 if crate::widgets::icon_button(ui, a, crate::assets::UiIcon::Close, "Close (Esc)").clicked() {
@@ -164,6 +165,8 @@ impl FactoryApp {
                             if ui.add_enabled(any, egui::Button::new("⏶")).on_hover_text("Previous (Shift+Enter)").clicked() {
                                 step = Some(-1);
                             }
+                            ui.add_space(4.0);
+                            ui.add(egui::Label::new(RichText::new(count).small().color(count_color)).truncate());
                         });
                     });
                 });

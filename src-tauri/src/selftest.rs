@@ -45,7 +45,7 @@ const PROBE_JS: &str = r#"
   // then read the canvas in a later animation frame (before it clears).
   const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
   r.screenshots = [];
-  for (const view of ['graph', 'zoomed', 'finder', 'finder_search', 'menu', 'room_cursors', 'room_info', 'setup_install', 'setup_game', 'setup_icons', 'setup_name', 'settings_dev', 'map', 'map_zoom', 'map_close', 'map_import', 'export', 'frames', 'project', 'project_tab']) {
+  for (const view of ['graph', 'zoomed', 'finder', 'finder_search', 'menu', 'room_cursors', 'room_info', 'setup_install', 'setup_game', 'setup_icons', 'setup_name', 'settings_dev', 'map', 'map_zoom', 'map_close', 'map_import', 'export', 'frames', 'project', 'project_menu', 'project_tab']) {
     try {
       window.__fbSelftestView = view;
       for (let i = 0; i < 6; i++) {
@@ -122,6 +122,15 @@ fn write(app: &AppHandle, out: &PathBuf, probe: &str) {
 /// Self-test only: a save to show on the Map tab (`FB_SELFTEST_SAVE`), so
 /// the map can be checked with a real 1.x save without touching the game's
 /// own save folder. None outside the self-test.
+/// Self-test only: records a native setting next to the report
+/// (`<report>.<name>.txt`), for checks the page can't see.
+pub fn note(name: &str, value: bool) {
+    let Ok(out) = std::env::var("FB_SELFTEST") else { return };
+    if name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        let _ = std::fs::write(PathBuf::from(out).with_extension(format!("{name}.txt")), value.to_string());
+    }
+}
+
 #[tauri::command]
 pub fn selftest_save() -> Option<String> {
     std::env::var_os("FB_SELFTEST")?;

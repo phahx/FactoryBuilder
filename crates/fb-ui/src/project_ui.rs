@@ -165,6 +165,45 @@ pub fn tab_bar(app: &mut FactoryApp, ui: &mut Ui, bar: Rect) {
     }
 }
 
+/// Right-click on the master graph's empty canvas: add a factory there.
+pub fn master_canvas_menu(app: &mut FactoryApp, ctx: &egui::Context) {
+    let Some((pos, at)) = app.master_menu else { return };
+    if !app.on_master() {
+        app.master_menu = None;
+        return;
+    }
+    let mut pick = None;
+    let area = egui::Area::new(egui::Id::new("master_menu")).order(egui::Order::Foreground).fixed_pos(pos).show(ctx, |ui| {
+        egui::Frame::popup(ui.style()).show(ui, |ui| {
+            ui.set_min_width(220.0);
+            for (k, label) in ["New factory", "Add factory file…", "Add factory from a share code…"].into_iter().enumerate() {
+                let r = ui.button(label);
+                #[cfg(test)]
+                widgets::TEST_BUTTONS.with(|b| b.borrow_mut().push((label.to_string(), r.rect, true)));
+                if r.clicked() {
+                    pick = Some(k);
+                }
+            }
+        });
+    });
+    let clicked_elsewhere = ctx.input(|i| i.pointer.any_pressed()) && !area.response.contains_pointer();
+    if pick.is_some() || clicked_elsewhere || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+        app.master_menu = None;
+    }
+    match pick {
+        Some(0) => app.new_factory_at(at),
+        Some(1) => {
+            app.block_spot = Some(at);
+            app.pick_open(crate::app_files::OpenPurpose::AddFactory);
+        }
+        Some(2) => {
+            app.block_spot = Some(at);
+            app.dialog = Dialog::share_code(crate::dialogs::ShareMode::AddFactory);
+        }
+        _ => {}
+    }
+}
+
 fn padded(ui: &mut Ui, add: impl FnOnce(&mut Ui)) {
     egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
         egui::Frame::none().inner_margin(egui::Margin { left: 12.0, right: 12.0, top: 8.0, bottom: 16.0 }).show(ui, |ui| {

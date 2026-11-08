@@ -161,6 +161,12 @@ pub struct FactoryApp {
     pub(crate) find: Option<crate::navigate::FindState>,
     /// View › Minimap.
     pub(crate) minimap: bool,
+    /// The master graph's right-click menu on empty canvas: where it opened
+    /// (screen) and where a factory added from it goes (unzoomed graph).
+    pub(crate) master_menu: Option<(egui::Pos2, egui::Pos2)>,
+    /// A factory being added from that menu (via a file or share code) goes
+    /// here, and the master graph stays open.
+    pub(crate) block_spot: Option<egui::Pos2>,
 }
 
 fn is_selftest() -> bool {
@@ -257,6 +263,8 @@ impl FactoryApp {
             frames: Default::default(),
             find: None,
             minimap: true,
+            master_menu: None,
+            block_spot: None,
         };
         app.new_workspace();
         app.committed = app.project_json();
@@ -1099,6 +1107,7 @@ impl FactoryApp {
             });
         self.node_menu(ctx);
         self.frame_menu(ctx);
+        crate::project_ui::master_canvas_menu(self, ctx);
         self.add_node_menu(ctx);
         self.chat_box(ctx);
         crate::dialogs::show(self, ctx);
@@ -1250,6 +1259,14 @@ impl FactoryApp {
                     self.find = Some(crate::navigate::FindState::new("rubber"));
                     self.frame_all = true;
                 }
+                // The master graph's right-click menu on empty canvas.
+                "project_menu" => {
+                    self.dialog = Dialog::None;
+                    self.activate(crate::project::MASTER);
+                    let at = self.editor_rect.left_top() + vec2(120.0, 120.0);
+                    let z = self.state.pan_zoom.zoom.max(0.01);
+                    self.master_menu = Some((at, ((at - self.editor_rect.min - self.state.pan_zoom.pan) / z).to_pos2()));
+                }
                 // The master graph with two linked factories (one short of
                 // ingots), and one of them open in its tab.
                 "project" | "project_tab" => {
@@ -1339,6 +1356,7 @@ impl FactoryApp {
             if ctx.input(|i| i.key_pressed(Key::Escape)) {
                 self.dialog = Dialog::None;
                 self.after_save = None;
+                self.block_spot = None;
             }
             return;
         }
@@ -1553,11 +1571,15 @@ impl FactoryApp {
         // Right-click on empty canvas: show our Add node menu instead of the
         // library's finder (the master graph's blocks are its factories).
         if let Some(f) = self.state.node_finder.take() {
-            if !self.on_master() {
-                let at = f.position.unwrap_or(rect.center());
+            let at = f.position.unwrap_or(rect.center());
+            if self.on_master() {
+                let z = self.state.pan_zoom.zoom.max(0.01);
+                let graph = ((at - rect.min - self.state.pan_zoom.pan) / z).to_pos2();
+                self.master_menu = Some((at, graph));
+            } else {
                 self.finder = Some(crate::finder::FinderState::new(at));
-                self.context_menu = None;
             }
+            self.context_menu = None;
         }
         // Double-click a factory block to open it.
         if self.on_master() && ui.input(|i| i.pointer.button_double_clicked(egui::PointerButton::Primary)) {

@@ -410,6 +410,35 @@ fn write_file(state: State<AppState>, path: String, kind: files::Kind, text: Opt
     files::write(&state.allowed, &path, kind, text, base64)
 }
 
+/// The webview is the app's window, not a browser: its own shortcuts (Ctrl+F
+/// find bar, Ctrl+P print, F5 / Ctrl+R reload, Ctrl+plus/minus page zoom,
+/// F12 devtools) are turned off. The keys still reach the app (Ctrl+F is its
+/// own Find). WebView2 setting AreBrowserAcceleratorKeysEnabled; Tauri doesn't
+/// expose it, so it's set on the native webview.
+fn desktop_keys(window: &tauri::WebviewWindow) {
+    #[cfg(windows)]
+    let _ = window.with_webview(|wv| {
+        use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Settings3;
+        use windows::core::Interface;
+        // SAFETY: plain COM calls on the webview's own controller, on the
+        // thread Tauri runs this closure on.
+        unsafe {
+            let Ok(core) = wv.controller().CoreWebView2() else { return };
+            let Ok(settings) = core.Settings() else { return };
+            // Ctrl+wheel and Ctrl+plus/minus would zoom the page under egui.
+            let _ = settings.SetIsZoomControlEnabled(false);
+            if let Ok(s3) = settings.cast::<ICoreWebView2Settings3>() {
+                let _ = s3.SetAreBrowserAcceleratorKeysEnabled(false);
+                if std::env::var_os("FB_SELFTEST").is_some() {
+                    let mut on = windows::core::BOOL::default();
+                    let _ = s3.AreBrowserAcceleratorKeysEnabled(&mut on);
+                    selftest::note("browser_accelerator_keys", on.as_bool());
+                }
+            }
+        }
+    });
+}
+
 /// The .fbfactory or .fbproject passed on the command line, once.
 #[tauri::command]
 fn startup_file(state: State<AppState>) -> Option<String> {
@@ -752,7 +781,8 @@ fn main() {
             if selftest_out.is_some() {
                 window = window.initialization_script(selftest::CAPTURE_JS);
             }
-            window.build()?;
+            let window = window.build()?;
+            desktop_keys(&window);
             if let Some(out) = selftest_out.clone() {
                 selftest::start(app.handle().clone(), out);
             }

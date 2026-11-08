@@ -534,8 +534,11 @@ impl FactoryApp {
         match msg {
             Msg::PickedOpen { purpose, path } => match path {
                 Ok(Some(p)) => self.read_file(purpose, p),
-                Ok(None) => {}
-                Err(e) => self.say(ctx, e, true),
+                Ok(None) => self.block_spot = None,
+                Err(e) => {
+                    self.block_spot = None;
+                    self.say(ctx, e, true);
+                }
             },
             Msg::FileRead { purpose, path, result } => match result {
                 Ok(text) => match purpose {

@@ -1340,6 +1340,7 @@ dependencies = [
  "tauri-plugin-dialog",
  "tokio",
  "tokio-tungstenite",
+ "webview2-com",
  "windows",
  "windows-registry",
 ]

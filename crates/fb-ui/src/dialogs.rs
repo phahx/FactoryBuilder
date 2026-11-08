@@ -195,6 +195,7 @@ pub fn show(app: &mut FactoryApp, ctx: &egui::Context) {
             match clicked {
                 Some(0) => {
                     app.dialog = Dialog::None;
+                    app.block_spot = None;
                     return;
                 }
                 Some(1) => submit = true,
@@ -561,7 +562,7 @@ pub fn show(app: &mut FactoryApp, ctx: &egui::Context) {
                 ("Open", "Ctrl+O"),
                 ("Save / Save as", "Ctrl+S / Ctrl+Shift+S"),
                 ("Undo / Redo", "Ctrl+Z / Ctrl+Y"),
-                ("Add a node", "Right-click the canvas"),
+                ("Add a node (a factory, on the master graph)", "Right-click the canvas"),
                 ("Node menu", "Right-click a node"),
                 ("Connect", "Drag from a port to a matching port"),
                 ("Select several", "Drag on empty canvas"),

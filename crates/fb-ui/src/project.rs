@@ -371,6 +371,8 @@ impl FactoryApp {
         self.state.ongoing_box_selection = None;
         self.state.pan_zoom.started = false;
         self.frames = Default::default();
+        self.master_menu = None;
+        self.block_spot = None;
     }
 
     /// Opens document `id` in the editor (its tab, or the master graph).
@@ -468,6 +470,26 @@ impl FactoryApp {
         let id = self.add_factory("Factory", None);
         self.activate(id);
         self.frame_all = true;
+    }
+
+    /// Puts factory `id`'s block at `at` (unzoomed) on the open master graph
+    /// and selects it.
+    pub(crate) fn place_block(&mut self, id: u32, at: Pos2) {
+        if self.active != MASTER {
+            return;
+        }
+        if let Some(n) = block_of(&self.state.graph, id) {
+            let z = self.state.pan_zoom.zoom;
+            self.state.node_positions.insert(n, (at.to_vec2() * z).to_pos2());
+            self.state.selected_nodes = vec![n];
+            self.changed();
+        }
+    }
+
+    /// The master graph's right-click menu: a new empty factory at `at`.
+    pub(crate) fn new_factory_at(&mut self, at: Pos2) {
+        let id = self.add_factory("Factory", None);
+        self.place_block(id, at);
     }
 
     pub(crate) fn rename_factory(&mut self, id: u32, name: &str) {
@@ -904,12 +926,20 @@ impl FactoryApp {
     }
 
     /// Adds factory file `f` to the project as a new factory and opens it.
+    /// From the master graph's right-click menu, its block goes where the
+    /// menu was opened and the master graph stays open.
     pub(crate) fn add_factory_file(&mut self, ctx: &egui::Context, f: &FactoryFile) {
         let (body, skipped) = self.body_from_file(f);
         let name = f.name.clone().filter(|n| !n.trim().is_empty()).unwrap_or_else(|| "Factory".into());
+        let spot = self.block_spot.take().filter(|_| self.on_master());
         let id = self.add_factory(&name, Some(body));
-        self.activate(id);
-        self.frame_all = true;
+        match spot {
+            Some(at) => self.place_block(id, at),
+            None => {
+                self.activate(id);
+                self.frame_all = true;
+            }
+        }
         let name = self.doc_name(id);
         if skipped > 0 {
             self.say(ctx, format!("Added “{name}” to the project. {skipped} parts weren't loaded: this game version doesn't have them."), true);

@@ -25,6 +25,8 @@ base64 = "0.23.1"
 windows-registry = "0.6.1"
 # Already built for tao/wry with these features; used for shortcuts and dialogs.
 windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_System_Com", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
+# The version Tauri's webview already uses: turns off the browser's own shortcuts.
+webview2-com = "0.39.1"
 
 [features]
 # Development build: Developer settings, and never hands off to an installed copy.
