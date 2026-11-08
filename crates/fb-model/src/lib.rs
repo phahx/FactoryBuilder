@@ -951,8 +951,15 @@ pub mod room {
         Denied { reason: String },
         Joined { peer: Peer },
         Left { id: u32 },
-        /// A cursor in graph coordinates (unzoomed, unpanned).
-        Cursor { id: u32, x: f32, y: f32 },
+        /// A cursor in graph coordinates (unzoomed, unpanned), on document
+        /// `doc` of the project (0 is the master graph).
+        Cursor {
+            id: u32,
+            x: f32,
+            y: f32,
+            #[serde(default)]
+            doc: u32,
+        },
         /// The shared document after an edit. Guests send it with `rev` = the
         /// revision they edited; the host stamps a new one and relays it.
         Doc { from: u32, rev: u64, json: String },

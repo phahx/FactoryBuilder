@@ -763,7 +763,7 @@ fn room_hook(net: Rc<RefCell<FakeNet>>, is_host: bool) -> RoomHook {
                 let wire: Wire = serde_json::from_value(args["wire"].clone()).unwrap();
                 let me = if is_host { 0 } else { 1 };
                 let out = match wire {
-                    Wire::Cursor { x, y, .. } => Wire::Cursor { id: me, x, y },
+                    Wire::Cursor { x, y, doc, .. } => Wire::Cursor { id: me, x, y, doc },
                     Wire::Doc { json, .. } => {
                         n.rev += 1;
                         n.doc = Some(json.clone());
@@ -1605,3 +1605,285 @@ fn zooming_keeps_graph_coordinates_stable() {
     assert!((screen - drawn).length() < 1.0, "{screen:?} vs {drawn:?}");
 }
 
+
+// ------------------------------------------------------------ projects
+
+/// Smelter(s) making Iron Ingots from ore, delivered as an output.
+fn ingot_factory(name: &str, smelters: f64) -> crate::portable::FactoryFile {
+    use crate::portable::{FactoryFile, Kind, Node, Wire};
+    let node = |kind, class: &str, machines: Option<f64>, rate: Option<f64>, x: f32| Node { kind, class: class.into(), machines, clock: machines.map(|_| 100.0), sloops: None, rate, color: None, x, y: 0.0 };
+    let mut f = FactoryFile::new(Some(name.into()));
+    f.nodes.push(node(Kind::Resource, "Desc_OreIron_C", None, Some(30.0 * smelters), 0.0));
+    f.nodes.push(node(Kind::Recipe, "Recipe_IngotIron_C", Some(smelters), None, 400.0));
+    f.nodes.push(node(Kind::Output, "Desc_IronIngot_C", None, Some(30.0 * smelters), 800.0));
+    f.wires.push(Wire { from: 0, output: 0, to: 1, input: 0, slot: 0 });
+    f.wires.push(Wire { from: 1, output: 0, to: 2, input: 0, slot: 0 });
+    f
+}
+
+/// Constructors turning 60 Iron Ingots from elsewhere into 60 Iron Rods.
+fn rod_factory(name: &str) -> crate::portable::FactoryFile {
+    use crate::portable::{FactoryFile, Kind, Node, Wire};
+    let node = |kind, class: &str, machines: Option<f64>, rate: Option<f64>, x: f32| Node { kind, class: class.into(), machines, clock: machines.map(|_| 100.0), sloops: None, rate, color: None, x, y: 0.0 };
+    let mut f = FactoryFile::new(Some(name.into()));
+    f.nodes.push(node(Kind::Input, "Desc_IronIngot_C", None, Some(60.0), 0.0));
+    f.nodes.push(node(Kind::Recipe, "Recipe_IronRod_C", Some(4.0), None, 400.0));
+    f.nodes.push(node(Kind::Output, "Desc_IronRod_C", None, Some(60.0), 800.0));
+    f.wires.push(Wire { from: 0, output: 0, to: 1, input: 0, slot: 0 });
+    f.wires.push(Wire { from: 1, output: 0, to: 2, input: 0, slot: 0 });
+    f
+}
+
+/// Links factory `from`'s `item` output to factory `to`'s input on the
+/// master graph (which must be open).
+fn link(app: &mut FactoryApp, from: u32, to: u32, item: &str) {
+    let g = &app.state.graph;
+    let a = crate::project::block_of(g, from).expect("block for the source");
+    let b = crate::project::block_of(g, to).expect("block for the target");
+    let out = g[a].outputs.iter().map(|(_, o)| *o).find(|o| g[*o].typ.0 == item).expect("output port");
+    let inp = g[b].inputs.iter().map(|(_, i)| *i).find(|i| g[*i].typ.0 == item).expect("input port");
+    app.state.graph.add_connection(out, inp, 0);
+    app.changed();
+}
+
+#[test]
+fn master_graph_links_factories_and_flags_shortfalls() {
+    use crate::project::MASTER;
+    let Some((ctx, mut app, store)) = harness() else { return };
+    frames(&ctx, &mut app, 2);
+    assert_eq!(app.factory_count(), 1, "a new document is a project with one factory");
+    let first = app.active;
+    app.add_factory_file(&ctx, &ingot_factory("Smelting", 1.0));
+    let smelting = app.active;
+    app.add_factory_file(&ctx, &rod_factory("Rods"));
+    let rods = app.active;
+    frames(&ctx, &mut app, 2);
+    assert_eq!(app.factory_count(), 3);
+    assert_eq!(app.tabs, vec![first, smelting, rods], "each added factory opens in a tab");
+    assert_eq!(app.title(), "Untitled project*");
+
+    press(&ctx, &mut app, "Project");
+    frames(&ctx, &mut app, 2);
+    assert_eq!(app.active, MASTER);
+    assert_eq!(app.node_count(), 3, "one block per factory");
+    assert!(app.node_labels().contains(&"Smelting".to_string()));
+    // Unlinked, the rod factory's ingots come from outside the project.
+    let t = app.project_totals();
+    assert!((t.from_outside["Desc_IronIngot_C"] - 60.0).abs() < 1e-6);
+    assert!(app.summary.issues.is_empty(), "{:?}", app.summary.issues);
+
+    // One smelter sends 30 ingots; the rod factory needs 60.
+    link(&mut app, smelting, rods, "Desc_IronIngot_C");
+    frames(&ctx, &mut app, 2);
+    let issues: Vec<String> = app.summary.issues.iter().map(|i| i.1.clone()).collect();
+    assert!(issues.iter().any(|i| i.contains("Rods gets only 30 of 60")), "{issues:?}");
+    let block = crate::project::block_of(&app.state.graph, rods).unwrap();
+    assert!((app.user.nodes[&block].efficiency - 0.5).abs() < 1e-6, "short of half its ingots, it runs at half speed");
+    let t = app.project_totals();
+    assert!(!t.from_outside.contains_key("Desc_IronIngot_C"));
+    assert!((t.products["Desc_IronRod_C"] - 30.0).abs() < 1e-6, "{:?}", t.products);
+    assert!((t.resources["Desc_OreIron_C"] - 30.0).abs() < 1e-6);
+
+    // Two smelters cover it; edits in the factory flow back to its block.
+    app.activate(smelting);
+    let find = |app: &FactoryApp, f: fn(&crate::graph::NodeKind) -> bool| app.state.graph.iter_nodes().find(|n| f(&app.state.graph[*n].user_data.kind)).unwrap();
+    let recipe = find(&app, |k| matches!(k, crate::graph::NodeKind::Recipe { .. }));
+    let ore = find(&app, |k| matches!(k, crate::graph::NodeKind::Resource { .. }));
+    let out = find(&app, |k| matches!(k, crate::graph::NodeKind::Output { .. }));
+    for (node, name, v) in [(recipe, crate::graph::MACHINES, 2.0), (ore, crate::graph::RATE, 60.0), (out, crate::graph::RATE, 60.0)] {
+        let i = app.state.graph[node].get_input(name).unwrap();
+        app.state.graph[i].value.set_number(v);
+    }
+    app.changed();
+    frames(&ctx, &mut app, 2);
+    press(&ctx, &mut app, "Project");
+    frames(&ctx, &mut app, 2);
+    assert!(app.summary.issues.is_empty(), "{:?}", app.summary.issues);
+    assert!((app.project_totals().products["Desc_IronRod_C"] - 60.0).abs() < 1e-6);
+
+    // Saved as a project (there's more than one factory) and opened again.
+    let path = "C:/Factories/Base.fbproject";
+    assert_eq!(app.save_kind(), crate::app_files::SavePurpose::Project);
+    app.save_as(path);
+    frames(&ctx, &mut app, 2);
+    let text = store.borrow().get(path).cloned().expect("written");
+    let p = crate::portable::ProjectFile::parse(&text).expect("a project file");
+    assert_eq!(p.factories.len(), 3);
+    assert_eq!(p.links.len(), 1);
+    assert_eq!(p.links[0].item, "Desc_IronIngot_C");
+    assert_eq!(app.title(), "Base");
+    app.new_project();
+    frames(&ctx, &mut app, 1);
+    assert_eq!(app.factory_count(), 1);
+    app.open(path);
+    frames(&ctx, &mut app, 3);
+    assert_eq!(app.factory_count(), 3);
+    assert_eq!(app.active, MASTER, "a project opens on its master graph");
+    assert_eq!(app.state.graph.iter_connections().count(), 1, "the link came back");
+    assert!(app.summary.issues.is_empty(), "{:?}", app.summary.issues);
+    assert!(!app.is_dirty());
+}
+
+#[test]
+fn factory_tabs_keep_their_own_graph_and_history() {
+    let Some((ctx, mut app, store)) = harness() else { return };
+    frames(&ctx, &mut app, 2);
+    let first = app.active;
+    app.add_test_node(crate::graph::Template::Resource("Desc_OreIron_C".into()), egui::pos2(0.0, 0.0));
+    frames(&ctx, &mut app, 2);
+    assert_eq!(app.undo_steps(), 1);
+    press(&ctx, &mut app, "New factory");
+    frames(&ctx, &mut app, 2);
+    let second = app.active;
+    assert_ne!(first, second);
+    assert_eq!(app.node_count(), 0, "a new factory starts empty");
+    assert_eq!(app.undo_steps(), 0, "and with its own history");
+    app.add_test_node(crate::graph::Template::Resource("Desc_Coal_C".into()), egui::pos2(0.0, 0.0));
+    app.add_test_node(crate::graph::Template::Resource("Desc_Stone_C".into()), egui::pos2(0.0, 300.0));
+    frames(&ctx, &mut app, 2);
+    press(&ctx, &mut app, "Factory");
+    frames(&ctx, &mut app, 2);
+    assert_eq!(app.active, first);
+    assert_eq!(app.node_count(), 1);
+    app.undo();
+    frames(&ctx, &mut app, 1);
+    assert_eq!(app.node_count(), 0, "undo acts on the open factory only");
+    press(&ctx, &mut app, "Factory 2");
+    frames(&ctx, &mut app, 2);
+    assert_eq!(app.node_count(), 2, "the other factory is untouched");
+
+    // Closing a tab keeps the factory in the project.
+    press(&ctx, &mut app, "Close Factory 2");
+    frames(&ctx, &mut app, 2);
+    assert_eq!(app.tabs, vec![first]);
+    assert_eq!(app.factory_count(), 2);
+    assert_eq!(app.active, first);
+
+    // The autosave has every factory, and restores them.
+    let t = ctx.input(|i| i.time);
+    for k in 0..4 {
+        let input = egui::RawInput { time: Some(t + 3.0 * (k + 1) as f64), screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1600.0, 960.0))), ..Default::default() };
+        let _ = ctx.run(input, |ctx| app.ui(ctx));
+    }
+    let saved = store.borrow().get(crate::app::AUTOSAVE).cloned().expect("autosaved");
+    let w = crate::project::Workspace::parse(&saved).expect("a whole-project autosave");
+    assert_eq!(w.docs.len(), 3, "master graph and both factories");
+    app.new_project();
+    frames(&ctx, &mut app, 1);
+    app.restore_workspace(w);
+    frames(&ctx, &mut app, 2);
+    assert_eq!(app.factory_count(), 2);
+    app.activate(second);
+    frames(&ctx, &mut app, 1);
+    assert_eq!(app.node_count(), 2);
+}
+
+#[test]
+fn deleting_a_block_deletes_its_factory_after_asking() {
+    use crate::project::MASTER;
+    let Some((ctx, mut app, _)) = harness() else { return };
+    frames(&ctx, &mut app, 2);
+    app.add_factory_file(&ctx, &ingot_factory("Smelting", 1.0));
+    let smelting = app.active;
+    app.activate(MASTER);
+    frames(&ctx, &mut app, 2);
+    let block = crate::project::block_of(&app.state.graph, smelting).unwrap();
+    app.state.selected_nodes = vec![block];
+    app.delete_selected();
+    assert!(matches!(app.dialog(), crate::dialogs::Dialog::DeleteFactories { ids } if ids == &vec![smelting]));
+    frames(&ctx, &mut app, 3);
+    press(&ctx, &mut app, "Delete");
+    frames(&ctx, &mut app, 2);
+    assert_eq!(app.factory_count(), 1);
+    assert!(crate::project::block_of(&app.state.graph, smelting).is_none());
+    assert!(!app.tabs.contains(&smelting));
+
+    // Duplicating a block copies the factory.
+    let only = app.factory_ids()[0];
+    app.state.selected_nodes = vec![crate::project::block_of(&app.state.graph, only).unwrap()];
+    app.duplicate_selected();
+    frames(&ctx, &mut app, 2);
+    assert_eq!(app.factory_count(), 2);
+    assert_eq!(app.node_count(), 2);
+}
+
+#[test]
+fn project_share_codes_open_whole_projects() {
+    let Some((ctx, mut app, _)) = harness() else { return };
+    frames(&ctx, &mut app, 2);
+    app.add_factory_file(&ctx, &ingot_factory("Smelting", 2.0));
+    app.add_factory_file(&ctx, &rod_factory("Rods"));
+    app.activate(crate::project::MASTER);
+    frames(&ctx, &mut app, 2);
+    let (smelting, rods) = (app.factory_ids()[1], app.factory_ids()[2]);
+    link(&mut app, smelting, rods, "Desc_IronIngot_C");
+    frames(&ctx, &mut app, 2);
+    let code = app.project_file().to_share_code();
+    assert!(code.starts_with("FBP1-"));
+    app.new_project();
+    frames(&ctx, &mut app, 1);
+    match crate::portable::Shared::from_share_code(&code).unwrap() {
+        crate::portable::Shared::Project(p) => {
+            let ctx2 = ctx.clone();
+            app.open_project(&ctx2, p, None);
+        }
+        other => panic!("expected a project, got {other:?}"),
+    }
+    frames(&ctx, &mut app, 2);
+    assert_eq!(app.factory_count(), 3);
+    assert_eq!(app.state.graph.iter_connections().count(), 1);
+    assert!(app.summary.issues.is_empty(), "{:?}", app.summary.issues);
+}
+
+#[test]
+fn moving_a_selection_to_a_new_factory_keeps_the_totals() {
+    use crate::graph::NodeKind;
+    use crate::portable::{FactoryFile, Kind, Node, Wire};
+    let Some((ctx, mut app, _)) = harness() else { return };
+    frames(&ctx, &mut app, 2);
+    let node = |kind, class: &str, machines: Option<f64>, rate: Option<f64>, x: f32| Node { kind, class: class.into(), machines, clock: machines.map(|_| 100.0), sloops: None, rate, color: None, x, y: 0.0 };
+    let mut f = FactoryFile::new(Some("Rods".into()));
+    f.nodes = vec![
+        node(Kind::Resource, "Desc_OreIron_C", None, Some(30.0), 0.0),
+        node(Kind::Recipe, "Recipe_IngotIron_C", Some(1.0), None, 400.0),
+        node(Kind::Recipe, "Recipe_IronRod_C", Some(2.0), None, 800.0),
+        node(Kind::Output, "Desc_IronRod_C", None, Some(30.0), 1200.0),
+    ];
+    f.wires = (0..3).map(|k| Wire { from: k, output: 0, to: k + 1, input: 0, slot: 0 }).collect();
+    app.add_factory_file(&ctx, &f);
+    let here = app.active;
+    frames(&ctx, &mut app, 2);
+    assert!(app.summary.issues.is_empty(), "{:?}", app.summary.issues);
+    // Move the rod constructors and the output.
+    let g = &app.state.graph;
+    let picked: Vec<_> = g.iter_nodes().filter(|n| matches!(&g[*n].user_data.kind, NodeKind::Output { .. }) || matches!(&g[*n].user_data.kind, NodeKind::Recipe { recipe } if recipe == "Recipe_IronRod_C")).collect();
+    assert_eq!(picked.len(), 2);
+    app.state.selected_nodes = picked;
+    app.move_selection_to_new_factory(&ctx);
+    frames(&ctx, &mut app, 2);
+    assert_eq!(app.active, here, "stays in the factory it was moved from");
+    assert_eq!(app.factory_count(), 3);
+    let kinds: Vec<String> = app.state.graph.iter_nodes().map(|n| format!("{:?}", app.state.graph[n].user_data.kind)).collect();
+    assert_eq!(app.node_count(), 3, "ore, smelter and an Output for the ingots: {kinds:?}");
+    assert!(kinds.iter().any(|k| k.contains("Output") && k.contains("Desc_IronIngot_C")), "{kinds:?}");
+    assert!(app.summary.issues.is_empty(), "{:?}", app.summary.issues);
+    let new = *app.factory_ids().last().unwrap();
+    assert_eq!(app.doc_name(new), "Iron Rod factory");
+
+    // The new factory gets the ingots as an input and makes the rods.
+    app.activate(new);
+    frames(&ctx, &mut app, 2);
+    assert_eq!(app.node_count(), 3, "an Input, the constructors and the output");
+    assert!(app.summary.issues.is_empty(), "{:?}", app.summary.issues);
+    assert!((app.summary.inputs["Desc_IronIngot_C"] - 30.0).abs() < 1e-6);
+    assert_eq!(app.planner.targets.first().map(|t| t.item.as_str()), Some("Desc_IronRod_C"), "its plan makes what it outputs");
+
+    // Linked on the master graph: nothing short, the same rods leave the project.
+    app.activate(crate::project::MASTER);
+    frames(&ctx, &mut app, 2);
+    assert_eq!(app.state.graph.iter_connections().count(), 1);
+    assert!(app.summary.issues.is_empty(), "{:?}", app.summary.issues);
+    let t = app.project_totals();
+    assert!((t.products["Desc_IronRod_C"] - 30.0).abs() < 1e-6, "{:?}", t.products);
+    assert!(!t.from_outside.contains_key("Desc_IronIngot_C"));
+}

@@ -79,6 +79,15 @@ pub enum NodeKind {
     Sink {
         item: String,
     },
+    /// A whole factory on the project's master graph: what it takes in and
+    /// sends out per minute (item class, rate), copied from the factory.
+    Factory {
+        id: u32,
+        #[serde(default)]
+        ins: Vec<(String, f64)>,
+        #[serde(default)]
+        outs: Vec<(String, f64)>,
+    },
 }
 
 impl NodeKind {
@@ -89,6 +98,7 @@ impl NodeKind {
             NodeKind::Input { item } => Template::Input(item),
             NodeKind::Output { item } => Template::Output(item),
             NodeKind::Sink { item } => Template::Sink(item),
+            NodeKind::Factory { id, .. } => Template::Factory(id),
         }
     }
 
@@ -100,6 +110,8 @@ impl NodeKind {
             | NodeKind::Input { item }
             | NodeKind::Output { item }
             | NodeKind::Sink { item } => Some(item),
+            // A factory shows its first product.
+            NodeKind::Factory { outs, .. } => outs.first().map(|(item, _)| item.as_str()),
         }
     }
 }
@@ -119,6 +131,8 @@ pub enum Template {
     Input(String),
     Output(String),
     Sink(String),
+    /// A factory block on the master graph.
+    Factory(u32),
 }
 
 #[derive(Debug, Clone)]
@@ -156,6 +170,12 @@ pub struct UserState {
     pub nodes: HashMap<NodeId, NodeStat>,
     #[serde(skip)]
     pub zoom: f32,
+    /// The project's factories (for the blocks on the master graph).
+    #[serde(skip)]
+    pub factories: HashMap<u32, crate::project::FactoryInfo>,
+    /// The master graph is the one being drawn.
+    #[serde(skip)]
+    pub master: bool,
 }
 
 impl UserState {
@@ -236,6 +256,7 @@ impl Template {
             Template::Input(item) => NodeKind::Input { item },
             Template::Output(item) => NodeKind::Output { item },
             Template::Sink(item) => NodeKind::Sink { item },
+            Template::Factory(id) => NodeKind::Factory { id, ins: Vec::new(), outs: Vec::new() },
         }
     }
 }
@@ -264,6 +285,7 @@ impl NodeTemplateTrait for Template {
             Template::Input(_) => "Inputs".into(),
             Template::Output(_) => "Outputs".into(),
             Template::Sink(_) => "Sinks".into(),
+            Template::Factory(_) => "Factories".into(),
         }]
     }
 
@@ -279,14 +301,19 @@ impl NodeTemplateTrait for Template {
             | Template::Input(i)
             | Template::Output(i)
             | Template::Sink(i) => s.game.item_name(i).to_string(),
+            Template::Factory(id) => s.factories.get(id).map(|f| f.name.clone()).unwrap_or_else(|| "Factory".into()),
         }
     }
 
-    fn user_data(&self, _s: &mut UserState) -> NodeData {
-        NodeData {
-            kind: self.kind(),
-            color: None,
-        }
+    fn user_data(&self, s: &mut UserState) -> NodeData {
+        let kind = match self {
+            Template::Factory(id) => {
+                let f = s.factories.get(id).cloned().unwrap_or_default();
+                NodeKind::Factory { id: *id, ins: f.ins, outs: f.outs }
+            }
+            t => t.kind(),
+        };
+        NodeData { kind, color: None }
     }
 
     fn build_node(&self, graph: &mut FactoryGraph, s: &mut UserState, node_id: NodeId) {
@@ -302,20 +329,10 @@ impl NodeTemplateTrait for Template {
             );
         };
         let item_in = |graph: &mut FactoryGraph, item: &str| {
-            let name = port_name(&game, item, &graph[node_id].inputs);
-            graph.add_wide_input_param(
-                node_id,
-                name,
-                ItemType(item.into()),
-                PortValue::Item(item.into()),
-                InputParamKind::ConnectionOnly,
-                None,
-                true,
-            );
+            add_item_input(&game, graph, node_id, item);
         };
         let item_out = |graph: &mut FactoryGraph, item: &str| {
-            let name = port_name(&game, item, &graph[node_id].outputs);
-            graph.add_output_param(node_id, name, ItemType(item.into()));
+            add_item_output(&game, graph, node_id, item);
         };
         let unit = |item: &str| {
             if game.item_form(item).is_fluid() {
@@ -350,8 +367,29 @@ impl NodeTemplateTrait for Template {
                 item_in(graph, i);
             }
             Template::Sink(i) => item_in(graph, i),
+            Template::Factory(id) => {
+                let f = s.factories.get(id).cloned().unwrap_or_default();
+                for (item, _) in &f.ins {
+                    item_in(graph, item);
+                }
+                for (item, _) in &f.outs {
+                    item_out(graph, item);
+                }
+            }
         }
     }
+}
+
+/// An item input port (any number of wires).
+pub fn add_item_input(game: &GameData, graph: &mut FactoryGraph, node: NodeId, item: &str) -> InputId {
+    let name = port_name(game, item, &graph[node].inputs);
+    graph.add_wide_input_param(node, name, ItemType(item.into()), PortValue::Item(item.into()), InputParamKind::ConnectionOnly, None, true)
+}
+
+/// An item output port.
+pub fn add_item_output(game: &GameData, graph: &mut FactoryGraph, node: NodeId, item: &str) -> OutputId {
+    let name = port_name(game, item, &graph[node].outputs);
+    graph.add_output_param(node, name, ItemType(item.into()))
 }
 
 /// Everything that can be added from the right-click finder.
@@ -470,7 +508,12 @@ fn port_row(ui: &mut Ui, s: &mut UserState, node_id: NodeId, name: &str, item: &
             };
             ui.with_layout(align, |ui| {
                 ui.label(RichText::new(name).color(TEXT));
-                let (text, color) = if input {
+                let (text, color) = if s.master && !stat.connected {
+                    // Factory blocks: unlinked inputs come from outside the
+                    // project; unlinked outputs are what the project makes.
+                    let t = if input { format!("{} · from outside", fmt_rate_unit(stat.want, form)) } else { fmt_rate_unit(stat.want, form) };
+                    (t, TEXT_DIM)
+                } else if input {
                     let t = if stat.connected {
                         format!(
                             "{} / {}",
@@ -529,6 +572,14 @@ impl NodeDataTrait for NodeData {
         // The library lays this out right to left, before the title.
         {
             let caption = match &self.kind {
+                NodeKind::Factory { .. } => {
+                    let eff = s.nodes.get(&node_id).map(|n| n.efficiency).unwrap_or(1.0);
+                    if eff < 0.995 {
+                        ui.label(RichText::new(format!("{:.0}%", eff * 100.0)).small().color(supply_color(eff, 1.0)))
+                            .on_hover_text("Running speed: how much of its planned rate this factory can run at with what the other factories send it.");
+                    }
+                    Some("Factory")
+                }
                 NodeKind::Recipe { .. } => {
                     let eff = s.nodes.get(&node_id).map(|n| n.efficiency).unwrap_or(1.0);
                     let color = supply_color(eff, 1.0);
@@ -648,6 +699,18 @@ impl NodeDataTrait for NodeData {
                             widgets::name_label(ui, RichText::new(extra).small().color(ACCENT));
                         }
                     });
+                });
+            }
+            NodeKind::Factory { id, .. } => {
+                let Some(f) = s.factories.get(id).cloned() else { return vec![] };
+                let (r_div, _) = ui.allocate_exact_size(vec2(ui.available_width(), 1.0), egui::Sense::hover());
+                ui.painter().rect_filled(r_div, 0.0, DIVIDER);
+                widgets::split_row_with(ui, 24.0, s, |ui, s| {
+                    ui.label(RichText::new(format!("{} MW", fmt_num(f.power_mw))).small().color(TEXT_DIM));
+                    s.ui_icon(ui, UiIcon::Power, 14.0, TEXT_DIM);
+                }, |ui, _| {
+                    let n = f.machines;
+                    widgets::name_label(ui, RichText::new(format!("{n} {}", if n == 1 { "building" } else { "buildings" })).small().color(TEXT_DIM));
                 });
             }
             NodeKind::Sink { item } => {
@@ -787,5 +850,12 @@ pub fn node_rates(
             item_inputs.map(|(name, _)| (name.clone(), 0.0)).collect(),
             vec![],
         ),
+        NodeKind::Factory { ins, outs, .. } => {
+            let rate = |list: &[(String, f64)], item: &str| list.iter().filter(|(i, _)| i == item).map(|(_, r)| *r).sum::<f64>();
+            (
+                item_inputs.map(|(name, id)| (name.clone(), rate(ins, &graph[*id].typ.0))).collect(),
+                n.outputs.iter().map(|(name, id)| (name.clone(), rate(outs, &graph[*id].typ.0))).collect(),
+            )
+        }
     }
 }

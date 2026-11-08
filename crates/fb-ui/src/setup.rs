@@ -413,7 +413,7 @@ pub fn show(app: &mut FactoryApp, ctx: &egui::Context) {
                             pick = Some((FolderPurpose::InstallDir, "Install Factory Builder in", w.install_dir.clone()));
                         }
                         widgets::checkbox(ui, assets, &mut w.desktop, "Create a desktop shortcut");
-                        widgets::caption(ui, "A Start menu shortcut is always added. Factory Builder appears in Apps & features, where you can uninstall it. Double-clicking a .fbfactory file opens it here. Your factories and settings are kept separately and stay if you uninstall.");
+                        widgets::caption(ui, "A Start menu shortcut is always added. Factory Builder appears in Apps & features, where you can uninstall it. Double-clicking a .fbfactory or .fbproject file opens it here. Your factories and settings are kept separately and stay if you uninstall.");
                         if let Some(e) = &w.install_error {
                             error_text(ui, e);
                         }

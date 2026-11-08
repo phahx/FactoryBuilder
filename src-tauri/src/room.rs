@@ -272,7 +272,7 @@ impl Host {
     pub fn send(&self, wire: Wire) {
         let mut st = self.state.lock().unwrap();
         match wire {
-            Wire::Cursor { x, y, .. } => broadcast(&st, None, &Wire::Cursor { id: HOST_ID, x, y }),
+            Wire::Cursor { x, y, doc, .. } => broadcast(&st, None, &Wire::Cursor { id: HOST_ID, x, y, doc }),
             Wire::Doc { json, .. } => {
                 st.rev += 1;
                 st.doc = Some(json.clone());
@@ -360,8 +360,8 @@ async fn serve_guest(stream: TcpStream, state: Arc<Mutex<HostState>>, events: Ev
         let Ok(wire) = serde_json::from_str::<Wire>(t.as_str()) else { continue };
         let mut st = state.lock().unwrap();
         match wire {
-            Wire::Cursor { x, y, .. } if x.is_finite() && y.is_finite() => {
-                let m = Wire::Cursor { id, x, y };
+            Wire::Cursor { x, y, doc, .. } if x.is_finite() && y.is_finite() => {
+                let m = Wire::Cursor { id, x, y, doc };
                 broadcast(&st, Some(id), &m);
                 events.push(RoomEvent::Message(m));
             }
@@ -543,9 +543,9 @@ mod tests {
         wait_for(b.events(), |e| matches!(e, RoomEvent::Message(Wire::Welcome { .. }))).await;
         wait_for(a.events(), |e| matches!(e, RoomEvent::Message(Wire::Joined { peer }) if peer.name == "Bo")).await;
 
-        a.send(Wire::Cursor { id: 99, x: 10.0, y: 20.0 });
-        wait_for(b.events(), |e| *e == RoomEvent::Message(Wire::Cursor { id: 1, x: 10.0, y: 20.0 })).await;
-        wait_for(host.events(), |e| *e == RoomEvent::Message(Wire::Cursor { id: 1, x: 10.0, y: 20.0 })).await;
+        a.send(Wire::Cursor { id: 99, x: 10.0, y: 20.0, doc: 3 });
+        wait_for(b.events(), |e| *e == RoomEvent::Message(Wire::Cursor { id: 1, x: 10.0, y: 20.0, doc: 3 })).await;
+        wait_for(host.events(), |e| *e == RoomEvent::Message(Wire::Cursor { id: 1, x: 10.0, y: 20.0, doc: 3 })).await;
 
         b.send(Wire::Doc { from: 0, rev: 1, json: "{\"v\":2}".into() });
         wait_for(a.events(), |e| *e == RoomEvent::Message(Wire::Doc { from: 2, rev: 2, json: "{\"v\":2}".into() })).await;
@@ -586,7 +586,7 @@ mod tests {
         .await
         .unwrap();
         let g = Guest::join(code_for(host.info.port), "Ada", quiet()).await.unwrap();
-        g.send(Wire::Cursor { id: 0, x: 1.0, y: 2.0 });
+        g.send(Wire::Cursor { id: 0, x: 1.0, y: 2.0, doc: 0 });
         wait_for(host.events(), |e| matches!(e, RoomEvent::Message(Wire::Cursor { .. }))).await;
         assert!(count.load(std::sync::atomic::Ordering::SeqCst) >= 2, "joined + cursor each notified");
     }
@@ -600,7 +600,7 @@ mod tests {
         let mut total = Duration::ZERO;
         for i in 0..50 {
             let t = std::time::Instant::now();
-            g.send(Wire::Cursor { id: 0, x: i as f32, y: 0.0 });
+            g.send(Wire::Cursor { id: 0, x: i as f32, y: 0.0, doc: 0 });
             loop {
                 let got = host.events().drain().into_iter().any(|e| matches!(e, RoomEvent::Message(Wire::Cursor { x, .. }) if x == i as f32));
                 if got {

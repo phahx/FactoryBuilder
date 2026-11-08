@@ -9,7 +9,7 @@ use crate::dialogs::{Dialog, Pending};
 use crate::graph::*;
 use crate::theme::{self, *};
 use egui::{vec2, Align, Align2, Key, KeyboardShortcut, Layout, Modifiers, RichText};
-use egui_node_graph2::{NodeId, NodeResponse, NodeTemplateTrait};
+use egui_node_graph2::{NodeId, NodeResponse};
 use fb_engine::sim::{simulate, SimLink, SimNode, SimResult};
 use fb_model::*;
 use serde::{Deserialize, Serialize};
@@ -90,7 +90,9 @@ pub struct FactoryApp {
     pub(crate) committed: String,
     pub(crate) pending_commit: bool,
     pub(crate) last_change: f64,
-    pub(crate) autosaved: String,
+    /// Bumped by every change to the project (autosave compares it).
+    pub(crate) rev: u64,
+    pub(crate) autosaved_rev: u64,
     pub(crate) autosave_in_flight: bool,
     pub(crate) tried_autoload: bool,
     pub(crate) solving: bool,
@@ -106,7 +108,7 @@ pub struct FactoryApp {
     #[cfg(test)]
     pub(crate) menu_swatches: Vec<egui::Rect>,
     pub(crate) summary: Summary,
-    pub(crate) sim_cache: Option<(Vec<SimNode>, Vec<SimLink>, SimResult)>,
+    pub(crate) sim_cache: SimCache,
     /// Unzoomed node heights measured on the last frame (for Arrange).
     pub(crate) node_heights: BTreeMap<NodeId, f32>,
     /// Screen rects of the nodes on the last frame.
@@ -141,6 +143,14 @@ pub struct FactoryApp {
     pub(crate) wire_label_texts: Vec<String>,
     /// "Not now" on the icons notice, for this session.
     pub(crate) notice_dismissed: bool,
+    /// The project's documents: the master graph (id 0) and the factories.
+    pub(crate) docs: Vec<crate::project::Doc>,
+    /// The document in the editor.
+    pub(crate) active: u32,
+    /// Factories open as tabs, in tab order.
+    pub(crate) tabs: Vec<u32>,
+    /// A tab was clicked: open that document before the next frame's work.
+    pub(crate) switch_to: Option<u32>,
 }
 
 fn is_selftest() -> bool {
@@ -192,7 +202,8 @@ impl FactoryApp {
             committed: String::new(),
             pending_commit: false,
             last_change: 0.0,
-            autosaved: String::new(),
+            rev: 0,
+            autosaved_rev: 0,
             autosave_in_flight: false,
             tried_autoload: false,
             solving: false,
@@ -229,8 +240,14 @@ impl FactoryApp {
             map: Default::default(),
             #[cfg(test)]
             wire_label_texts: Vec::new(),
+            docs: Vec::new(),
+            active: 1,
+            tabs: Vec::new(),
+            switch_to: None,
         };
+        app.new_workspace();
         app.committed = app.project_json();
+        app.autosaved_rev = app.rev;
         app.backend.call("status", json!({}), Msg::Status);
         app.backend.call("load_game", json!({}), Msg::Game);
         app.backend.call("list_projects", json!({}), Msg::Projects);
@@ -249,7 +266,8 @@ impl FactoryApp {
     }
 
     pub(crate) fn title(&self) -> String {
-        let name = self.project_name.as_deref().unwrap_or("Untitled factory");
+        let untitled = if self.factory_count() > 1 { "Untitled project" } else { "Untitled factory" };
+        let name = self.project_name.as_deref().unwrap_or(untitled);
         if self.dirty {
             format!("{name}*")
         } else {
@@ -288,18 +306,30 @@ impl FactoryApp {
         if !self.pending_commit || ctx.input(|i| i.pointer.any_down()) {
             return;
         }
+        if self.flush_commit() {
+            self.last_change = ctx.input(|i| i.time);
+        }
+    }
+
+    /// Makes a pending change an undo step now. Returns true if anything changed.
+    pub(crate) fn flush_commit(&mut self) -> bool {
+        if !self.pending_commit {
+            return false;
+        }
         self.pending_commit = false;
         let now = self.project_json();
-        if now != self.committed {
-            self.undo.push(std::mem::replace(&mut self.committed, now));
-            if self.undo.len() > HISTORY_LIMIT {
-                self.undo.remove(0);
-            }
-            self.redo.clear();
-            self.dirty = true;
-            self.last_change = ctx.input(|i| i.time);
-            self.share_doc();
+        if now == self.committed {
+            return false;
         }
+        self.undo.push(std::mem::replace(&mut self.committed, now));
+        if self.undo.len() > HISTORY_LIMIT {
+            self.undo.remove(0);
+        }
+        self.redo.clear();
+        self.dirty = true;
+        self.rev += 1;
+        self.share_doc();
+        true
     }
 
     fn restore(&mut self, json: &str) {
@@ -326,6 +356,7 @@ impl FactoryApp {
                 .push(std::mem::replace(&mut self.committed, prev.clone()));
             self.restore(&prev);
             self.dirty = true;
+            self.rev += 1;
             self.share_doc();
         }
     }
@@ -336,46 +367,45 @@ impl FactoryApp {
                 .push(std::mem::replace(&mut self.committed, next.clone()));
             self.restore(&next);
             self.dirty = true;
+            self.rev += 1;
             self.share_doc();
         }
     }
 
-    /// Start over from `json` (or empty) with a fresh history.
+    /// The plan a new factory starts with.
+    pub(crate) fn default_planner(&self) -> Planner {
+        let mut p = Planner { extraction: self.planner.extraction.clone(), ..Default::default() };
+        if self.game_loaded {
+            let g = &self.user.game;
+            p.targets = vec![Target { item: "Desc_IronPlateReinforced_C".into(), rate: 5.0 }];
+            p.enabled = g.recipes.values().filter(|r| !r.alternate && !r.is_generator()).map(|r| r.class.clone()).collect();
+            p.limits = g.resource_limits.clone();
+            p.objective = Objective::Resources;
+            p.power = PowerSettings::default();
+        }
+        p
+    }
+
+    /// Start over with one factory, from `json` (or empty), with a fresh history.
     pub(crate) fn reset_to(&mut self, json: Option<&str>, name: Option<String>) {
+        let keep_filter = std::mem::take(&mut self.planner.recipe_filter);
+        let planner = self.default_planner();
+        self.new_workspace();
+        self.planner = planner;
+        self.planner.recipe_filter = keep_filter;
         self.current_path = None;
-        match json {
-            Some(j) => self.restore(j),
-            None => {
-                self.state = EditorState::new(1.0);
-                self.state.style = theme::graph_style();
-                if let Some(g) = self.game_loaded.then(|| self.user.game.clone()) {
-                    self.planner.targets = vec![Target {
-                        item: "Desc_IronPlateReinforced_C".into(),
-                        rate: 5.0,
-                    }];
-                    self.planner.inputs.clear();
-                    self.planner.enabled = g
-                        .recipes
-                        .values()
-                        .filter(|r| !r.alternate && !r.is_generator())
-                        .map(|r| r.class.clone())
-                        .collect();
-                    self.planner.limits = g.resource_limits.clone();
-                    self.planner.objective = Objective::Resources;
-                    self.planner.power = PowerSettings::default();
-                }
-            }
+        if let Some(d) = self.doc_mut(1) {
+            d.name = name.clone().unwrap_or_else(|| "Factory".into());
+        }
+        if let Some(j) = json {
+            self.restore(j);
         }
         if self.game_loaded {
             let game = self.user.game.clone();
             crate::graph::add_missing_sloop_inputs(&game, &mut self.state.graph);
         }
         self.project_name = name;
-        self.undo.clear();
-        self.redo.clear();
-        self.committed = self.project_json();
-        self.pending_commit = false;
-        self.dirty = false;
+        self.reset_history();
         self.solve_notes.clear();
         self.frame_all = true;
     }
@@ -394,6 +424,10 @@ impl FactoryApp {
                 let ctx = self.backend_ctx();
                 self.open_factory(&ctx, *f, None);
             }
+            Pending::OpenProject(p) => {
+                let ctx = self.backend_ctx();
+                self.open_project(&ctx, *p, None);
+            }
         }
     }
 
@@ -401,17 +435,26 @@ impl FactoryApp {
         self.backend.ctx()
     }
 
+    /// Every document starts a fresh history; nothing unsaved.
     pub(crate) fn reset_history(&mut self) {
         self.undo.clear();
         self.redo.clear();
         self.committed = self.project_json();
         self.pending_commit = false;
         self.dirty = false;
+        for d in &mut self.docs {
+            if let Some(b) = d.body.as_mut() {
+                b.undo.clear();
+                b.redo.clear();
+                b.committed.clear();
+            }
+        }
+        self.rev += 1;
     }
 
     pub(crate) fn mark_saved(&mut self) {
+        self.flush_commit();
         self.dirty = false;
-        self.committed = self.project_json();
     }
 
     pub(crate) fn add_node_at(&mut self, template: Template, pos: egui::Pos2) -> NodeId {
@@ -440,10 +483,13 @@ impl FactoryApp {
             ctx.request_repaint_after(std::time::Duration::from_millis(500));
             return;
         }
-        if self.committed != self.autosaved {
-            self.autosaved = self.committed.clone();
+        if self.pending_commit {
+            return;
+        }
+        if self.rev != self.autosaved_rev {
+            self.autosaved_rev = self.rev;
             self.autosave_in_flight = true;
-            let json = self.committed.clone();
+            let json = self.workspace_json();
             self.backend.call::<()>(
                 "save_project",
                 json!({ "name": AUTOSAVE, "json": json }),
@@ -569,6 +615,16 @@ impl FactoryApp {
                     }
                     self.backend.call("list_projects", json!({}), Msg::Projects);
                 }
+                Msg::Loaded { name, result: Ok(json) } if crate::project::Workspace::parse(&json).is_some() => {
+                    // A session with several documents (always the autosave).
+                    if let Some(w) = crate::project::Workspace::parse(&json) {
+                        self.restore_workspace(w);
+                        if name == AUTOSAVE {
+                            self.autosaved_rev = self.rev;
+                        }
+                        self.frame_all = true;
+                    }
+                }
                 Msg::Loaded { name, result } => {
                     let parsed = result.and_then(|s| {
                         serde_json::from_str::<Project>(&s)
@@ -586,7 +642,7 @@ impl FactoryApp {
                             self.current_path = p.path.clone();
                             if name == AUTOSAVE {
                                 // The session may hold changes that were never saved.
-                                self.autosaved = self.committed.clone();
+                                self.autosaved_rev = self.rev;
                             } else {
                                 self.say(ctx, format!("Opened “{name}”."), false);
                             }
@@ -676,6 +732,7 @@ impl FactoryApp {
         self.user.game = Rc::new(game);
         self.game_loaded = true;
         self.committed = self.project_json();
+        self.sync_master();
         if self.selftest {
             // Exercise the whole wasm path: solve -> graph -> LP flow sim -> icons.
             self.planner.targets = vec![
@@ -710,17 +767,8 @@ impl FactoryApp {
 
     // --------------------------------------------------------------- graph
 
-    fn add_node(&mut self, template: Template, pos: egui::Pos2) -> NodeId {
-        let label = template.node_graph_label(&mut self.user);
-        let data = template.user_data(&mut self.user);
-        let user = &mut self.user;
-        let id = self
-            .state
-            .graph
-            .add_node(label, data, |g, id| template.build_node(g, user, id));
-        self.state.node_positions.insert(id, pos);
-        self.state.node_order.push(id);
-        id
+    pub(crate) fn add_node(&mut self, template: Template, pos: egui::Pos2) -> NodeId {
+        crate::project::add_node_to(&mut self.state, &mut self.user, template, pos)
     }
 
     fn set_number(&mut self, node: NodeId, name: &str, v: f64) {
@@ -878,6 +926,14 @@ impl FactoryApp {
     }
 
     pub(crate) fn delete_selected(&mut self) {
+        if self.on_master() {
+            let g = &self.state.graph;
+            let ids: Vec<u32> = self.state.selected_nodes.iter().filter_map(|n| crate::project::factory_of(g, *n)).collect();
+            if !ids.is_empty() {
+                self.dialog = Dialog::DeleteFactories { ids };
+            }
+            return;
+        }
         for id in std::mem::take(&mut self.state.selected_nodes) {
             if self.state.graph.nodes.contains_key(id) {
                 self.state.graph.remove_node(id);
@@ -891,6 +947,13 @@ impl FactoryApp {
     /// Copies the selected nodes (with their numbers and the wires between
     /// them) 40 px down-right, and selects the copies.
     pub(crate) fn duplicate_selected(&mut self) {
+        if self.on_master() {
+            let g = &self.state.graph;
+            let ids: Vec<u32> = self.state.selected_nodes.iter().filter_map(|n| crate::project::factory_of(g, *n)).collect();
+            let copies: Vec<u32> = ids.into_iter().filter_map(|id| self.duplicate_factory(id)).collect();
+            self.state.selected_nodes = copies.iter().filter_map(|id| crate::project::block_of(&self.state.graph, *id)).collect();
+            return;
+        }
         let selected: Vec<NodeId> = self
             .state
             .selected_nodes
@@ -941,172 +1004,19 @@ impl FactoryApp {
         self.changed();
     }
 
+    pub(crate) fn evaluate_now(&mut self) {
+        self.evaluate();
+    }
+
     /// Runs the flow simulation over the current graph and fills the stats
     /// the nodes and the overview show.
     fn evaluate(&mut self) {
         let game = self.user.game.clone();
-        let g = &self.state.graph;
-        let ids: Vec<NodeId> = g.iter_nodes().collect();
-        let index: BTreeMap<NodeId, usize> =
-            ids.iter().enumerate().map(|(i, id)| (*id, i)).collect();
-        let mut rates = Vec::with_capacity(ids.len());
-        let mut sim_nodes = Vec::with_capacity(ids.len());
-        for &id in &ids {
-            let (ins, outs) = node_rates(&game, g, id);
-            sim_nodes.push(SimNode {
-                inputs: ins.iter().map(|x| x.1).collect(),
-                outputs: outs.iter().map(|x| x.1).collect(),
-                throttles: matches!(g[id].user_data.kind, NodeKind::Recipe { .. }),
-                sink: matches!(g[id].user_data.kind, NodeKind::Sink { .. }),
-            });
-            rates.push((ins, outs));
-        }
-        let item_inputs = |id: NodeId| -> Vec<egui_node_graph2::InputId> {
-            g[id]
-                .inputs
-                .iter()
-                .filter(|(_, i)| matches!(g[*i].value, PortValue::Item(_)))
-                .map(|(_, i)| *i)
-                .collect()
-        };
-        let mut links = Vec::new();
-        let mut link_wires = Vec::new();
-        for (input, outputs) in g.iter_connection_groups() {
-            let Some(to) = g.try_get_input(input).map(|i| i.node) else {
-                continue;
-            };
-            let Some(to_port) = item_inputs(to).iter().position(|i| *i == input) else {
-                continue;
-            };
-            for output in outputs {
-                let from = g[output].node;
-                let Some(from_port) = g[from].outputs.iter().position(|(_, o)| *o == output) else {
-                    continue;
-                };
-                links.push(SimLink {
-                    from_node: index[&from],
-                    from_port,
-                    to_node: index[&to],
-                    to_port,
-                });
-                link_wires.push((input, output));
-            }
-        }
-        let result = match &self.sim_cache {
-            Some((n, l, r)) if *n == sim_nodes && *l == links => r.clone(),
-            _ => {
-                let r = simulate(&sim_nodes, &links);
-                self.sim_cache = Some((sim_nodes, links.clone(), r.clone()));
-                r
-            }
-        };
-
-        self.wire_flow = link_wires.into_iter().zip(result.link_flow.iter().copied()).collect();
-        self.user.ports.clear();
-        self.user.nodes.clear();
-        let mut connected_in = BTreeSet::new();
-        let mut connected_out = BTreeSet::new();
-        for l in &links {
-            connected_in.insert((l.to_node, l.to_port));
-            connected_out.insert((l.from_node, l.from_port));
-        }
-        let mut sum = Summary::default();
-        for (i, &id) in ids.iter().enumerate() {
-            let (ins, outs) = &rates[i];
-            for (p, (name, want)) in ins.iter().enumerate() {
-                self.user.ports.insert(
-                    (id, name.clone()),
-                    PortStat {
-                        have: result.received[i][p],
-                        want: *want,
-                        connected: connected_in.contains(&(i, p)),
-                    },
-                );
-            }
-            for (p, (name, want)) in outs.iter().enumerate() {
-                self.user.ports.insert(
-                    (id, name.clone()),
-                    PortStat {
-                        have: result.shipped[i][p],
-                        want: *want,
-                        connected: connected_out.contains(&(i, p)),
-                    },
-                );
-            }
-            let eff = result.efficiency[i];
-            let mut power = 0.0;
-            match &g[id].user_data.kind {
-                NodeKind::Recipe { recipe } => {
-                    if let Some(r) = game.recipes.get(recipe) {
-                        let machines = input_number(g, id, MACHINES);
-                        let setup = crate::graph::machine_setup(&game, g, id);
-                        if let Some(b) = game.buildings.get(&r.building) {
-                            // Whole machines as built, each at the spread clock speed.
-                            power = setup.count as f64 * b.power_with(game.recipe_power_mw(r), setup.clock, setup.sloops_each);
-                            let e = sum.buildings.entry(b.class.clone()).or_default();
-                            e.0 += setup.count as f64;
-                            e.1 += machines;
-                            sum.power_shards += setup.shards();
-                            sum.somersloops += setup.sloops();
-                        }
-                        if eff < 0.995 {
-                            sum.issues
-                                .push((id, format!("{} runs at {:.0}%", r.name, eff * 100.0)));
-                        }
-                        for (p, (name, want)) in outs.iter().enumerate() {
-                            if *want > 1e-9 && !connected_out.contains(&(i, p)) {
-                                sum.issues.push((
-                                    id,
-                                    format!("{}: {} output isn't connected", r.name, name),
-                                ));
-                            }
-                        }
-                    }
-                }
-                NodeKind::Resource { item } => {
-                    *sum.resources.entry(item.clone()).or_default() +=
-                        result.shipped[i].iter().sum::<f64>()
-                }
-                NodeKind::Input { item } => {
-                    *sum.inputs.entry(item.clone()).or_default() +=
-                        result.shipped[i].iter().sum::<f64>()
-                }
-                NodeKind::Output { item } => {
-                    let got: f64 = result.received[i].iter().sum();
-                    let want: f64 = ins.iter().map(|x| x.1).sum();
-                    if got < want * 0.995 {
-                        sum.issues.push((
-                            id,
-                            format!(
-                                "Only {} of {} {} delivered",
-                                crate::fmt::fmt_rate(got),
-                                crate::fmt::fmt_rate(want),
-                                game.item_name(item)
-                            ),
-                        ));
-                    }
-                    sum.outputs.push((item.clone(), got, want));
-                }
-                NodeKind::Sink { item } => {
-                    let got: f64 = result.received[i].iter().sum();
-                    *sum.sunk.entry(item.clone()).or_default() += got;
-                    sum.sink_points +=
-                        got * game.items.get(item).map(|it| it.sink_points).unwrap_or(0) as f64;
-                }
-            }
-            sum.power_mw += power;
-            if let Some(mw) = crate::power_ui::generated_mw(&game, g, id, eff) {
-                *sum.generation.get_or_insert(0.0) += mw;
-            }
-            self.user.nodes.insert(
-                id,
-                NodeStat {
-                    efficiency: eff,
-                    power_mw: power,
-                },
-            );
-        }
-        self.summary = sum;
+        let e = evaluate_graph(&game, &self.state.graph, &mut self.sim_cache);
+        self.wire_flow = e.wire_flow;
+        self.user.ports = e.ports;
+        self.user.nodes = e.nodes;
+        self.summary = e.summary;
     }
 
     // ------------------------------------------------------------------ UI
@@ -1114,7 +1024,13 @@ impl FactoryApp {
     pub fn ui(&mut self, ctx: &egui::Context) {
         self.handle_messages(ctx);
         self.poll_room(ctx);
+        if let Some(id) = self.switch_to.take() {
+            self.activate(id);
+        }
         if self.game_loaded {
+            if self.on_master() {
+                self.sync_master();
+            }
             self.evaluate();
         }
         // Image export: only the graph, tile by tile, until it's done.
@@ -1133,29 +1049,32 @@ impl FactoryApp {
             .default_width(340.0)
             .min_width(300.0)
             .frame(egui::Frame::none().fill(CONTENT))
-            .show(ctx, |ui| crate::panels::planner(self, ui));
+            .show(ctx, |ui| {
+                if self.on_master() {
+                    crate::project_ui::factories_panel(self, ui)
+                } else {
+                    crate::panels::planner(self, ui)
+                }
+            });
         egui::SidePanel::right("overview")
             .resizable(true)
             .default_width(300.0)
             .min_width(260.0)
             .frame(egui::Frame::none().fill(CONTENT))
-            .show(ctx, |ui| crate::panels::overview(self, ui));
+            .show(ctx, |ui| {
+                if self.on_master() {
+                    crate::project_ui::project_overview(self, ui)
+                } else {
+                    crate::panels::overview(self, ui)
+                }
+            });
         egui::CentralPanel::default()
             .frame(egui::Frame::none().fill(BACKDROP))
             .show(ctx, |ui| {
-                // Graph | Map tabs, then the chosen view below them.
+                // Project, factory and Map tabs, then the chosen view below them.
                 let full = ui.max_rect();
                 let (bar, _) = ui.allocate_exact_size(vec2(full.width(), 34.0), egui::Sense::hover());
-                ui.painter().rect_filled(bar, 0.0, CONTENT);
-                let mut tabs = ui.new_child(egui::UiBuilder::new().max_rect(egui::Rect::from_min_size(bar.min + vec2(8.0, 4.0), vec2(200.0, 26.0))));
-                crate::widgets::tabs(
-                    &mut tabs,
-                    &mut self.view,
-                    &[
-                        (crate::map::View::Graph, "Graph", "The factory graph"),
-                        (crate::map::View::Map, "Map", "Your save on the game's map"),
-                    ],
-                );
+                crate::project_ui::tab_bar(self, ui, bar);
                 let content = egui::Rect::from_min_max(egui::pos2(full.min.x, bar.max.y), full.max);
                 let mut view = ui.new_child(egui::UiBuilder::new().max_rect(content));
                 view.set_clip_rect(content);
@@ -1289,6 +1208,16 @@ impl FactoryApp {
                 "map_import" => {
                     self.import_selection(_ctx);
                 }
+                // The master graph with two linked factories (one short of
+                // ingots), and one of them open in its tab.
+                "project" | "project_tab" => {
+                    self.dialog = Dialog::None;
+                    self.room.reset();
+                    self.selftest_project(_ctx);
+                    let target = if view == "project" { crate::project::MASTER } else { self.docs.iter().find(|d| d.name == "Iron Rods").map(|d| d.id).unwrap_or(crate::project::MASTER) };
+                    self.activate(target);
+                    self.frame_all = true;
+                }
                 "settings_dev" => {
                     let s = self.status.as_ref().map(|s| s.settings.clone()).unwrap_or_default();
                     self.dialog = Dialog::settings(&s);
@@ -1322,6 +1251,8 @@ impl FactoryApp {
                     let g = |p: egui::Pos2| ((p - self.editor_rect.min - self.state.pan_zoom.pan) / z).to_pos2();
                     self.room.cursors.insert(1, g(center + vec2(-160.0, -60.0)));
                     self.room.cursors.insert(2, g(center + vec2(120.0, 90.0)));
+                    self.room.cursor_doc.insert(1, self.active);
+                    self.room.cursor_doc.insert(2, self.active);
                     if view == "room_info" {
                         self.dialog = Dialog::RoomInfo;
                     } else {
@@ -1345,7 +1276,7 @@ impl FactoryApp {
         let cmd_shift = |key| KeyboardShortcut::new(Modifiers::COMMAND | Modifiers::SHIFT, key);
         let hit = |s: KeyboardShortcut| ctx.input_mut(|i| i.consume_shortcut(&s));
         if hit(cmd_shift(Key::S)) {
-            self.pick_save(crate::app_files::SavePurpose::Factory);
+            self.pick_save(self.save_kind());
         }
         if hit(cmd(Key::S)) {
             self.save();
@@ -1499,7 +1430,7 @@ impl FactoryApp {
         }
         self.draw_grid(ui, rect);
         self.user.zoom = self.state.pan_zoom.zoom;
-        if self.state.graph.nodes.is_empty() {
+        if self.state.graph.nodes.is_empty() && !self.on_master() {
             ui.painter().text(
                 rect.center(),
                 Align2::CENTER_CENTER,
@@ -1532,11 +1463,21 @@ impl FactoryApp {
             self.custom_color = None;
         }
         // Right-click on empty canvas: show our Add node menu instead of the
-        // library's finder.
+        // library's finder (the master graph's blocks are its factories).
         if let Some(f) = self.state.node_finder.take() {
-            let at = f.position.unwrap_or(rect.center());
-            self.finder = Some(crate::finder::FinderState::new(at));
-            self.context_menu = None;
+            if !self.on_master() {
+                let at = f.position.unwrap_or(rect.center());
+                self.finder = Some(crate::finder::FinderState::new(at));
+                self.context_menu = None;
+            }
+        }
+        // Double-click a factory block to open it.
+        if self.on_master() && ui.input(|i| i.pointer.button_double_clicked(egui::PointerButton::Primary)) {
+            let at = ui.input(|i| i.pointer.interact_pos());
+            let hit = at.and_then(|p| resp.node_rects.iter().filter(|(_, r)| r.contains(p)).map(|(id, _)| *id).last());
+            if let Some(id) = hit.and_then(|n| crate::project::factory_of(&self.state.graph, n)) {
+                self.switch_to = Some(id);
+            }
         }
         self.editor_rect = rect;
         self.send_cursor(ui.ctx(), rect);
@@ -1637,7 +1578,7 @@ impl FactoryApp {
         let mut close = false;
         // Run after the menu is drawn: the menu reads the node it's for, and
         // deleting it mid-draw would index a node that no longer exists.
-        let (mut do_duplicate, mut do_delete) = (false, false);
+        let (mut do_duplicate, mut do_delete, mut do_move) = (false, false, false);
         #[cfg(test)]
         self.menu_swatches.clear();
         let area = egui::Area::new(egui::Id::new("node_menu"))
@@ -1646,6 +1587,17 @@ impl FactoryApp {
             .show(ctx, |ui| {
                 egui::Frame::popup(ui.style()).show(ui, |ui| {
                     ui.set_min_width(180.0);
+                    if let Some(f) = crate::project::factory_of(&self.state.graph, node) {
+                        if ui.add(egui::Button::new("Open").shortcut_text("Double-click")).clicked() {
+                            self.switch_to = Some(f);
+                            close = true;
+                        }
+                        if ui.button("Rename…").clicked() {
+                            self.dialog = Dialog::RenameFactory { id: f, name: self.doc_name(f) };
+                            close = true;
+                        }
+                        ui.separator();
+                    }
                     if ui
                         .add(egui::Button::new("Duplicate").shortcut_text("Ctrl+D"))
                         .clicked()
@@ -1659,6 +1611,13 @@ impl FactoryApp {
                     {
                         do_delete = true;
                         close = true;
+                    }
+                    if !self.on_master() {
+                        ui.separator();
+                        if ui.button("Move to a new factory").on_hover_text("Moves these nodes into a factory of their own, linked to this one on the master graph.").clicked() {
+                            do_move = true;
+                            close = true;
+                        }
                     }
                     ui.separator();
                     ui.label(RichText::new("Colour").small().color(TEXT_DIM));
@@ -1730,6 +1689,9 @@ impl FactoryApp {
         if do_duplicate {
             self.duplicate_selected();
         }
+        if do_move {
+            self.move_selection_to_new_factory(ctx);
+        }
         if do_delete {
             self.delete_selected();
         }
@@ -1795,11 +1757,23 @@ impl FactoryApp {
         self.say(ctx, if was_host { "Room closed." } else { "Left the room." }, false);
     }
 
-    /// The shared document: plan, graph and unzoomed node positions.
+    /// The shared document: every factory's plan, graph and unzoomed node
+    /// positions, and the master graph.
     fn shared_doc_json(&self) -> String {
-        let z = self.state.pan_zoom.zoom.max(0.01);
-        let positions = self.state.node_positions.iter().map(|(id, p)| (id, [p.x / z, p.y / z])).collect();
-        serde_json::to_string(&crate::room::SharedDocRef { planner: &self.planner, graph: &self.state.graph, positions, order: &self.state.node_order }).unwrap_or_default()
+        let docs = self
+            .docs
+            .iter()
+            .map(|d| {
+                let (state, planner) = match &d.body {
+                    Some(b) => (&b.state, &b.planner),
+                    None => (&self.state, &self.planner),
+                };
+                let z = state.pan_zoom.zoom.max(0.01);
+                let positions = state.node_positions.iter().map(|(id, p)| (id, [p.x / z, p.y / z])).collect();
+                crate::room::SharedDocRef { id: d.id, name: &d.name, planner, graph: &state.graph, positions, order: &state.node_order }
+            })
+            .collect();
+        serde_json::to_string(&crate::room::SharedProjectRef { docs }).unwrap_or_default()
     }
 
     fn share_doc(&mut self) {
@@ -1809,40 +1783,56 @@ impl FactoryApp {
         }
     }
 
-    /// Someone else's edit: take their document, keep my view.
+    /// Someone else's edit: take their project, keep my view and tabs.
     fn apply_shared_doc(&mut self, json: &str) {
-        let Ok(doc) = serde_json::from_str::<crate::room::SharedDoc>(json) else { return };
-        let z = self.state.pan_zoom.zoom;
-        self.state.graph = doc.graph;
-        self.state.node_positions.clear();
-        for (id, [x, y]) in doc.positions {
-            if self.state.graph.nodes.contains_key(id) {
-                self.state.node_positions.insert(id, egui::pos2(x * z, y * z));
+        let Ok(project) = serde_json::from_str::<crate::room::SharedProject>(json) else { return };
+        let incoming: BTreeSet<u32> = project.docs.iter().map(|d| d.id).collect();
+        if !incoming.contains(&crate::project::MASTER) {
+            return;
+        }
+        if !incoming.contains(&self.active) {
+            self.activate(crate::project::MASTER);
+        }
+        self.docs.retain(|d| incoming.contains(&d.id));
+        self.tabs.retain(|t| incoming.contains(t));
+        let mut order = Vec::new();
+        for doc in project.docs {
+            order.push(doc.id);
+            if doc.id == self.active {
+                apply_shared_graph(&mut self.state, doc.graph, doc.positions, doc.order);
+                self.context_menu = None;
+                let filter = std::mem::take(&mut self.planner.recipe_filter);
+                self.planner = doc.planner;
+                self.planner.recipe_filter = filter;
+                // Undo history is per person and would undo other people's work.
+                self.undo.clear();
+                self.redo.clear();
+                self.committed = self.project_json();
+                self.pending_commit = false;
+                if let Some(d) = self.doc_mut(doc.id) {
+                    d.name = doc.name;
+                }
+                continue;
+            }
+            if self.doc(doc.id).is_none() {
+                self.docs.push(crate::project::Doc { id: doc.id, name: String::new(), body: Some(Box::new(crate::project::DocBody::new(Planner::default()))), info: None });
+            }
+            if let Some(d) = self.doc_mut(doc.id) {
+                d.name = doc.name;
+                d.info = None;
+                if let Some(b) = d.body.as_mut() {
+                    apply_shared_graph(&mut b.state, doc.graph, doc.positions, doc.order);
+                    b.planner = doc.planner;
+                    b.undo.clear();
+                    b.redo.clear();
+                    b.committed.clear();
+                }
             }
         }
-        let mut order: Vec<NodeId> = doc.order.into_iter().filter(|id| self.state.graph.nodes.contains_key(*id)).collect();
-        for id in self.state.graph.iter_nodes() {
-            if !order.contains(&id) {
-                order.push(id);
-            }
-            if !self.state.node_positions.contains_key(id) {
-                self.state.node_positions.insert(id, egui::Pos2::ZERO);
-            }
-        }
-        self.state.node_order = order;
-        let graph = &self.state.graph;
-        self.state.selected_nodes.retain(|id| graph.nodes.contains_key(*id));
-        self.state.connection_in_progress = None;
-        self.context_menu = None;
-        let filter = std::mem::take(&mut self.planner.recipe_filter);
-        self.planner = doc.planner;
-        self.planner.recipe_filter = filter;
-        // Undo history is per person and would undo other people's work.
-        self.undo.clear();
-        self.redo.clear();
-        self.committed = self.project_json();
-        self.pending_commit = false;
+        // Everyone's factories in the same order.
+        self.docs.sort_by_key(|d| order.iter().position(|o| *o == d.id).unwrap_or(usize::MAX));
         self.dirty = true;
+        self.rev += 1;
     }
 
     fn room_event(&mut self, ctx: &egui::Context, e: fb_model::room::RoomEvent) {
@@ -1870,9 +1860,13 @@ impl FactoryApp {
                 }
                 self.room.cursors.remove(&id);
             }
-            RoomEvent::Message(Wire::Cursor { id, x, y }) => {
+            RoomEvent::Message(Wire::Cursor { id, x, y, doc }) => {
                 if id != self.room.me {
                     self.room.cursors.insert(id, egui::pos2(x, y));
+                    // A cursor that moved to another graph jumps rather than glides.
+                    if self.room.cursor_doc.insert(id, doc) != Some(doc) {
+                        self.room.cursor_shown.insert(id, egui::pos2(x, y));
+                    }
                 }
             }
             RoomEvent::Message(Wire::Doc { from, json, .. }) => {
@@ -1928,7 +1922,7 @@ impl FactoryApp {
         };
         if due {
             self.room.last_cursor = Some((g, now));
-            self.backend.call::<()>("room_send", json!({ "wire": fb_model::room::Wire::Cursor { id: self.room.me, x: g.x, y: g.y } }), |_| Msg::RoomEvents(Ok(Vec::new())));
+            self.backend.call::<()>("room_send", json!({ "wire": fb_model::room::Wire::Cursor { id: self.room.me, x: g.x, y: g.y, doc: self.active } }), |_| Msg::RoomEvents(Ok(Vec::new())));
         }
     }
 
@@ -1956,8 +1950,8 @@ impl FactoryApp {
             } else {
                 *shown = target;
             }
-            if dialog_open {
-                continue; // dialogs sit above the canvas
+            if dialog_open || self.room.cursor_doc.get(&id).copied().unwrap_or(0) != self.active {
+                continue; // dialogs sit above the canvas; others are on another graph
             }
             if let Some(peer) = self.room.peers.get(&id) {
                 let screen = rect.min + pan + shown.to_vec2() * z;
@@ -2136,6 +2130,184 @@ impl FactoryApp {
     pub(crate) fn dialog(&self) -> &Dialog {
         &self.dialog
     }
+}
+
+pub(crate) type SimCache = Option<(Vec<SimNode>, Vec<SimLink>, SimResult)>;
+
+/// What a graph's flow simulation gives the UI.
+#[derive(Default)]
+pub(crate) struct Evaluation {
+    pub summary: Summary,
+    pub ports: std::collections::HashMap<(NodeId, String), PortStat>,
+    pub nodes: std::collections::HashMap<NodeId, NodeStat>,
+    pub wire_flow: std::collections::HashMap<(egui_node_graph2::InputId, egui_node_graph2::OutputId), f64>,
+}
+
+/// Runs the flow simulation over a factory graph (or the master graph of
+/// factory blocks) and works out the stats the nodes and overview show.
+/// `cache` skips the simulation when nothing that affects it changed.
+pub(crate) fn evaluate_graph(game: &GameData, g: &FactoryGraph, cache: &mut SimCache) -> Evaluation {
+    let ids: Vec<NodeId> = g.iter_nodes().collect();
+    let index: BTreeMap<NodeId, usize> = ids.iter().enumerate().map(|(i, id)| (*id, i)).collect();
+    let item_inputs = |id: NodeId| -> Vec<egui_node_graph2::InputId> {
+        g[id].inputs.iter().filter(|(_, i)| matches!(g[*i].value, PortValue::Item(_))).map(|(_, i)| *i).collect()
+    };
+    let mut links = Vec::new();
+    let mut link_wires = Vec::new();
+    for (input, outputs) in g.iter_connection_groups() {
+        let Some(to) = g.try_get_input(input).map(|i| i.node) else {
+            continue;
+        };
+        let Some(to_port) = item_inputs(to).iter().position(|i| *i == input) else {
+            continue;
+        };
+        for output in outputs {
+            let from = g[output].node;
+            let Some(from_port) = g[from].outputs.iter().position(|(_, o)| *o == output) else {
+                continue;
+            };
+            links.push(SimLink { from_node: index[&from], from_port, to_node: index[&to], to_port });
+            link_wires.push((input, output));
+        }
+    }
+    let mut connected_in = BTreeSet::new();
+    let mut connected_out = BTreeSet::new();
+    for l in &links {
+        connected_in.insert((l.to_node, l.to_port));
+        connected_out.insert((l.from_node, l.from_port));
+    }
+    let mut rates = Vec::with_capacity(ids.len());
+    let mut sim_nodes = Vec::with_capacity(ids.len());
+    for (i, &id) in ids.iter().enumerate() {
+        let (ins, outs) = node_rates(game, g, id);
+        let factory = matches!(g[id].user_data.kind, NodeKind::Factory { .. });
+        sim_nodes.push(SimNode {
+            // A factory block's unlinked inputs come from outside the
+            // project, so they never hold it up.
+            inputs: ins.iter().enumerate().map(|(p, x)| if factory && !connected_in.contains(&(i, p)) { 0.0 } else { x.1 }).collect(),
+            outputs: outs.iter().map(|x| x.1).collect(),
+            throttles: matches!(g[id].user_data.kind, NodeKind::Recipe { .. }),
+            sink: matches!(g[id].user_data.kind, NodeKind::Sink { .. }),
+        });
+        rates.push((ins, outs));
+    }
+    // A factory's surplus goes to its own storage: each linked output gets
+    // an overflow, so sending more than the others take never slows it.
+    let mut sim_links = links.clone();
+    for (i, &id) in ids.iter().enumerate() {
+        if matches!(g[id].user_data.kind, NodeKind::Factory { .. }) {
+            for p in 0..rates[i].1.len() {
+                if connected_out.contains(&(i, p)) {
+                    sim_links.push(SimLink { from_node: i, from_port: p, to_node: sim_nodes.len(), to_port: 0 });
+                    sim_nodes.push(SimNode { inputs: vec![0.0], outputs: vec![], throttles: false, sink: true });
+                }
+            }
+        }
+    }
+    let result = match cache {
+        Some((n, l, r)) if *n == sim_nodes && *l == sim_links => r.clone(),
+        _ => {
+            let r = simulate(&sim_nodes, &sim_links);
+            *cache = Some((sim_nodes, sim_links, r.clone()));
+            r
+        }
+    };
+
+    let mut e = Evaluation { wire_flow: link_wires.into_iter().zip(result.link_flow.iter().copied()).collect(), ..Default::default() };
+    let mut sum = Summary::default();
+    for (i, &id) in ids.iter().enumerate() {
+        let (ins, outs) = &rates[i];
+        for (p, (name, want)) in ins.iter().enumerate() {
+            e.ports.insert((id, name.clone()), PortStat { have: result.received[i][p], want: *want, connected: connected_in.contains(&(i, p)) });
+        }
+        for (p, (name, want)) in outs.iter().enumerate() {
+            e.ports.insert((id, name.clone()), PortStat { have: result.shipped[i][p], want: *want, connected: connected_out.contains(&(i, p)) });
+        }
+        let eff = result.efficiency[i];
+        let mut power = 0.0;
+        match &g[id].user_data.kind {
+            NodeKind::Recipe { recipe } => {
+                if let Some(r) = game.recipes.get(recipe) {
+                    let machines = input_number(g, id, MACHINES);
+                    let setup = crate::graph::machine_setup(game, g, id);
+                    if let Some(b) = game.buildings.get(&r.building) {
+                        // Whole machines as built, each at the spread clock speed.
+                        power = setup.count as f64 * b.power_with(game.recipe_power_mw(r), setup.clock, setup.sloops_each);
+                        let e = sum.buildings.entry(b.class.clone()).or_default();
+                        e.0 += setup.count as f64;
+                        e.1 += machines;
+                        sum.power_shards += setup.shards();
+                        sum.somersloops += setup.sloops();
+                    }
+                    if eff < 0.995 {
+                        sum.issues.push((id, format!("{} runs at {:.0}%", r.name, eff * 100.0)));
+                    }
+                    for (p, (name, want)) in outs.iter().enumerate() {
+                        if *want > 1e-9 && !connected_out.contains(&(i, p)) {
+                            sum.issues.push((id, format!("{}: {} output isn't connected", r.name, name)));
+                        }
+                    }
+                }
+            }
+            NodeKind::Resource { item } => *sum.resources.entry(item.clone()).or_default() += result.shipped[i].iter().sum::<f64>(),
+            NodeKind::Input { item } => *sum.inputs.entry(item.clone()).or_default() += result.shipped[i].iter().sum::<f64>(),
+            NodeKind::Output { item } => {
+                let got: f64 = result.received[i].iter().sum();
+                let want: f64 = ins.iter().map(|x| x.1).sum();
+                if got < want * 0.995 {
+                    sum.issues.push((id, format!("Only {} of {} {} delivered", crate::fmt::fmt_rate(got), crate::fmt::fmt_rate(want), game.item_name(item))));
+                }
+                sum.outputs.push((item.clone(), got, want));
+            }
+            NodeKind::Sink { item } => {
+                let got: f64 = result.received[i].iter().sum();
+                *sum.sunk.entry(item.clone()).or_default() += got;
+                sum.sink_points += got * game.items.get(item).map(|it| it.sink_points).unwrap_or(0) as f64;
+            }
+            NodeKind::Factory { .. } => {
+                let name = &g[id].label;
+                for (p, (port, want)) in ins.iter().enumerate() {
+                    let got = result.received[i][p];
+                    if connected_in.contains(&(i, p)) && got < want * 0.995 {
+                        sum.issues.push((id, format!("{name} gets only {} of {} {port}", crate::fmt::fmt_rate(got), crate::fmt::fmt_rate(*want))));
+                    }
+                }
+            }
+        }
+        sum.power_mw += power;
+        if let Some(mw) = crate::power_ui::generated_mw(game, g, id, eff) {
+            *sum.generation.get_or_insert(0.0) += mw;
+        }
+        e.nodes.insert(id, NodeStat { efficiency: eff, power_mw: power });
+    }
+    e.summary = sum;
+    e
+}
+
+/// Takes a shared graph and its unzoomed positions into `state`, keeping
+/// its pan, zoom and (where the nodes still exist) selection.
+fn apply_shared_graph(state: &mut EditorState, graph: FactoryGraph, positions: Vec<(NodeId, [f32; 2])>, order: Vec<NodeId>) {
+    let z = state.pan_zoom.zoom;
+    state.graph = graph;
+    state.node_positions.clear();
+    for (id, [x, y]) in positions {
+        if state.graph.nodes.contains_key(id) {
+            state.node_positions.insert(id, egui::pos2(x * z, y * z));
+        }
+    }
+    let mut order: Vec<NodeId> = order.into_iter().filter(|id| state.graph.nodes.contains_key(*id)).collect();
+    for id in state.graph.iter_nodes() {
+        if !order.contains(&id) {
+            order.push(id);
+        }
+        if !state.node_positions.contains_key(id) {
+            state.node_positions.insert(id, egui::Pos2::ZERO);
+        }
+    }
+    state.node_order = order;
+    let graph = &state.graph;
+    state.selected_nodes.retain(|id| graph.nodes.contains_key(*id));
+    state.connection_in_progress = None;
 }
 
 /// The game's colour presets (BP_GameState.mStaticGlobalColorPresets).

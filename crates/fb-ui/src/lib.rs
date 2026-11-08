@@ -17,6 +17,8 @@ pub mod overview_extra;
 pub mod panels;
 pub mod portable;
 pub mod progress_ui;
+pub mod project;
+pub mod project_ui;
 pub mod power_ui;
 pub mod room;
 pub mod setup;

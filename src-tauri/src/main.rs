@@ -8,7 +8,7 @@
 // from the game ships with the app.
 //
 // Command line:
-//   <file.fbfactory>        open it
+//   <file.fbfactory|.fbproject>  open it
 //   --uninstall [--quiet]   remove the installed copy (Apps & features runs this)
 //   --test-profile <dir>    development: a throwaway profile in <dir> that
 //                           installs as "Factory Builder (Test)"
@@ -42,7 +42,7 @@ struct AppState {
     room: Mutex<Option<room::Room>>,
     /// Files the window may read/write (see files.rs).
     allowed: files::Allowed,
-    /// A .fbfactory given on the command line.
+    /// A .fbfactory or .fbproject given on the command line.
     startup_file: Mutex<Option<String>>,
     /// Settings, icon cache and autosave live here.
     data_dir: PathBuf,
@@ -410,7 +410,7 @@ fn write_file(state: State<AppState>, path: String, kind: files::Kind, text: Opt
     files::write(&state.allowed, &path, kind, text, base64)
 }
 
-/// The .fbfactory passed on the command line, once.
+/// The .fbfactory or .fbproject passed on the command line, once.
 #[tauri::command]
 fn startup_file(state: State<AppState>) -> Option<String> {
     state.startup_file.lock().unwrap().take()

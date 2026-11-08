@@ -2,7 +2,7 @@
 //!
 //! The window can only read or write files the user chose: picked in a
 //! native Open/Save dialog this session, opened before (the recent list), or
-//! passed on the command line (double-clicking a .fbfactory). Each operation
+//! passed on the command line (double-clicking a .fbfactory or .fbproject). Each operation
 //! also checks the extension, so the webview can't be used to touch other
 //! files. Writes go to a temp file first and are then renamed into place.
 
@@ -36,6 +36,7 @@ fn normal(p: &Path) -> PathBuf {
 #[serde(rename_all = "lowercase")]
 pub enum Kind {
     Factory,
+    Project,
     Png,
     Json,
     Txt,
@@ -45,6 +46,7 @@ impl Kind {
     fn ext(self) -> &'static str {
         match self {
             Kind::Factory => "fbfactory",
+            Kind::Project => "fbproject",
             Kind::Png => "png",
             Kind::Json => "json",
             Kind::Txt => "txt",
@@ -53,6 +55,7 @@ impl Kind {
     fn filter(self) -> (&'static str, &'static [&'static str]) {
         match self {
             Kind::Factory => ("Factory Builder factory", &["fbfactory"]),
+            Kind::Project => ("Factory Builder project", &["fbproject"]),
             Kind::Png => ("PNG image", &["png"]),
             Kind::Json => ("Factory JSON", &["json"]),
             Kind::Txt => ("Text", &["txt"]),
@@ -71,18 +74,22 @@ pub fn default_dir<R: Runtime>(app: &AppHandle<R>) -> Option<PathBuf> {
     Some(dir)
 }
 
-/// A file passed on the command line (double-clicking a .fbfactory).
+/// What the window may open: factories, projects and exported factory JSON.
+const OPENABLE: [&str; 3] = ["fbfactory", "fbproject", "json"];
+
+/// A file passed on the command line (double-clicking a .fbfactory or .fbproject).
 pub fn startup_file_from_args() -> Option<PathBuf> {
-    std::env::args_os().skip(1).map(PathBuf::from).find(|p| has_ext(p, &["fbfactory", "json"]) && p.is_file())
+    std::env::args_os().skip(1).map(PathBuf::from).find(|p| has_ext(p, &OPENABLE) && p.is_file())
 }
 
 fn chosen(fp: Option<tauri_plugin_dialog::FilePath>) -> Option<PathBuf> {
     fp.and_then(|f| f.as_path().map(Path::to_path_buf))
 }
 
-/// Native Open dialog for factories (.fbfactory, or exported factory JSON).
+/// Native Open dialog for factories and projects (.fbfactory, .fbproject, or
+/// exported factory JSON).
 pub fn pick_open<R: Runtime>(app: &AppHandle<R>, allowed: &Allowed) -> Option<String> {
-    let mut d = app.dialog().file().set_title("Open factory").add_filter("Factories", &["fbfactory", "json"]);
+    let mut d = app.dialog().file().set_title("Open").add_filter("Factories and projects", &OPENABLE);
     if let Some(dir) = default_dir(app) {
         d = d.set_directory(dir);
     }
@@ -101,6 +108,7 @@ pub fn pick_save<R: Runtime>(app: &AppHandle<R>, allowed: &Allowed, kind: Kind, 
         .file()
         .set_title(match kind {
             Kind::Factory => "Save factory",
+            Kind::Project => "Save project",
             Kind::Png => "Export image",
             Kind::Json => "Export factory JSON",
             Kind::Txt => "Save text summary",
@@ -121,7 +129,7 @@ pub fn pick_save<R: Runtime>(app: &AppHandle<R>, allowed: &Allowed, kind: Kind, 
 pub fn read_factory(allowed: &Allowed, recent: &[String], path: &str) -> Result<String, String> {
     let p = PathBuf::from(path);
     let known = allowed.has(&p) || recent.iter().any(|r| normal(Path::new(r)) == normal(&p));
-    if !known || !has_ext(&p, &["fbfactory", "json"]) {
+    if !known || !has_ext(&p, &OPENABLE) {
         return Err("That file wasn't chosen in Factory Builder.".into());
     }
     let meta = std::fs::metadata(&p).map_err(|e| format!("Couldn't open {}: {e}", p.display()))?;
@@ -179,6 +187,12 @@ mod tests {
         let fresh = Allowed::default();
         assert!(read_factory(&fresh, &[], &p).is_err());
         assert!(read_factory(&fresh, &[p.to_uppercase()], &p).is_ok(), "recent paths match case-insensitively");
+        // Projects too.
+        let proj = dir.join("b.fbproject");
+        allowed.allow(&proj);
+        write(&allowed, &proj.to_string_lossy(), Kind::Project, Some("{}".into()), None).unwrap();
+        assert_eq!(read_factory(&allowed, &[], &proj.to_string_lossy()).unwrap(), "{}");
+        assert!(write(&allowed, &proj.to_string_lossy(), Kind::Factory, Some("{}".into()), None).is_err(), "kind must match the extension");
         // Other extensions are never readable, even if somehow allowed.
         let other = dir.join("secret.txt");
         std::fs::write(&other, "x").unwrap();

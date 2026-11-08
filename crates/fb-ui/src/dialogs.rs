@@ -20,14 +20,30 @@ pub enum Pending {
     OpenPath(String),
     /// Open a factory from a share code.
     OpenFactory(Box<crate::portable::FactoryFile>),
+    /// Open a project from a share code.
+    OpenProject(Box<crate::portable::ProjectFile>),
+}
+
+/// What a pasted share code is for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShareMode {
+    /// Replace what's open.
+    Open,
+    /// Add its nodes to the open factory.
+    Import,
+    /// Add it to the project as a factory of its own.
+    AddFactory,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Dialog {
     None,
     Unsaved { then: Pending },
-    /// Paste a share code to open it (or import it into this factory).
-    ShareCode { code: String, error: Option<String>, import: bool },
+    /// Paste a share code to open it (or import it).
+    ShareCode { code: String, error: Option<String>, mode: ShareMode },
+    /// Confirm removing factories from the project.
+    DeleteFactories { ids: Vec<u32> },
+    RenameFactory { id: u32, name: String },
     Settings { draft: Settings },
     Shortcuts,
     OpenRoom { name: String, error: Option<String> },
@@ -107,10 +123,7 @@ pub fn show(app: &mut FactoryApp, ctx: &egui::Context) {
     match dialog {
         Dialog::None => {}
         Dialog::Unsaved { then } => {
-            let name = app
-                .project_name
-                .clone()
-                .unwrap_or_else(|| "Untitled factory".into());
+            let name = app.title().trim_end_matches('*').to_string();
             let clicked = modal(
                 ctx,
                 "Unsaved changes",
@@ -138,9 +151,13 @@ pub fn show(app: &mut FactoryApp, ctx: &egui::Context) {
                 _ => {}
             }
         }
-        Dialog::ShareCode { mut code, error, import } => {
+        Dialog::ShareCode { mut code, error, mode } => {
             let mut submit = false;
-            let (title, action) = if import { ("Import share code", "Import") } else { ("Open share code", "Open") };
+            let (title, action) = match mode {
+                ShareMode::Open => ("Open share code", "Open"),
+                ShareMode::Import => ("Import share code", "Import"),
+                ShareMode::AddFactory => ("Add factory from a share code", "Add"),
+            };
             let has_code = !code.trim().is_empty();
             let clicked = modal(
                 ctx,
@@ -150,7 +167,7 @@ pub fn show(app: &mut FactoryApp, ctx: &egui::Context) {
                     ui.label(RichText::new("Share code").color(TEXT_DIM));
                     let r = ui.add(
                         egui::TextEdit::multiline(&mut code)
-                            .hint_text("FB1-…")
+                            .hint_text(if mode == ShareMode::Open { "FB1-… or FBP1-…" } else { "FB1-…" })
                             .font(egui::TextStyle::Monospace)
                             .desired_rows(5)
                             .desired_width(f32::INFINITY),
@@ -161,10 +178,10 @@ pub fn show(app: &mut FactoryApp, ctx: &egui::Context) {
                     submit = r.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter) && i.modifiers.command);
                     widgets::caption(
                         ui,
-                        if import {
-                            "The shared factory is added beside yours and selected."
-                        } else {
-                            "The shared factory replaces the one you have open (you'll be asked to save first if there are changes)."
+                        match mode {
+                            ShareMode::Import => "The shared factory is added beside yours and selected.",
+                            ShareMode::AddFactory => "The shared factory is added to this project as a factory of its own.",
+                            ShareMode::Open => "The shared factory or project replaces what you have open (you'll be asked to save first if there are changes).",
                         },
                     );
                     if let Some(e) = &error {
@@ -183,19 +200,84 @@ pub fn show(app: &mut FactoryApp, ctx: &egui::Context) {
                 Some(1) => submit = true,
                 _ => {}
             }
-            app.dialog = Dialog::ShareCode { code: code.clone(), error: error.clone(), import };
+            app.dialog = Dialog::ShareCode { code: code.clone(), error: error.clone(), mode };
             if submit && !code.trim().is_empty() {
-                match crate::portable::FactoryFile::from_share_code(&code) {
-                    Ok(f) => {
+                use crate::portable::Shared;
+                match (crate::portable::Shared::from_share_code(&code), mode) {
+                    (Ok(Shared::Factory(f)), ShareMode::Open) => {
                         app.dialog = Dialog::None;
-                        if import {
-                            app.import_factory(ctx, f);
-                        } else {
-                            app.guard(Pending::open_factory(f));
-                        }
+                        app.guard(Pending::open_factory(f));
                     }
-                    Err(e) => app.dialog = Dialog::ShareCode { code, error: Some(e), import },
+                    (Ok(Shared::Project(p)), ShareMode::Open) => {
+                        app.dialog = Dialog::None;
+                        app.guard(Pending::OpenProject(Box::new(p)));
+                    }
+                    (Ok(Shared::Factory(f)), ShareMode::Import) => {
+                        app.dialog = Dialog::None;
+                        app.import_factory(ctx, f);
+                    }
+                    (Ok(Shared::Factory(f)), ShareMode::AddFactory) => {
+                        app.dialog = Dialog::None;
+                        app.add_factory_file(ctx, &f);
+                    }
+                    (Ok(Shared::Project(_)), _) => {
+                        let e = "That's the share code of a whole project. Open it with File › Open share code.".to_string();
+                        app.dialog = Dialog::ShareCode { code, error: Some(e), mode };
+                    }
+                    (Err(e), _) => app.dialog = Dialog::ShareCode { code, error: Some(e), mode },
                 }
+            }
+        }
+        Dialog::DeleteFactories { ids } => {
+            let names: Vec<String> = ids.iter().map(|id| format!("“{}”", app.doc_name(*id))).collect();
+            let what = if names.len() == 1 { names[0].clone() } else { format!("{} factories", names.len()) };
+            let clicked = modal(
+                ctx,
+                "Delete factory",
+                440.0,
+                |ui| {
+                    ui.label(RichText::new(format!("Delete {what} from the project?")).color(TEXT));
+                    if names.len() > 1 {
+                        ui.label(RichText::new(names.join(", ")).color(TEXT_DIM));
+                    }
+                    ui.label(RichText::new("Its graph, plan and links go with it. This can't be undone.").color(TEXT_DIM));
+                },
+                &[("Cancel", true), ("Delete", true)],
+            );
+            match clicked {
+                Some(0) => app.dialog = Dialog::None,
+                Some(1) => {
+                    app.dialog = Dialog::None;
+                    app.delete_factories(&ids);
+                }
+                _ => {}
+            }
+        }
+        Dialog::RenameFactory { id, mut name } => {
+            let mut submit = false;
+            let named = !name.trim().is_empty();
+            let clicked = modal(
+                ctx,
+                "Rename factory",
+                400.0,
+                |ui| {
+                    ui.label(RichText::new("Name").color(TEXT_DIM));
+                    let r = ui.add(egui::TextEdit::singleline(&mut name).desired_width(f32::INFINITY));
+                    if !r.has_focus() && !r.lost_focus() {
+                        r.request_focus();
+                    }
+                    submit = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                },
+                &[("Cancel", true), ("Rename", named)],
+            );
+            match clicked {
+                Some(0) => app.dialog = Dialog::None,
+                Some(1) => submit = true,
+                _ => app.dialog = Dialog::RenameFactory { id, name: name.clone() },
+            }
+            if submit && !name.trim().is_empty() {
+                app.dialog = Dialog::None;
+                app.rename_factory(id, &name);
             }
         }
         Dialog::Settings { mut draft } => {

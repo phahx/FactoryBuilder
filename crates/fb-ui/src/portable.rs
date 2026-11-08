@@ -15,6 +15,16 @@
 //!
 //! A share code is that JSON, deflate-compressed and base64url-encoded,
 //! after "FB1-".
+//!
+//! A project (`.fbproject`, share codes after "FBP1-") holds several
+//! factories in that same form, where each sits on the master graph, and the
+//! links between them (one factory's output item feeding another's input):
+//!
+//! ```json
+//! { "format": "factory-builder-project", "version": 1, "name": "Main base",
+//!   "factories": [{"id": 1, "x": 0, "y": 0, "factory": { "format": "factory-builder", ... }}],
+//!   "links": [{"from": 1, "to": 2, "item": "Desc_IronIngot_C", "slot": 0}] }
+//! ```
 
 use base64::Engine;
 use fb_model::{Objective, Target};
@@ -24,6 +34,11 @@ use std::collections::BTreeMap;
 pub const FORMAT: &str = "factory-builder";
 pub const VERSION: u32 = 1;
 pub const SHARE_PREFIX: &str = "FB1-";
+pub const PROJECT_FORMAT: &str = "factory-builder-project";
+pub const PROJECT_VERSION: u32 = 1;
+pub const PROJECT_SHARE_PREFIX: &str = "FBP1-";
+const MAX_FACTORIES: usize = 1_000;
+const MAX_LINKS: usize = 100_000;
 const MAX_NODES: usize = 10_000;
 const MAX_WIRES: usize = 100_000;
 const MAX_JSON: usize = 32 * 1024 * 1024;
@@ -149,42 +164,173 @@ impl FactoryFile {
             return Err("That's too big to be a factory.".into());
         }
         let f: FactoryFile = serde_json::from_str(json).map_err(|_| "That isn't a Factory Builder factory.".to_string())?;
-        if f.format != FORMAT {
-            return Err("That isn't a Factory Builder factory.".into());
-        }
-        if f.version > VERSION {
-            return Err("That factory was made by a newer Factory Builder. Update to open it.".into());
-        }
-        if f.nodes.len() > MAX_NODES || f.wires.len() > MAX_WIRES {
-            return Err("That factory is too big to open.".into());
-        }
-        if f.nodes.iter().any(|n| !n.x.is_finite() || !n.y.is_finite()) {
-            return Err("That factory has broken positions.".into());
-        }
+        f.check()?;
         Ok(f)
     }
 
+    fn check(&self) -> Result<(), String> {
+        if self.format != FORMAT {
+            return Err("That isn't a Factory Builder factory.".into());
+        }
+        if self.version > VERSION {
+            return Err("That factory was made by a newer Factory Builder. Update to open it.".into());
+        }
+        if self.nodes.len() > MAX_NODES || self.wires.len() > MAX_WIRES {
+            return Err("That factory is too big to open.".into());
+        }
+        if self.nodes.iter().any(|n| !n.x.is_finite() || !n.y.is_finite()) {
+            return Err("That factory has broken positions.".into());
+        }
+        Ok(())
+    }
+
     pub fn to_share_code(&self) -> String {
-        let packed = miniz_oxide::deflate::compress_to_vec(self.to_json(false).as_bytes(), 9);
-        format!("{SHARE_PREFIX}{}", base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(packed))
+        pack(SHARE_PREFIX, &self.to_json(false))
     }
 
     pub fn from_share_code(code: &str) -> Result<FactoryFile, String> {
-        let clean: String = code.chars().filter(|c| !c.is_whitespace()).collect();
-        let data = clean.strip_prefix(SHARE_PREFIX).ok_or("That isn't a Factory Builder share code. Share codes start with FB1-.")?;
-        let packed = base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .decode(data)
-            .map_err(|_| "That share code is damaged (it may have been cut off when copying).".to_string())?;
-        let json = miniz_oxide::inflate::decompress_to_vec_with_limit(&packed, MAX_JSON)
-            .map_err(|_| "That share code is damaged (it may have been cut off when copying).".to_string())?;
-        let json = String::from_utf8(json).map_err(|_| "That share code is damaged.".to_string())?;
-        FactoryFile::parse(&json)
+        match Shared::from_share_code(code)? {
+            Shared::Factory(f) => Ok(f),
+            Shared::Project(_) => Err("That's the share code of a whole project, not one factory. Open it with File › Open share code.".into()),
+        }
     }
 
     /// Checks indices before anything is built from the file.
     pub fn valid_wires(&self) -> impl Iterator<Item = &Wire> {
         let n = self.nodes.len();
         self.wires.iter().filter(move |w| w.from < n && w.to < n && w.from != w.to)
+    }
+}
+
+fn pack(prefix: &str, json: &str) -> String {
+    let packed = miniz_oxide::deflate::compress_to_vec(json.as_bytes(), 9);
+    format!("{prefix}{}", base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(packed))
+}
+
+fn unpack(data: &str) -> Result<String, String> {
+    let damaged = || "That share code is damaged (it may have been cut off when copying).".to_string();
+    let packed = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(data).map_err(|_| damaged())?;
+    let json = miniz_oxide::inflate::decompress_to_vec_with_limit(&packed, MAX_JSON).map_err(|_| damaged())?;
+    String::from_utf8(json).map_err(|_| "That share code is damaged.".to_string())
+}
+
+/// A project: several factories, where they sit on the master graph, and
+/// the links between them.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProjectFile {
+    pub format: String,
+    pub version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub factories: Vec<ProjectFactory>,
+    #[serde(default)]
+    pub links: Vec<Link>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProjectFactory {
+    /// Links refer to factories by this.
+    pub id: u32,
+    /// Its block on the master graph.
+    pub x: f32,
+    pub y: f32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+    /// The factory itself (its name is the factory's name).
+    pub factory: FactoryFile,
+}
+
+/// One factory's output item feeding another factory's input.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Link {
+    pub from: u32,
+    pub to: u32,
+    pub item: String,
+    /// Which bubble on the output the link leaves from.
+    #[serde(default)]
+    pub slot: usize,
+}
+
+impl ProjectFile {
+    pub fn new(name: Option<String>) -> Self {
+        Self { format: PROJECT_FORMAT.into(), version: PROJECT_VERSION, name, factories: Vec::new(), links: Vec::new() }
+    }
+
+    pub fn to_json(&self, pretty: bool) -> String {
+        if pretty {
+            serde_json::to_string_pretty(self).unwrap_or_default()
+        } else {
+            serde_json::to_string(self).unwrap_or_default()
+        }
+    }
+
+    pub fn to_share_code(&self) -> String {
+        pack(PROJECT_SHARE_PREFIX, &self.to_json(false))
+    }
+
+    pub fn parse(json: &str) -> Result<ProjectFile, String> {
+        if json.len() > MAX_JSON {
+            return Err("That's too big to be a project.".into());
+        }
+        let p: ProjectFile = serde_json::from_str(json).map_err(|_| "That isn't a Factory Builder project.".to_string())?;
+        if p.format != PROJECT_FORMAT {
+            return Err("That isn't a Factory Builder project.".into());
+        }
+        if p.version > PROJECT_VERSION {
+            return Err("That project was made by a newer Factory Builder. Update to open it.".into());
+        }
+        if p.factories.len() > MAX_FACTORIES || p.links.len() > MAX_LINKS {
+            return Err("That project is too big to open.".into());
+        }
+        let nodes: usize = p.factories.iter().map(|f| f.factory.nodes.len()).sum();
+        if nodes > MAX_NODES * 10 {
+            return Err("That project is too big to open.".into());
+        }
+        let mut ids = std::collections::BTreeSet::new();
+        for f in &p.factories {
+            if !ids.insert(f.id) {
+                return Err("That project lists a factory twice.".into());
+            }
+            if !f.x.is_finite() || !f.y.is_finite() {
+                return Err("That project has broken positions.".into());
+            }
+            f.factory.check()?;
+        }
+        Ok(p)
+    }
+
+    /// Links between factories that exist (never a factory to itself).
+    pub fn valid_links(&self) -> impl Iterator<Item = &Link> {
+        let ids: std::collections::BTreeSet<u32> = self.factories.iter().map(|f| f.id).collect();
+        self.links.iter().filter(move |l| l.from != l.to && ids.contains(&l.from) && ids.contains(&l.to))
+    }
+}
+
+/// What a file or share code holds.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Shared {
+    Factory(FactoryFile),
+    Project(ProjectFile),
+}
+
+impl Shared {
+    /// A factory or a project file's text.
+    pub fn parse(json: &str) -> Result<Shared, String> {
+        let format = serde_json::from_str::<serde_json::Value>(json).ok().and_then(|v| v.get("format").and_then(|f| f.as_str()).map(str::to_string));
+        match format.as_deref() {
+            Some(PROJECT_FORMAT) => ProjectFile::parse(json).map(Shared::Project),
+            _ => FactoryFile::parse(json).map(Shared::Factory),
+        }
+    }
+
+    pub fn from_share_code(code: &str) -> Result<Shared, String> {
+        let clean: String = code.chars().filter(|c| !c.is_whitespace()).collect();
+        if let Some(data) = clean.strip_prefix(PROJECT_SHARE_PREFIX) {
+            return ProjectFile::parse(&unpack(data)?).map(Shared::Project);
+        }
+        let data = clean.strip_prefix(SHARE_PREFIX).ok_or("That isn't a Factory Builder share code. Share codes start with FB1- (a factory) or FBP1- (a project).")?;
+        FactoryFile::parse(&unpack(data)?).map(Shared::Factory)
     }
 }
 
@@ -224,6 +370,27 @@ mod tests {
         assert!(FactoryFile::from_share_code(cut).unwrap_err().contains("damaged"));
         assert!(FactoryFile::parse("{\"format\":\"other\",\"version\":1}").is_err());
         assert!(FactoryFile::parse("{\"format\":\"factory-builder\",\"version\":99}").unwrap_err().contains("newer"));
+    }
+
+    #[test]
+    fn projects_round_trip_and_are_checked() {
+        let mut p = ProjectFile::new(Some("Base".into()));
+        p.factories.push(ProjectFactory { id: 1, x: 0.0, y: 0.0, color: None, factory: sample() });
+        p.factories.push(ProjectFactory { id: 4, x: 500.0, y: 0.0, color: Some("#FA9549".into()), factory: FactoryFile::new(Some("Rods".into())) });
+        p.links.push(Link { from: 1, to: 4, item: "Desc_IronIngot_C".into(), slot: 0 });
+        p.links.push(Link { from: 1, to: 9, item: "Desc_IronIngot_C".into(), slot: 0 });
+        assert_eq!(ProjectFile::parse(&p.to_json(true)).unwrap(), p);
+        assert_eq!(Shared::parse(&p.to_json(false)).unwrap(), Shared::Project(p.clone()));
+        assert_eq!(Shared::from_share_code(&p.to_share_code()).unwrap(), Shared::Project(p.clone()));
+        assert_eq!(p.valid_links().count(), 1, "links to missing factories are dropped");
+        assert!(FactoryFile::from_share_code(&p.to_share_code()).unwrap_err().contains("project"));
+        assert_eq!(Shared::parse(&sample().to_json(false)).unwrap(), Shared::Factory(sample()));
+        let mut twice = p.clone();
+        twice.factories[1].id = 1;
+        assert!(ProjectFile::parse(&twice.to_json(false)).unwrap_err().contains("twice"));
+        let mut newer = p.clone();
+        newer.version = 99;
+        assert!(Shared::parse(&newer.to_json(false)).unwrap_err().contains("newer"));
     }
 
     #[test]

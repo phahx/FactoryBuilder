@@ -1,8 +1,9 @@
 //! Planning rooms, UI side: who is here, their cursors, and the shared
 //! document. The backend does the networking; this polls it.
 //!
-//! The shared document is the plan, the graph and node positions. View state
-//! (pan, zoom, selection) stays per person. Positions travel unzoomed.
+//! The shared document is the whole project: each factory's plan, graph and
+//! node positions, and the master graph. View state (pan, zoom, selection,
+//! open tabs) stays per person. Positions travel unzoomed.
 
 use crate::app::Planner;
 use crate::graph::FactoryGraph;
@@ -27,6 +28,8 @@ pub struct RoomUi {
     pub peers: BTreeMap<u32, Peer>,
     /// Other people's cursors in graph coordinates.
     pub cursors: BTreeMap<u32, Pos2>,
+    /// The document each cursor is on (only those on mine are drawn).
+    pub cursor_doc: BTreeMap<u32, u32>,
     pub poll_in_flight: bool,
     pub last_cursor: Option<(Pos2, f64)>,
     /// Where other cursors are drawn (eased toward `cursors`).
@@ -43,6 +46,7 @@ impl Default for RoomUi {
             me: 0,
             peers: BTreeMap::new(),
             cursors: BTreeMap::new(),
+            cursor_doc: BTreeMap::new(),
             poll_in_flight: false,
             last_cursor: None,
             cursor_shown: BTreeMap::new(),
@@ -69,7 +73,19 @@ pub fn rgb([r, g, b]: [u8; 3]) -> Color32 {
 }
 
 #[derive(Serialize)]
+pub struct SharedProjectRef<'a> {
+    pub docs: Vec<SharedDocRef<'a>>,
+}
+
+#[derive(Deserialize)]
+pub struct SharedProject {
+    pub docs: Vec<SharedDoc>,
+}
+
+#[derive(Serialize)]
 pub struct SharedDocRef<'a> {
+    pub id: u32,
+    pub name: &'a str,
     pub planner: &'a Planner,
     pub graph: &'a FactoryGraph,
     pub positions: Vec<(NodeId, [f32; 2])>,
@@ -78,6 +94,8 @@ pub struct SharedDocRef<'a> {
 
 #[derive(Deserialize)]
 pub struct SharedDoc {
+    pub id: u32,
+    pub name: String,
     pub planner: Planner,
     pub graph: FactoryGraph,
     pub positions: Vec<(NodeId, [f32; 2])>,

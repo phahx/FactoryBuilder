@@ -1,16 +1,18 @@
 //! Open, save, import, export and share.
 //!
-//! Factories are saved as `.fbfactory` files in the portable format
-//! (portable.rs) wherever the user picks with the native dialogs. Opening
-//! replaces the current factory (after offering to save); importing adds a
-//! factory beside the current one. Exports: a PNG of the whole graph, factory
-//! JSON, and a text summary. Share codes are the portable format compressed.
+//! A project with one factory is saved as a `.fbfactory` file, one with more
+//! as a `.fbproject` (both in the portable format, portable.rs), wherever the
+//! user picks with the native dialogs. Opening replaces the project (after
+//! offering to save); importing adds a factory's nodes beside the open
+//! factory's; "Add factory" adds it to the project as its own factory.
+//! Exports: a PNG of the graph on screen, factory JSON, and a text summary.
+//! Share codes are the portable format compressed.
 
 use crate::app::{FactoryApp, Planner};
 use crate::backend::Msg;
 use crate::dialogs::{Dialog, Pending};
 use crate::graph::*;
-use crate::portable::{self, FactoryFile};
+use crate::portable::{self, FactoryFile, ProjectFile, Shared};
 use fb_model::{PowerMode, PowerSettings};
 use egui::{vec2, Pos2, Rect, Vec2};
 use egui_node_graph2::{InputId, NodeId, OutputId};
@@ -20,12 +22,16 @@ use std::collections::BTreeMap;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OpenPurpose {
     Open,
+    /// Into the open factory's graph.
     Import,
+    /// Into the project as a factory of its own.
+    AddFactory,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SavePurpose {
     Factory,
+    Project,
     Png,
     Json,
     Text,
@@ -35,6 +41,7 @@ impl SavePurpose {
     fn kind(self) -> &'static str {
         match self {
             SavePurpose::Factory => "factory",
+            SavePurpose::Project => "project",
             SavePurpose::Png => "png",
             SavePurpose::Json => "json",
             SavePurpose::Text => "txt",
@@ -48,6 +55,24 @@ const MAX_IMAGE_SIDE: f32 = 16384.0;
 
 pub fn file_name(path: &str) -> String {
     std::path::Path::new(path).file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| path.to_string())
+}
+
+pub fn is_project_path(path: &str) -> bool {
+    std::path::Path::new(path).extension().is_some_and(|e| e.eq_ignore_ascii_case("fbproject"))
+}
+
+/// The order nodes are written in a factory file (draw order, then the
+/// rest); a file's wires refer to nodes by their place in it.
+pub(crate) fn portable_order(state: &EditorState) -> Vec<NodeId> {
+    let g = &state.graph;
+    let plain = |id: &NodeId| g.nodes.contains_key(*id) && !matches!(g[*id].user_data.kind, NodeKind::Factory { .. });
+    let mut ids: Vec<NodeId> = state.node_order.iter().copied().filter(plain).collect();
+    for id in g.iter_nodes() {
+        if plain(&id) && !ids.contains(&id) {
+            ids.push(id);
+        }
+    }
+    ids
 }
 
 pub fn file_stem(path: &str) -> String {
@@ -86,28 +111,29 @@ pub fn tile_origins(bounds: Rect, tile: Vec2) -> Vec<Pos2> {
 impl FactoryApp {
     // ------------------------------------------------------- portable form
 
-    /// The current factory in the portable file format.
+    /// The open factory in the portable file format.
     pub(crate) fn to_portable(&self) -> FactoryFile {
-        let g = &self.state.graph;
+        self.portable_of(&self.state, &self.planner, Some(self.doc_name(self.active)))
+    }
+
+    /// A factory's graph and plan in the portable file format.
+    pub(crate) fn portable_of(&self, state: &EditorState, planner: &Planner, name: Option<String>) -> FactoryFile {
+        let g = &state.graph;
         let game = &self.user.game;
-        let z = self.state.pan_zoom.zoom.max(0.01);
-        let mut ids: Vec<NodeId> = self.state.node_order.iter().copied().filter(|id| g.nodes.contains_key(*id)).collect();
-        for id in g.iter_nodes() {
-            if !ids.contains(&id) {
-                ids.push(id);
-            }
-        }
+        let z = state.pan_zoom.zoom.max(0.01);
+        let ids = portable_order(state);
         let index: BTreeMap<NodeId, usize> = ids.iter().enumerate().map(|(i, id)| (*id, i)).collect();
-        let mut f = FactoryFile::new(self.project_name.clone());
+        let mut f = FactoryFile::new(name);
         for &id in &ids {
             let n = &g[id];
-            let pos = self.state.node_positions.get(id).map(|p| (p.to_vec2() / z).to_pos2()).unwrap_or(Pos2::ZERO);
+            let pos = state.node_positions.get(id).map(|p| (p.to_vec2() / z).to_pos2()).unwrap_or(Pos2::ZERO);
             let (kind, class) = match &n.user_data.kind {
                 NodeKind::Recipe { recipe } => (portable::Kind::Recipe, recipe.clone()),
                 NodeKind::Resource { item } => (portable::Kind::Resource, item.clone()),
                 NodeKind::Input { item } => (portable::Kind::Input, item.clone()),
                 NodeKind::Output { item } => (portable::Kind::Output, item.clone()),
                 NodeKind::Sink { item } => (portable::Kind::Sink, item.clone()),
+                NodeKind::Factory { .. } => continue, // only on the master graph
             };
             let is_recipe = kind == portable::Kind::Recipe;
             let has_rate = matches!(kind, portable::Kind::Resource | portable::Kind::Input | portable::Kind::Output);
@@ -116,7 +142,7 @@ impl FactoryApp {
                 class,
                 machines: is_recipe.then(|| input_number(g, id, MACHINES)),
                 clock: is_recipe.then(|| input_number(g, id, CLOCK)),
-                sloops: Some(crate::graph::sloops(&self.user.game, g, id)).filter(|n| *n > 0),
+                sloops: Some(crate::graph::sloops(game, g, id)).filter(|n| *n > 0),
                 rate: has_rate.then(|| input_number(g, id, RATE)),
                 color: n.user_data.color.map(portable::color_to_hex),
                 x: (pos.x * 10.0).round() / 10.0,
@@ -134,7 +160,7 @@ impl FactoryApp {
                 }
             }
         }
-        let p = &self.planner;
+        let p = planner;
         let alts_on: Vec<String> = game.recipes.values().filter(|r| r.alternate && p.enabled.contains(&r.class)).map(|r| r.class.clone()).collect();
         let alts_off: Vec<String> = game.recipes.values().filter(|r| r.alternate && !p.enabled.contains(&r.class)).map(|r| r.class.clone()).collect();
         // Whichever list is shorter keeps files and share codes small.
@@ -154,7 +180,7 @@ impl FactoryApp {
         f
     }
 
-    fn planner_from_portable(&self, plan: &portable::Plan) -> Planner {
+    pub(crate) fn planner_from_portable(&self, plan: &portable::Plan) -> Planner {
         let game = &self.user.game;
         let mut enabled: std::collections::BTreeSet<String> =
             game.recipes.values().filter(|r| !r.alternate && !r.is_generator() && !plan.standard_off.contains(&r.class)).map(|r| r.class.clone()).collect();
@@ -189,7 +215,7 @@ impl FactoryApp {
     /// Builds the file's nodes and wires into the graph, shifted by `offset`
     /// (graph units). Returns the new nodes and how many entries were skipped
     /// because this game version doesn't know them.
-    fn insert_portable(&mut self, f: &FactoryFile, offset: Vec2) -> (Vec<NodeId>, usize) {
+    pub(crate) fn insert_portable(&mut self, f: &FactoryFile, offset: Vec2) -> (Vec<NodeId>, usize) {
         let game = self.user.game.clone();
         let z = self.state.pan_zoom.zoom;
         let mut ids: Vec<Option<NodeId>> = vec![None; f.nodes.len()];
@@ -246,7 +272,22 @@ impl FactoryApp {
         (ids.into_iter().flatten().collect(), skipped)
     }
 
-    /// Replaces the current factory with `f`.
+    /// Replaces the project with project file `p`.
+    pub(crate) fn open_project(&mut self, ctx: &egui::Context, p: ProjectFile, path: Option<String>) {
+        let skipped = self.load_project_file(&p);
+        self.project_name = path.as_deref().map(file_stem).or_else(|| p.name.clone());
+        self.current_path = path;
+        self.reset_history();
+        self.share_doc_now();
+        let what = self.project_name.clone().unwrap_or_else(|| "the project".into());
+        if skipped > 0 {
+            self.say(ctx, format!("Opened “{what}”. {skipped} parts weren't loaded: this game version doesn't have them."), true);
+        } else {
+            self.say(ctx, format!("Opened “{what}”."), false);
+        }
+    }
+
+    /// Replaces the project with one factory, `f`.
     pub(crate) fn open_factory(&mut self, ctx: &egui::Context, f: FactoryFile, path: Option<String>) {
         let name = path.as_deref().map(file_stem).or_else(|| f.name.clone());
         self.reset_to(None, name.clone());
@@ -264,8 +305,13 @@ impl FactoryApp {
         }
     }
 
-    /// Adds `f` beside the current factory and selects it.
+    /// Adds `f` beside the open factory's graph and selects it.
     pub(crate) fn import_factory(&mut self, ctx: &egui::Context, f: FactoryFile) {
+        if self.on_master() {
+            // The master graph only has factories: add it as one.
+            self.add_factory_file(ctx, &f);
+            return;
+        }
         let z = self.state.pan_zoom.zoom.max(0.01);
         let mut right = f32::NEG_INFINITY;
         let mut top = f32::INFINITY;
@@ -288,11 +334,16 @@ impl FactoryApp {
         self.say(ctx, msg, skipped > 0);
     }
 
-    /// A file's text: the portable format, or an older Factory Builder project.
+    /// A file's text: a factory or project in the portable format, or an
+    /// older Factory Builder project.
     fn open_text(&mut self, ctx: &egui::Context, path: String, text: &str) {
-        match FactoryFile::parse(text) {
-            Ok(f) => {
+        match Shared::parse(text) {
+            Ok(Shared::Factory(f)) => {
                 self.open_factory(ctx, f, Some(path.clone()));
+                self.add_recent(&path);
+            }
+            Ok(Shared::Project(p)) => {
+                self.open_project(ctx, p, Some(path.clone()));
                 self.add_recent(&path);
             }
             Err(e) => {
@@ -352,7 +403,11 @@ impl FactoryApp {
     }
 
     pub(crate) fn pick_save(&self, purpose: SavePurpose) {
-        let suggested = self.project_name.clone().unwrap_or_else(|| "Factory".into());
+        let suggested = match purpose {
+            SavePurpose::Factory | SavePurpose::Project => self.project_name.clone(),
+            _ => None,
+        };
+        let suggested = suggested.unwrap_or_else(|| if self.on_master() { "Project".into() } else { self.doc_name(self.active) });
         self.backend.call("pick_save_file", json!({ "kind": purpose.kind(), "suggested": suggested }), move |r| Msg::PickedSave { purpose, path: r });
     }
 
@@ -365,39 +420,68 @@ impl FactoryApp {
         });
     }
 
-    /// File › Save: to the open file, or ask where.
+    /// What File › Save writes: a factory file while there's one factory
+    /// (unless it's already a project file), a project file otherwise.
+    pub(crate) fn save_kind(&self) -> SavePurpose {
+        if self.factory_count() > 1 || self.current_path.as_deref().is_some_and(is_project_path) {
+            SavePurpose::Project
+        } else {
+            SavePurpose::Factory
+        }
+    }
+
+    /// File › Save: to the open file, or ask where. A one-factory file that
+    /// has become a project asks for a new (.fbproject) file.
     pub(crate) fn save(&mut self) {
+        let kind = self.save_kind();
         match self.current_path.clone() {
-            Some(path) => self.write_factory(path),
-            None => self.pick_save(SavePurpose::Factory),
+            Some(path) if is_project_path(&path) == (kind == SavePurpose::Project) => self.write_doc(kind, path),
+            _ => self.pick_save(kind),
         }
     }
 
     /// Saves straight to `path` (tests; the menu goes through the dialog).
+    #[cfg(test)]
     pub(crate) fn save_to_path(&mut self, path: String) {
-        self.write_factory(path);
+        let kind = if is_project_path(&path) { SavePurpose::Project } else { SavePurpose::Factory };
+        self.write_doc(kind, path);
     }
 
-    fn write_factory(&mut self, path: String) {
-        let mut f = self.to_portable();
-        f.name = Some(file_stem(&path));
-        self.write(SavePurpose::Factory, path, Some(f.to_json(true)), None);
+    fn write_doc(&mut self, kind: SavePurpose, path: String) {
+        let text = if kind == SavePurpose::Project {
+            let mut p = self.project_file();
+            p.name = Some(file_stem(&path));
+            p.to_json(true)
+        } else {
+            let id = self.factory_ids().first().copied().unwrap_or(self.active);
+            let Some(mut f) = self.factory_file(id) else { return };
+            f.name = Some(file_stem(&path));
+            f.to_json(true)
+        };
+        self.write(kind, path, Some(text), None);
     }
 
     pub(crate) fn copy_share_code(&mut self, ctx: &egui::Context) {
-        let code = self.to_portable().to_share_code();
+        let (code, what) = if self.on_master() {
+            (self.project_file().to_share_code(), "the whole project")
+        } else {
+            (self.to_portable().to_share_code(), "this factory")
+        };
         let n = code.len();
         ctx.copy_text(code);
-        self.say(ctx, format!("Share code copied ({n} characters). Paste it anywhere; others open it with File › Open share code."), false);
+        self.say(ctx, format!("Share code for {what} copied ({n} characters). Paste it anywhere; others open it with File › Open share code."), false);
     }
 
-    pub(crate) fn summary_text(&self) -> String {
+    pub(crate) fn summary_text(&mut self) -> String {
+        if self.on_master() {
+            return self.project_summary_text();
+        }
         let game = &self.user.game;
         let s = &self.summary;
         let unit = |item: &str| if game.item_form(item).is_fluid() { "m³/min" } else { "per min" };
         let n = crate::fmt::fmt_rate;
         let mut out = String::new();
-        out.push_str(&format!("{}\n", self.project_name.clone().unwrap_or_else(|| "Untitled factory".into())));
+        out.push_str(&format!("{}\n", self.doc_name(self.active)));
         out.push_str(&format!("Power: {} MW\n", crate::fmt::fmt_num(s.power_mw)));
         if let Some(mw) = s.generation {
             out.push_str(&format!("Power production: {} MW\n", crate::fmt::fmt_num(mw)));
@@ -440,8 +524,10 @@ impl FactoryApp {
             Msg::FileRead { purpose, path, result } => match result {
                 Ok(text) => match purpose {
                     OpenPurpose::Open => self.open_text(ctx, path, &text),
-                    OpenPurpose::Import => match FactoryFile::parse(&text) {
-                        Ok(f) => self.import_factory(ctx, f),
+                    OpenPurpose::Import | OpenPurpose::AddFactory => match Shared::parse(&text) {
+                        Ok(Shared::Factory(f)) if purpose == OpenPurpose::Import => self.import_factory(ctx, f),
+                        Ok(Shared::Factory(f)) => self.add_factory_file(ctx, &f),
+                        Ok(Shared::Project(_)) => self.say(ctx, format!("{} is a whole project. Open it with File › Open.", file_name(&path)), true),
                         Err(e) => self.say(ctx, format!("Couldn't import {}: {e}", file_name(&path)), true),
                     },
                 },
@@ -454,9 +540,12 @@ impl FactoryApp {
             },
             Msg::PickedSave { purpose, path } => match path {
                 Ok(Some(p)) => match purpose {
-                    SavePurpose::Factory => self.write_factory(p),
+                    SavePurpose::Factory | SavePurpose::Project => self.write_doc(purpose, p),
                     SavePurpose::Json => self.write(purpose, p, Some(self.to_portable().to_json(true)), None),
-                    SavePurpose::Text => self.write(purpose, p, Some(self.summary_text()), None),
+                    SavePurpose::Text => {
+                        let text = self.summary_text();
+                        self.write(purpose, p, Some(text), None);
+                    }
                     SavePurpose::Png => self.start_image_export(ctx, p),
                 },
                 Ok(None) => self.after_save = None,
@@ -467,9 +556,17 @@ impl FactoryApp {
             },
             Msg::FileWritten { purpose, path, result } => match result {
                 Ok(()) => {
-                    if purpose == SavePurpose::Factory {
+                    if matches!(purpose, SavePurpose::Factory | SavePurpose::Project) {
                         self.current_path = Some(path.clone());
                         self.project_name = Some(file_stem(&path));
+                        if purpose == SavePurpose::Factory {
+                            // The file's name is the factory's.
+                            if let Some(id) = self.factory_ids().first().copied() {
+                                if let Some(d) = self.doc_mut(id) {
+                                    d.name = file_stem(&path);
+                                }
+                            }
+                        }
                         self.mark_saved();
                         self.add_recent(&path);
                         self.say(ctx, format!("Saved {}.", file_name(&path)), false);
@@ -632,8 +729,8 @@ fn capture_canvas() -> Option<image::RgbaImage> {
 }
 
 impl Dialog {
-    pub fn share_code(import: bool) -> Self {
-        Dialog::ShareCode { code: String::new(), error: None, import }
+    pub fn share_code(mode: crate::dialogs::ShareMode) -> Self {
+        Dialog::ShareCode { code: String::new(), error: None, mode }
     }
 }
 

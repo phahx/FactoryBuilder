@@ -3,7 +3,7 @@
 
 use crate::app::FactoryApp;
 use crate::app_files::{OpenPurpose, SavePurpose};
-use crate::dialogs::{Dialog, Pending};
+use crate::dialogs::{Dialog, Pending, ShareMode};
 use crate::theme::*;
 use egui::{Align, Button, Layout, RichText};
 
@@ -48,7 +48,7 @@ pub fn menu_bar(app: &mut FactoryApp, ctx: &egui::Context) {
                     });
                     if ui.button("Open share code…").clicked() {
                         ui.close_menu();
-                        app.dialog = Dialog::share_code(false);
+                        app.dialog = Dialog::share_code(ShareMode::Open);
                     }
                     ui.separator();
                     if ui.add(Button::new("Save").shortcut_text("Ctrl+S")).clicked() {
@@ -57,18 +57,19 @@ pub fn menu_bar(app: &mut FactoryApp, ctx: &egui::Context) {
                     }
                     if ui.add(Button::new("Save as…").shortcut_text("Ctrl+Shift+S")).clicked() {
                         ui.close_menu();
-                        app.pick_save(SavePurpose::Factory);
+                        app.pick_save(app.save_kind());
                     }
                     ui.separator();
                     ui.menu_button("Import", |ui| {
                         ui.set_min_width(200.0);
-                        if ui.button("Factory file…").clicked() {
+                        let into = if app.on_master() { "Adds it to the project as a factory." } else { "Adds its nodes beside this factory's." };
+                        if ui.button("Factory file…").on_hover_text(into).clicked() {
                             ui.close_menu();
                             app.pick_open(OpenPurpose::Import);
                         }
-                        if ui.button("Share code…").clicked() {
+                        if ui.button("Share code…").on_hover_text(into).clicked() {
                             ui.close_menu();
-                            app.dialog = Dialog::share_code(true);
+                            app.dialog = Dialog::share_code(ShareMode::Import);
                         }
                     });
                     let has_nodes = !app.state.graph.nodes.is_empty();
@@ -79,7 +80,7 @@ pub fn menu_bar(app: &mut FactoryApp, ctx: &egui::Context) {
                                 ui.close_menu();
                                 app.pick_save(SavePurpose::Png);
                             }
-                            if ui.button("Factory JSON…").clicked() {
+                            if ui.add_enabled(!app.on_master(), Button::new("Factory JSON…")).on_disabled_hover_text("Open a factory's tab to export it.").clicked() {
                                 ui.close_menu();
                                 app.pick_save(SavePurpose::Json);
                             }
@@ -163,6 +164,45 @@ pub fn menu_bar(app: &mut FactoryApp, ctx: &egui::Context) {
                     ui.separator();
                     ui.checkbox(&mut app.wire_labels, "Belt and pipe labels")
                         .on_hover_text("Show on each wire the slowest belt or pipe that carries it.");
+                });
+                ui.menu_button("Project", |ui| {
+                    ui.set_min_width(260.0);
+                    if ui.button("Master graph").on_hover_text("Every factory in the project and how they feed each other.").clicked() {
+                        ui.close_menu();
+                        app.switch_to = Some(crate::project::MASTER);
+                    }
+                    ui.separator();
+                    if ui.button("New factory").clicked() {
+                        ui.close_menu();
+                        app.new_factory();
+                    }
+                    if ui.button("Add factory file…").clicked() {
+                        ui.close_menu();
+                        app.pick_open(OpenPurpose::AddFactory);
+                    }
+                    if ui.button("Add factory from a share code…").clicked() {
+                        ui.close_menu();
+                        app.dialog = Dialog::share_code(ShareMode::AddFactory);
+                    }
+                    let can_move = !app.on_master() && app.has_selection();
+                    if ui.add_enabled(can_move, Button::new("Move selection to a new factory")).on_disabled_hover_text("Select nodes in a factory first.").clicked() {
+                        ui.close_menu();
+                        app.move_selection_to_new_factory(ui.ctx());
+                    }
+                    ui.separator();
+                    let open = (!app.on_master()).then_some(app.active);
+                    if ui.add_enabled(open.is_some(), Button::new("Rename this factory…")).clicked() {
+                        ui.close_menu();
+                        if let Some(id) = open {
+                            app.dialog = Dialog::RenameFactory { id, name: app.doc_name(id) };
+                        }
+                    }
+                    if ui.add_enabled(open.is_some(), Button::new("Delete this factory…")).clicked() {
+                        ui.close_menu();
+                        if let Some(id) = open {
+                            app.dialog = Dialog::DeleteFactories { ids: vec![id] };
+                        }
+                    }
                 });
                 ui.menu_button("Room", |ui| {
                     ui.set_min_width(260.0);

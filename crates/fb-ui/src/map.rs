@@ -178,11 +178,14 @@ impl FactoryApp {
             self.say(ctx, "Nothing in the selection can be planned (no machines with recipes or extractors).", true);
             return;
         }
-        self.import_factory(ctx, file);
+        // A factory of its own in the project, opened in its tab.
+        let mut file = file;
+        file.name = Some("Imported factory".into());
+        self.add_factory_file(ctx, &file);
         self.view = View::Graph;
-        // Show what was imported (it's placed beside the existing graph).
-        self.frame_selected = true;
-        let mut text = format!("Imported {} machines as {} nodes.", report.machines, report.nodes);
+        self.frame_all = true;
+        let name = self.doc_name(self.active);
+        let mut text = format!("Imported {} machines as {} nodes into “{name}”.", report.machines, report.nodes);
         if report.left_out > 0 {
             text += &format!(" {} left out (no recipe set, or generators).", report.left_out);
         }
@@ -240,7 +243,7 @@ pub fn map_ui(app: &mut FactoryApp, ui: &mut egui::Ui) {
         // truncates (full text on hover) instead of running under them.
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             let n = app.map.selected.len();
-            import = widgets::button_enabled(ui, "Import into planner", n > 0).on_hover_text("Adds the selected machines to the graph, one node per recipe.").clicked();
+            import = widgets::button_enabled(ui, "Import into planner", n > 0).on_hover_text("Adds the selected machines to the project as a new factory, one node per recipe.").clicked();
             if n > 0 {
                 clear = widgets::button(ui, "Clear selection").clicked();
                 ui.label(RichText::new(format!("{n} selected")).color(TEXT));

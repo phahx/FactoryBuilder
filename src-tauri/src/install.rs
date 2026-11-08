@@ -24,6 +24,11 @@ pub const TOOLS: [&str; 2] = ["IconExtractor.exe", "oodle_shim.dll"];
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 const MARKER: &str = "install.json";
 const PROG_ID: &str = "FactoryBuilder.Factory";
+/// File types that open here: extension, ProgID, type name in Explorer.
+const FILE_TYPES: [(&str, &str, &str); 2] = [
+    (".fbfactory", PROG_ID, "Factory Builder factory"),
+    (".fbproject", "FactoryBuilder.Project", "Factory Builder project"),
+];
 const PUBLISHER: &str = "Factory Builder";
 const DESCRIPTION: &str = "Plan Satisfactory factories";
 /// Windows: start a console program without flashing a console window.
@@ -217,9 +222,9 @@ impl Identity {
             match self.associate(&exe) {
                 Ok(()) => {
                     marker.association = true;
-                    report.done.push("Set .fbfactory files to open in Factory Builder".into());
+                    report.done.push("Set .fbfactory and .fbproject files to open in Factory Builder".into());
                 }
-                Err(e) => report.problems.push(format!("Couldn't set .fbfactory files to open here: {e}")),
+                Err(e) => report.problems.push(format!("Couldn't set .fbfactory and .fbproject files to open here: {e}")),
             }
         }
 
@@ -232,13 +237,14 @@ impl Identity {
     fn associate(&self, exe: &Path) -> windows_registry::Result<()> {
         let classes = self.classes();
         let user = windows_registry::CURRENT_USER;
-        let ext = user.create(format!(r"{classes}\.fbfactory"))?;
-        ext.set_string("", PROG_ID)?;
-        user.create(format!(r"{classes}\.fbfactory\OpenWithProgids"))?.set_string(PROG_ID, "")?;
-        user.create(format!(r"{classes}\{PROG_ID}"))?.set_string("", "Factory Builder factory")?;
         let exe = exe.to_string_lossy();
-        user.create(format!(r"{classes}\{PROG_ID}\DefaultIcon"))?.set_string("", format!("{},0", quote(&exe)))?;
-        user.create(format!(r#"{classes}\{PROG_ID}\shell\open\command"#))?.set_string("", format!(r#"{} "%1""#, quote(&exe)))?;
+        for (ext, prog_id, type_name) in FILE_TYPES {
+            user.create(format!(r"{classes}\{ext}"))?.set_string("", prog_id)?;
+            user.create(format!(r"{classes}\{ext}\OpenWithProgids"))?.set_string(prog_id, "")?;
+            user.create(format!(r"{classes}\{prog_id}"))?.set_string("", type_name)?;
+            user.create(format!(r"{classes}\{prog_id}\DefaultIcon"))?.set_string("", format!("{},0", quote(&exe)))?;
+            user.create(format!(r#"{classes}\{prog_id}\shell\open\command"#))?.set_string("", format!(r#"{} "%1""#, quote(&exe)))?;
+        }
         Ok(())
     }
 
@@ -287,11 +293,13 @@ impl Identity {
                 .and_then(|k| k.get_string(""))
                 .is_ok_and(|cmd| cmd.to_lowercase().contains(&exe.to_string_lossy().to_lowercase()));
             if ours {
-                let _ = user.remove_tree(format!(r"{classes}\{PROG_ID}"));
-                let _ = user.remove_tree(format!(r"{classes}\.fbfactory\OpenWithProgids"));
-                let points_here = user.open(format!(r"{classes}\.fbfactory")).and_then(|k| k.get_string("")).is_ok_and(|v| v == PROG_ID);
-                if points_here {
-                    let _ = user.remove_tree(format!(r"{classes}\.fbfactory"));
+                for (ext, prog_id, _) in FILE_TYPES {
+                    let _ = user.remove_tree(format!(r"{classes}\{prog_id}"));
+                    let _ = user.remove_tree(format!(r"{classes}\{ext}\OpenWithProgids"));
+                    let points_here = user.open(format!(r"{classes}\{ext}")).and_then(|k| k.get_string("")).is_ok_and(|v| v == prog_id);
+                    if points_here {
+                        let _ = user.remove_tree(format!(r"{classes}\{ext}"));
+                    }
                 }
             }
         }
@@ -626,6 +634,7 @@ mod tests {
         assert!(!lnk.exists() && !places.desktop.join("Factory Builder.lnk").exists());
         assert!(id.installed().is_none());
         assert!(windows_registry::CURRENT_USER.open(format!(r"{}\Classes\.fbfactory", places.reg_software)).is_err());
+        assert!(windows_registry::CURRENT_USER.open(format!(r"{}\Classes\.fbproject", places.reg_software)).is_err());
         cleanup(&root, &places);
     }
 
