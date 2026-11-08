@@ -24,4 +24,19 @@
     <PackageReference Include="SixLabors.ImageSharp" Version="3.1.12" ExcludeAssets="all" />
   </ItemGroup>
 
+  <!-- NuGet's audit checks the whole dependency graph, so it keeps flagging the
+       ImageSharp that CUE4Parse-Conversion declares even though it isn't shipped
+       (see above). These are exactly its advisories (CVE-2026-106118 is
+       GHSA-v76p-62qx-wwq2). build.ps1 fails the build if ImageSharp ever appears in
+       the helper's output, so this can't hide a shipped copy. Any new advisory, for
+       any package, still warns. -->
+  <ItemGroup>
+    <NuGetAuditSuppress Include="https://github.com/advisories/GHSA-v76p-62qx-wwq2" />
+    <NuGetAuditSuppress Include="https://github.com/advisories/GHSA-jjfr-hcj7-qf5w" />
+    <NuGetAuditSuppress Include="https://github.com/advisories/GHSA-j9gm-c75j-xc9q" />
+    <NuGetAuditSuppress Include="https://github.com/advisories/GHSA-wmxv-xphr-5c9g" />
+    <NuGetAuditSuppress Include="https://github.com/advisories/GHSA-gwg2-r3hj-4w44" />
+    <NuGetAuditSuppress Include="https://github.com/advisories/GHSA-j3p4-wp97-rph4" />
+  </ItemGroup>
+
 </Project>

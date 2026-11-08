@@ -35,6 +35,13 @@ try {
         -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true `
         -p:EnableCompressionInSingleFile=true -p:DebugType=none -o target\helper
     if ($LASTEXITCODE) { throw 'icon helper build failed' }
+    # ImageSharp must never ship (CVE-2026-106118 and others; its audit warnings
+    # are suppressed in IconExtractor.csproj only because it isn't shipped).
+    $helperOut = 'tools\IconExtractor\bin\Release\net10.0\win-x64'
+    $deps = Get-Content (Join-Path $helperOut 'IconExtractor.deps.json') -Raw
+    if ($deps -match 'SixLabors\.ImageSharp' -or (Get-ChildItem $helperOut -Filter 'SixLabors*' -ErrorAction SilentlyContinue)) {
+        throw 'SixLabors.ImageSharp is in the icon helper output; it must not ship (see IconExtractor.csproj).'
+    }
     # Its open-source Oodle decoder.
     cargo build -p oodle-shim --release
     if ($LASTEXITCODE) { throw 'oodle-shim build failed' }
