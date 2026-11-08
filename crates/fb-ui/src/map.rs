@@ -18,9 +18,7 @@ use std::collections::BTreeSet;
 const FOLLOW_SECONDS: f64 = 15.0;
 /// A building is about this wide (cm), for sizing its mark.
 const MACHINE_CM: f64 = 1000.0;
-/// Belts on the map: the game's dark window grey reads well on the map art.
-const BELT: Color32 = HEADER;
-/// Pipes: the map art's own ocean colour (sampled from the map image).
+/// Behind the map image: the map art's own ocean colour (sampled from it).
 const PIPE: Color32 = Color32::from_rgb(0x4C, 0x6F, 0x78);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -33,6 +31,8 @@ pub enum View {
 #[derive(Default)]
 pub struct MapState {
     pub info: Option<MapInfo>,
+    /// Top-down renders of buildings and belts (None until extracted).
+    pub sprites: Option<fb_model::world::Sprites>,
     pub info_error: Option<String>,
     pub info_requested: bool,
     pub sessions: Option<Vec<Session>>,
@@ -94,6 +94,7 @@ impl FactoryApp {
         }
         self.map.info_requested = true;
         self.backend.call("map_info", json!({}), Msg::MapInfo);
+        self.backend.call("map_sprites", json!({}), Msg::MapSprites);
         self.backend.call("world_sessions", json!({}), Msg::WorldSessions);
     }
 
@@ -138,6 +139,7 @@ impl FactoryApp {
                     Err(e) => self.map.world_error = Some(e),
                 }
             }
+            Msg::MapSprites(r) => self.map.sprites = r.ok(),
             Msg::SelftestSave(Ok(Some(path))) => {
                 self.map.session = Some("Self-test".into());
                 self.load_world(path);
@@ -364,23 +366,25 @@ pub fn map_ui(app: &mut FactoryApp, ui: &mut egui::Ui) {
         }
     }
 
-    let state = &mut app.map;
-    // Belts and pipes.
-    if let Some(w) = &state.world {
-        let view = {
-            let a = state.to_world(rect, rect.min);
-            let b = state.to_world(rect, rect.max);
+    // Belts and pipes, under everything else.
+    let ctx2 = ui.ctx().clone();
+    let view = crate::map_draw::View { rect, center: app.map.center, scale: app.map.scale };
+    let mut batch = crate::map_draw::Batch::default();
+    if let (Some(w), Some(assets)) = (&app.map.world, app.user.assets.as_mut()) {
+        let vw = {
+            let a = app.map.to_world(rect, rect.min);
+            let b = app.map.to_world(rect, rect.max);
             [a.0 as f32, a.1 as f32, b.0 as f32, b.1 as f32]
         };
-        let width = ((state.scale * 60.0) as f32).clamp(0.8, 3.0);
-        for (c, b) in w.carriers.iter().zip(&state.carrier_boxes) {
-            if b[2] < view[0] || b[0] > view[2] || b[3] < view[1] || b[1] > view[3] {
+        for (c, b) in w.carriers.iter().zip(&app.map.carrier_boxes) {
+            if b[2] < vw[0] || b[0] > vw[2] || b[3] < vw[1] || b[1] > vw[3] {
                 continue;
             }
-            let pts: Vec<Pos2> = c.points.iter().map(|p| state.to_screen(rect, p[0] as f64, p[1] as f64)).collect();
-            painter.add(egui::Shape::line(pts, Stroke::new(width, if c.fluid { PIPE } else { BELT })));
+            crate::map_draw::carrier(&ctx2, assets, app.map.sprites.as_ref(), &mut batch, &painter, &view, c);
         }
     }
+    std::mem::take(&mut batch).paint(&painter);
+    let state = &mut app.map;
 
     // Resource nodes.
     let occupied: BTreeSet<&str> = state.world.as_ref().map(|w| w.machines.iter().filter_map(|m| m.node.as_deref()).collect()).unwrap_or_default();
@@ -423,28 +427,40 @@ pub fn map_ui(app: &mut FactoryApp, ui: &mut egui::Ui) {
         }
     }
 
-    // Machines.
+    // Buildings: their renders at true size and facing, or icons and dots.
     let state = &mut app.map;
     let drag_rect = state.drag_from.zip(pointer).map(|(a, b)| Rect::from_two_pos(a, b));
-    if let Some(w) = &state.world {
+    let mut outline = Vec::new();
+    if let (Some(w), Some(assets)) = (&state.world, app.user.assets.as_mut()) {
+        let sprites = state.sprites.as_ref();
         let size = ((state.scale * MACHINE_CM) as f32).clamp(3.0, 28.0);
         for s in &w.structures {
+            let drawn = crate::map_draw::building(&ctx2, assets, sprites, &mut batch, &mut outline, &view, &s.class, s.x, s.y, s.yaw, false);
             let p = state.to_screen(rect, s.x as f64, s.y as f64);
-            if rect.contains(p) && size > 6.0 {
+            if !drawn && rect.contains(p) && size > 6.0 {
                 painter.rect_filled(Rect::from_center_size(p, vec2(size * 0.5, size * 0.5)), 1.0, DIVIDER);
             }
         }
+        let mut icons = Vec::new();
         for m in &w.machines {
             let p = state.to_screen(rect, m.x as f64, m.y as f64);
-            if !rect.contains(p) {
+            let selected = state.selected.contains(&m.id) || drag_rect.is_some_and(|d| d.contains(p));
+            if crate::map_draw::building(&ctx2, assets, sprites, &mut batch, &mut outline, &view, &m.class, m.x, m.y, m.yaw, selected) {
                 continue;
             }
-            let selected = state.selected.contains(&m.id) || drag_rect.is_some_and(|d| d.contains(p));
+            if rect.contains(p) {
+                icons.push((m.class.clone(), p, selected));
+            }
+        }
+        std::mem::take(&mut batch).paint(&painter);
+        crate::map_draw::outlines(&painter, std::mem::take(&mut outline));
+        // No render (yet): the building's icon, or a dot when zoomed out.
+        for (class, p, selected) in icons {
             let r = Rect::from_center_size(p, vec2(size, size));
             if size >= 12.0 {
                 painter.rect_filled(r.expand(2.0), 2.0, if selected { ACCENT } else { CONTENT });
-                let icon = m.class.strip_prefix("Build_").map(|s| format!("Desc_{s}")).unwrap_or_default();
-                if let Some(uri) = app.user.assets.as_mut().and_then(|a| a.item_uri(&icon)) {
+                let icon = class.strip_prefix("Build_").map(|s| format!("Desc_{s}")).unwrap_or_default();
+                if let Some(uri) = assets.item_uri(&icon) {
                     egui::Image::new(uri).paint_at(&canvas, r);
                 }
             } else {

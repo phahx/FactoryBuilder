@@ -45,12 +45,13 @@ fn harness_with(
         match cmd {
             "set_settings" => {
                 let settings: Settings = serde_json::from_value(args["settings"].clone()).map_err(|e| e.to_string())?;
-                Ok(serde_json::to_value(Status { icons_found: 747, ui_assets_found: 17, settings, ..Default::default() }).unwrap())
+                Ok(serde_json::to_value(Status { icons_found: 747, ui_assets_found: 17, map_found: true, settings, ..Default::default() }).unwrap())
             }
             // Set up, with icons present, so setup and notices stay closed.
             "status" => Ok(serde_json::to_value(Status {
                 icons_found: 747,
                 ui_assets_found: 17,
+                map_found: true,
                 settings: Settings { setup_done: true, ..Default::default() },
                 ..Default::default()
             })
@@ -1102,13 +1103,13 @@ fn game_update_offers_to_extract_again() {
     let Some((ctx, mut app, _)) = harness_with(Some(setup_hook(status, calls.clone()))) else { return };
     frames(&ctx, &mut app, 3);
     assert!(app.wizard.is_none());
-    press(&ctx, &mut app, "Extract icons and font");
+    press(&ctx, &mut app, "Extract now");
     let w = app.wizard.as_ref().expect("icons step opens");
     assert!(w.icons_only && w.step() == crate::setup::Step::Icons);
     timed_frames(&ctx, &mut app, 8);
     press(&ctx, &mut app, "Done");
     assert!(app.wizard.is_none());
-    assert!(button("Extract icons and font").is_none(), "the notice goes away");
+    assert!(button("Extract now").is_none(), "the notice goes away");
 }
 
 #[test]
@@ -1549,4 +1550,19 @@ fn map_tab_selects_and_imports() {
     press(&ctx, &mut app, "Import into planner");
     assert_eq!(app.view, crate::map::View::Graph, "back to the graph to see the import");
     assert!(app.node_count() > before);
+}
+
+#[test]
+fn a_missing_map_is_offered_for_extraction() {
+    let calls: Calls = Default::default();
+    let mut status = first_launch_status(true, false);
+    status.settings.setup_done = true;
+    status.icons_found = 747;
+    status.ui_assets_found = 17;
+    status.map_found = false;
+    let Some((ctx, mut app, _)) = harness_with(Some(setup_hook(status, calls))) else { return };
+    frames(&ctx, &mut app, 3);
+    press(&ctx, &mut app, "Extract now");
+    let w = app.wizard.as_ref().expect("the extraction step opens");
+    assert!(w.icons_only && w.step() == crate::setup::Step::Icons);
 }

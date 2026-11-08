@@ -84,6 +84,7 @@ pub enum Msg {
         result: Result<fb_model::world::World, String>,
     },
     WorldLatest(Result<Option<fb_model::saves::SaveSummary>, String>),
+    MapSprites(Result<fb_model::world::Sprites, String>),
     /// Self-test: the sample save to show on the Map tab.
     SelftestSave(Result<Option<String>, String>),
 }

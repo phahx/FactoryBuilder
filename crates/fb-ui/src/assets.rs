@@ -176,6 +176,11 @@ impl Assets {
         self.uri(&format!("map/{z}/{x}_{y}.png"), "map_tile", serde_json::json!({ "z": z, "x": x, "y": y }))
     }
 
+    /// URI of a top-down building/belt render (`<icons>/map/sprites/<file>`).
+    pub fn sprite_uri(&mut self, file: &str) -> Option<String> {
+        self.uri(&format!("map/sprites/{file}"), "map_sprite", serde_json::json!({ "file": file }))
+    }
+
     /// One of the game's monochrome UI icons, tinted.
     pub fn ui(&mut self, ui: &mut Ui, icon: UiIcon, size: f32, tint: Color32) -> egui::Response {
         let uri = self.ui_uri(icon);

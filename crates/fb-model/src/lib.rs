@@ -660,6 +660,9 @@ pub mod world {
         pub class: String,
         pub x: f32,
         pub y: f32,
+        /// Facing, degrees (like `Machine::yaw`).
+        #[serde(default)]
+        pub yaw: f32,
     }
 
     /// Top-down renders of the game's own models, written by the icon helper

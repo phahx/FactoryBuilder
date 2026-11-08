@@ -37,7 +37,7 @@ impl Step {
         match self {
             Step::Install => "Install",
             Step::Game => "Game folder",
-            Step::Icons => "Icons and font",
+            Step::Icons => "Icons and map",
             Step::Name => "Your name",
         }
     }
@@ -458,8 +458,8 @@ pub fn show(app: &mut FactoryApp, ctx: &egui::Context) {
                     }
                 }
                 Step::Icons => {
-                    heading(ui, if w.icons_only { "Update icons and font" } else { "Icons and font" });
-                    widgets::caption(ui, "Factory Builder shows the game's own item icons and font. They're read from your Satisfactory files and stay on this PC.");
+                    heading(ui, if w.icons_only { "Update icons, font and map" } else { "Icons, font and map" });
+                    widgets::caption(ui, "Factory Builder shows the game's own item icons, font and world map. They're read from your Satisfactory files and stay on this PC.");
                     ui.add_space(4.0);
                     let p = w.extract.clone().unwrap_or_default();
                     if let Some(e) = w.extract_error.clone().or(p.error.clone()) {
@@ -471,6 +471,8 @@ pub fn show(app: &mut FactoryApp, ctx: &egui::Context) {
                         let text = match p.stage.as_str() {
                             "icons" => format!("Item icons… {:.0}%", p.fraction() * 100.0),
                             "ui" => format!("Font and interface icons… {:.0}%", p.fraction() * 100.0),
+                            "map" => format!("World map… {:.0}%", p.fraction() * 100.0),
+                            "sprites" => format!("Buildings for the map… {:.0}%", p.fraction() * 100.0),
                             "mount" => "Opening the game files…".to_string(),
                             _ => "Starting…".to_string(),
                         };

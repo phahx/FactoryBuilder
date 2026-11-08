@@ -228,7 +228,7 @@ pub fn show(app: &mut FactoryApp, ctx: &egui::Context) {
                     );
                     widgets::divider(ui);
                     ui.horizontal(|ui| {
-                        ui.label(RichText::new("Icons and font").color(TEXT_DIM));
+                        ui.label(RichText::new("Icons, font and map").color(TEXT_DIM));
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                             extract = widgets::button_enabled(ui, "Extract again", status.setup.helper_found).clicked();
                         });
@@ -250,6 +250,12 @@ pub fn show(app: &mut FactoryApp, ctx: &egui::Context) {
                         } else {
                             "Game font and interface icons not found."
                         },
+                    );
+                    status_line(
+                        ui,
+                        assets,
+                        status.map_found,
+                        if status.map_found { "World map found." } else { "World map not extracted yet." },
                     );
                     if status.game_changed {
                         status_line(ui, assets, false, "Satisfactory has updated since they were extracted. Extract again to match.");

@@ -515,7 +515,7 @@ impl FactoryApp {
                 | Msg::Extract(_)
                 | Msg::DevDone(_)) => self.on_setup_msg(ctx, m),
                 m @ (Msg::Saves(_) | Msg::PickedSaveGame(_) | Msg::SaveUnlocks(_)) => self.on_progress_msg(ctx, m),
-                m @ (Msg::MapInfo(_) | Msg::WorldSessions(_) | Msg::WorldLoaded { .. } | Msg::WorldLatest(_) | Msg::SelftestSave(_)) => self.on_map_msg(m),
+                m @ (Msg::MapInfo(_) | Msg::WorldSessions(_) | Msg::WorldLoaded { .. } | Msg::WorldLatest(_) | Msg::SelftestSave(_) | Msg::MapSprites(_)) => self.on_map_msg(m),
                 Msg::Solved(r) => {
                     self.solving = false;
                     match r {
@@ -1384,7 +1384,9 @@ impl FactoryApp {
         let text = if s.icons_found == 0 || s.ui_assets_found == 0 {
             "The game's icons and font haven't been extracted yet."
         } else if s.game_changed {
-            "Satisfactory has updated. Update the icons and font to match?"
+            "Satisfactory has updated. Update the icons, font and map to match?"
+        } else if !s.map_found {
+            "The world map hasn't been extracted yet."
         } else {
             return;
         };
@@ -1399,7 +1401,7 @@ impl FactoryApp {
                         if crate::widgets::button(ui, "Not now").clicked() {
                             self.notice_dismissed = true;
                         }
-                        if crate::widgets::button(ui, "Extract icons and font").clicked() {
+                        if crate::widgets::button(ui, "Extract now").clicked() {
                             open = true;
                         }
                     });

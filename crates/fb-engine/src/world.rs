@@ -1032,7 +1032,8 @@ pub(crate) fn read_world_stats(bytes: &[u8], game: &GameData) -> Result<(World, 
         let [x, y, z] = e.xf.pos;
         let (Some(x), Some(y), Some(z)) = (finite(x), finite(y), finite(z)) else { continue };
         if e.mark {
-            world.structures.push(Structure { class: e.class.clone(), x, y });
+            let yaw = finite(e.xf.yaw()).unwrap_or(0.0);
+            world.structures.push(Structure { class: e.class.clone(), x, y, yaw });
         }
         match e.role {
             Role::Machine => {
