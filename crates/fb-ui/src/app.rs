@@ -60,6 +60,8 @@ pub(crate) struct Summary {
     pub sunk: BTreeMap<String, f64>,
     pub sink_points: f64,
     pub issues: Vec<(NodeId, String)>,
+    pub power_shards: u32,
+    pub somersloops: u32,
 }
 
 pub struct FactoryApp {
@@ -339,6 +341,10 @@ impl FactoryApp {
                     self.planner.objective = Objective::Resources;
                 }
             }
+        }
+        if self.game_loaded {
+            let game = self.user.game.clone();
+            crate::graph::add_missing_sloop_inputs(&game, &mut self.state.graph);
         }
         self.project_name = name;
         self.undo.clear();
@@ -620,6 +626,11 @@ impl FactoryApp {
         self.game_error = None;
         self.templates = AllTemplates::from_game(&game);
         self.catalog = Some(crate::finder::Catalog::new(&game));
+        // A project restored before the game data arrived: old recipe nodes
+        // get the Somersloops field, without counting as an edit.
+        if crate::graph::add_missing_sloop_inputs(&game, &mut self.state.graph) {
+            self.committed = self.project_json();
+        }
         if self.planner.enabled.is_empty() {
             self.planner.enabled = game
                 .recipes
@@ -999,13 +1010,15 @@ impl FactoryApp {
                 NodeKind::Recipe { recipe } => {
                     if let Some(r) = game.recipes.get(recipe) {
                         let machines = input_number(g, id, MACHINES);
-                        let clock = input_number(g, id, CLOCK) / 100.0;
+                        let setup = crate::graph::machine_setup(&game, g, id);
                         if let Some(b) = game.buildings.get(&r.building) {
-                            power = machines * b.power_at(game.recipe_power_mw(r), clock);
+                            // Whole machines as built, each at the spread clock speed.
+                            power = setup.count as f64 * b.power_with(game.recipe_power_mw(r), setup.clock, setup.sloops_each);
                             let e = sum.buildings.entry(b.class.clone()).or_default();
-                            let throughput = machines * clock;
-                            e.0 += (throughput - 1e-6).ceil().max(0.0);
+                            e.0 += setup.count as f64;
                             e.1 += machines;
+                            sum.power_shards += setup.shards();
+                            sum.somersloops += setup.sloops();
                         }
                         if eff < 0.995 {
                             sum.issues

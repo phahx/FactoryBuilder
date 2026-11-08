@@ -115,6 +115,7 @@ impl FactoryApp {
                 class,
                 machines: is_recipe.then(|| input_number(g, id, MACHINES)),
                 clock: is_recipe.then(|| input_number(g, id, CLOCK)),
+                sloops: Some(crate::graph::sloops(&self.user.game, g, id)).filter(|n| *n > 0),
                 rate: has_rate.then(|| input_number(g, id, RATE)),
                 color: n.user_data.color.map(portable::color_to_hex),
                 x: (pos.x * 10.0).round() / 10.0,
@@ -207,6 +208,7 @@ impl FactoryApp {
             };
             set(self, MACHINES, n.machines);
             set(self, CLOCK, n.clock);
+            set(self, crate::graph::SLOOPS, n.sloops.map(f64::from));
             set(self, RATE, n.rate);
             self.state.graph[id].user_data.color = n.color.as_deref().and_then(portable::color_from_hex);
             ids[i] = Some(id);

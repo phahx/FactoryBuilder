@@ -202,6 +202,19 @@ pub fn parse_docs(root: &Value) -> Result<GameData, DocsError> {
         for c in classes_of(native) {
             let class = str_field(c, "ClassName").to_string();
             let icon = class.strip_prefix("Build_").map(|s| format!("Desc_{s}")).unwrap_or_else(|| class.clone());
+            // Somersloop slots. The Docs list the Smelter with 0 slots although
+            // it can be boosted (mCanChangeProductionBoost) and takes one
+            // Somersloop at +100% in the game
+            // (https://satisfactory.wiki.gg/wiki/Production_amplifier).
+            let boostable = str_field(c, "mCanChangeProductionBoost") == "True";
+            let mut sloop_slots = str_field(c, "mProductionShardSlotSize").trim().parse::<u32>().unwrap_or(0);
+            let mut sloop_boost = f64_field(c, "mProductionShardBoostMultiplier");
+            if !boostable {
+                sloop_slots = 0;
+            } else if sloop_slots == 0 {
+                sloop_slots = 1;
+                sloop_boost = 1.0;
+            }
             data.buildings.insert(
                 class.clone(),
                 Building {
@@ -210,6 +223,9 @@ pub fn parse_docs(root: &Value) -> Result<GameData, DocsError> {
                     power_mw: f64_field(c, "mPowerConsumption"),
                     power_exponent: f64_field(c, "mPowerConsumptionExponent"),
                     icon,
+                    sloop_slots,
+                    sloop_boost,
+                    sloop_power_exponent: Some(f64_field(c, "mProductionBoostPowerConsumptionExponent")).filter(|e| *e > 0.0).unwrap_or(2.0),
                 },
             );
         }

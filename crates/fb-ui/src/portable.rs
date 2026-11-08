@@ -86,6 +86,9 @@ pub struct Node {
     /// Clock speed in percent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub clock: Option<f64>,
+    /// Somersloops per machine, when any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sloops: Option<u32>,
     /// Per minute, for resources, inputs and outputs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rate: Option<f64>,
@@ -185,8 +188,8 @@ mod tests {
     fn sample() -> FactoryFile {
         let mut f = FactoryFile::new(Some("Steel".into()));
         f.plan.products.push(Target { item: "Desc_SteelPlate_C".into(), rate: 20.0 });
-        f.nodes.push(Node { kind: Kind::Resource, class: "Desc_OreIron_C".into(), machines: None, clock: None, rate: Some(60.0), color: None, x: 0.0, y: 0.0 });
-        f.nodes.push(Node { kind: Kind::Recipe, class: "Recipe_IngotIron_C".into(), machines: Some(2.0), clock: Some(100.0), rate: None, color: Some("#FA9549".into()), x: 380.0, y: 0.0 });
+        f.nodes.push(Node { kind: Kind::Resource, class: "Desc_OreIron_C".into(), machines: None, clock: None, sloops: None, rate: Some(60.0), color: None, x: 0.0, y: 0.0 });
+        f.nodes.push(Node { kind: Kind::Recipe, class: "Recipe_IngotIron_C".into(), machines: Some(2.0), clock: Some(100.0), sloops: Some(1), rate: None, color: Some("#FA9549".into()), x: 380.0, y: 0.0 });
         f.wires.push(Wire { from: 0, output: 0, to: 1, input: 0, slot: 0 });
         f
     }

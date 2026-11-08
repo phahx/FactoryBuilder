@@ -1216,3 +1216,37 @@ fn extraction_settings_save_with_the_project_and_old_files_load() {
     let old: crate::app::Planner = serde_json::from_value(v).unwrap();
     assert_eq!(old.extraction, crate::overview_extra::ExtractionSettings::default());
 }
+
+// ------------------------------------------------------------ progress
+
+#[test]
+fn recipes_from_a_save_replace_the_choices_and_undo() {
+    let hook: RoomHook = Rc::new(|cmd: &str, _args: &Value| match cmd {
+        "list_saves" => Some(Ok(json!([]))),
+        "pick_save_game" => Some(Ok(json!("D:/Saves/early.sav"))),
+        "read_save_unlocks" => Some(Ok(serde_json::to_value(fb_model::saves::SaveUnlocks {
+            save: fb_model::saves::SaveSummary { session: "speedrun gods".into(), ..Default::default() },
+            schematics: vec![
+                "/Game/FactoryGame/Schematics/Schematic_StartingRecipes.Schematic_StartingRecipes_C".into(),
+                "/Game/FactoryGame/Schematics/Alternate/Parts/Schematic_Alternate_Screw.Schematic_Alternate_Screw_C".into(),
+            ],
+        })
+        .unwrap())),
+        _ => None,
+    });
+    let Some((ctx, mut app, _)) = harness_with(Some(hook)) else { return };
+    frames(&ctx, &mut app, 3);
+    let before = app.planner_mut().enabled.clone();
+    app.open_saves_dialog();
+    frames(&ctx, &mut app, 2);
+    assert!(matches!(app.dialog(), crate::dialogs::Dialog::Saves(_)));
+    press(&ctx, &mut app, "Browse…");
+    frames(&ctx, &mut app, 2);
+    assert!(matches!(app.dialog(), crate::dialogs::Dialog::None), "closes once applied");
+    let enabled = app.planner_mut().enabled.clone();
+    assert!(enabled.contains("Recipe_IngotIron_C") && enabled.contains("Recipe_Alternate_Screw_C"));
+    assert!(!enabled.contains("Recipe_Motor_C"), "nothing the save hasn't unlocked");
+    app.undo();
+    frames(&ctx, &mut app, 1);
+    assert_eq!(app.planner_mut().enabled, before, "undo brings the old choices back");
+}

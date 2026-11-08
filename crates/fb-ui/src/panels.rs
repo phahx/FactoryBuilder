@@ -491,6 +491,15 @@ pub fn overview(app: &mut FactoryApp, ui: &mut Ui) {
                 );
             });
             ui.label(RichText::new("Power consumption").small().color(TEXT_DIM));
+            if s.power_shards > 0 || s.somersloops > 0 {
+                ui.add_space(4.0);
+                if s.power_shards > 0 {
+                    widgets::info_row(ui, assets, fb_model::POWER_SHARD, "Power Shards", RichText::new(s.power_shards.to_string()).color(TEXT));
+                }
+                if s.somersloops > 0 {
+                    widgets::info_row(ui, assets, fb_model::SOMERSLOOP, "Somersloops", RichText::new(s.somersloops.to_string()).color(TEXT));
+                }
+            }
 
             if !s.outputs.is_empty() {
                 widgets::divider(ui);

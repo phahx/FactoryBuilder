@@ -19,6 +19,8 @@ use std::rc::Rc;
 
 pub const MACHINES: &str = "Machines";
 pub const CLOCK: &str = "Clock Speed";
+/// Somersloops per machine (only on machines that take them).
+pub const SLOOPS: &str = "Somersloops";
 pub const RATE: &str = "Rate";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -333,6 +335,9 @@ impl NodeTemplateTrait for Template {
                 };
                 constant(graph, MACHINES, number(1.0, 0.0, 10_000.0, ""));
                 constant(graph, CLOCK, number(100.0, 1.0, 250.0, "%"));
+                if let Some(slots) = game.buildings.get(&recipe.building).map(|b| b.sloop_slots).filter(|s| *s > 0) {
+                    constant(graph, SLOOPS, number(0.0, 0.0, slots as f64, ""));
+                }
                 for a in &recipe.ingredients {
                     item_in(graph, &a.item);
                 }
@@ -618,8 +623,7 @@ impl NodeDataTrait for NodeData {
                     ui.colored_label(DANGER, "This recipe is not in the game data.");
                     return vec![];
                 };
-                let machines = input_number(graph, node_id, MACHINES);
-                let clock = input_number(graph, node_id, CLOCK) / 100.0;
+                let setup = machine_setup(&game, graph, node_id);
                 let power = s.nodes.get(&node_id).map(|n| n.power_mw).unwrap_or(0.0);
                 let (r_div, _) =
                     ui.allocate_exact_size(vec2(ui.available_width(), 1.0), egui::Sense::hover());
@@ -638,10 +642,13 @@ impl NodeDataTrait for NodeData {
                             .unwrap_or(&r.building);
                         ui.label(RichText::new(name).color(TEXT));
                         ui.label(
-                            RichText::new(build_hint(machines, clock))
+                            RichText::new(build_hint(&setup))
                                 .small()
                                 .color(TEXT_DIM),
                         );
+                        if let Some(extra) = extras_hint(&setup) {
+                            ui.label(RichText::new(extra).small().color(ACCENT));
+                        }
                     });
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         ui.label(
@@ -676,18 +683,55 @@ impl NodeDataTrait for NodeData {
     }
 }
 
-/// "Build 3 at 100%" / "Build 4 at 81.25%": whole machines for the throughput.
-pub fn build_hint(machines: f64, clock: f64) -> String {
-    let throughput = machines * clock;
-    if throughput <= 1e-9 {
+/// "Build 3 at 100% clock speed" / "Build 4 at 81.25% clock speed".
+pub fn build_hint(m: &fb_model::MachineSetup) -> String {
+    if m.count == 0 {
         return "Idle".into();
     }
-    let whole = (throughput - 1e-6).ceil().max(1.0);
-    format!(
-        "Build {} at {}% clock speed",
-        whole as i64,
-        fmt_num(throughput / whole * 100.0)
-    )
+    format!("Build {} at {}% clock speed", m.count, fmt_num(m.clock * 100.0))
+}
+
+/// "Needs 6 Power Shards and 2 Somersloops", when it needs any.
+pub fn extras_hint(m: &fb_model::MachineSetup) -> Option<String> {
+    let plural = |n: u32, one: &str, many: &str| format!("{n} {}", if n == 1 { one } else { many });
+    let parts: Vec<String> = [
+        (m.shards() > 0).then(|| plural(m.shards(), "Power Shard", "Power Shards")),
+        (m.sloops() > 0).then(|| plural(m.sloops(), "Somersloop", "Somersloops")),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    (!parts.is_empty()).then(|| format!("Needs {}", parts.join(" and ")))
+}
+
+/// Somersloops per machine on a recipe node (0 if it has none or can't take them).
+pub fn sloops(game: &GameData, graph: &FactoryGraph, node: NodeId) -> u32 {
+    let NodeKind::Recipe { recipe } = &graph[node].user_data.kind else { return 0 };
+    let slots = game.recipes.get(recipe).and_then(|r| game.buildings.get(&r.building)).map(|b| b.sloop_slots).unwrap_or(0);
+    (input_number(graph, node, SLOOPS).round().max(0.0) as u32).min(slots)
+}
+
+/// How a recipe node is built: whole machines, their clock speed, shards and Somersloops.
+pub fn machine_setup(game: &GameData, graph: &FactoryGraph, node: NodeId) -> fb_model::MachineSetup {
+    fb_model::MachineSetup::new(input_number(graph, node, MACHINES), input_number(graph, node, CLOCK) / 100.0, sloops(game, graph, node))
+}
+
+/// Recipe nodes saved before Somersloops existed get the field. Returns
+/// true if anything changed.
+pub fn add_missing_sloop_inputs(game: &GameData, graph: &mut FactoryGraph) -> bool {
+    let mut changed = false;
+    let ids: Vec<NodeId> = graph.iter_nodes().collect();
+    for id in ids {
+        let NodeKind::Recipe { recipe } = graph[id].user_data.kind.clone() else { continue };
+        let Some(slots) = game.recipes.get(&recipe).and_then(|r| game.buildings.get(&r.building)).map(|b| b.sloop_slots).filter(|s| *s > 0) else {
+            continue;
+        };
+        if graph[id].get_input(SLOOPS).is_err() {
+            graph.add_input_param(id, SLOOPS.into(), ItemType(String::new()), number(0.0, 0.0, slots as f64, ""), InputParamKind::ConstantOnly, true);
+            changed = true;
+        }
+    }
+    changed
 }
 
 pub fn input_number(graph: &FactoryGraph, node: NodeId, name: &str) -> f64 {
@@ -720,13 +764,15 @@ pub fn node_rates(
                 return (vec![], vec![]);
             };
             let k = input_number(graph, node, MACHINES) * input_number(graph, node, CLOCK) / 100.0;
+            // Somersloops boost output only; ingredients stay the same.
+            let boost = game.buildings.get(&r.building).map(|b| b.amplification(sloops(game, graph, node))).unwrap_or(1.0);
             let ins = item_inputs
                 .map(|(name, id)| (name.clone(), per(r, &graph[*id].typ.0, &r.ingredients) * k))
                 .collect();
             let outs = n
                 .outputs
                 .iter()
-                .map(|(name, id)| (name.clone(), per(r, &graph[*id].typ.0, &r.products) * k))
+                .map(|(name, id)| (name.clone(), per(r, &graph[*id].typ.0, &r.products) * k * boost))
                 .collect();
             (ins, outs)
         }

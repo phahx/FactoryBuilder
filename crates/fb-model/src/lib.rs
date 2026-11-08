@@ -78,12 +78,83 @@ pub struct Building {
     pub power_exponent: f64,
     /// Descriptor class whose icon represents this building (`Desc_*_C`).
     pub icon: ClassName,
+    /// Somersloop slots (production amplification); 0 = can't be boosted.
+    #[serde(default)]
+    pub sloop_slots: u32,
+    /// Output boost per Somersloop (1.0 = +100%).
+    #[serde(default)]
+    pub sloop_boost: f64,
+    /// Power grows by (1 + boost)^this.
+    #[serde(default = "default_sloop_power_exponent")]
+    pub sloop_power_exponent: f64,
+}
+
+fn default_sloop_power_exponent() -> f64 {
+    2.0
+}
+
+/// Clock speed one Power Shard adds (Docs: `Desc_CrystalShard_C.mExtraPotential`).
+pub const POWER_SHARD_CLOCK: f64 = 0.5;
+/// A machine takes at most this many Power Shards (250% clock speed).
+pub const MAX_POWER_SHARDS: u32 = 3;
+pub const POWER_SHARD: &str = "Desc_CrystalShard_C";
+pub const SOMERSLOOP: &str = "Desc_WAT1_C";
+
+/// Power Shards one machine needs for `clock` (1.0 = 100%).
+pub fn power_shards_for(clock: f64) -> u32 {
+    if clock <= 1.0 + 1e-9 {
+        0
+    } else {
+        (((clock - 1.0) / POWER_SHARD_CLOCK) - 1e-9).ceil().min(MAX_POWER_SHARDS as f64) as u32
+    }
 }
 
 impl Building {
     /// Power draw of one machine running at `clock` (1.0 = 100%).
     pub fn power_at(&self, base_mw: f64, clock: f64) -> f64 {
         base_mw * clock.max(0.0).powf(self.power_exponent)
+    }
+
+    /// Output multiplier with `sloops` Somersloops in one machine.
+    pub fn amplification(&self, sloops: u32) -> f64 {
+        1.0 + sloops.min(self.sloop_slots) as f64 * self.sloop_boost
+    }
+
+    /// One machine's power at `clock` with `sloops` Somersloops:
+    /// base x clock^exponent x (1 + boost)^sloop exponent.
+    pub fn power_with(&self, base_mw: f64, clock: f64, sloops: u32) -> f64 {
+        self.power_at(base_mw, clock) * self.amplification(sloops).powf(self.sloop_power_exponent)
+    }
+}
+
+/// How a recipe node is really built: whole machines at one clock speed.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MachineSetup {
+    /// Whole machines to build.
+    pub count: u32,
+    /// Clock speed of each (1.0 = 100%).
+    pub clock: f64,
+    pub shards_each: u32,
+    pub sloops_each: u32,
+}
+
+impl MachineSetup {
+    /// `machines` (may be fractional) at `clock`: the node's throughput spread
+    /// over whole machines, keeping the number of machines the user asked for.
+    pub fn new(machines: f64, clock: f64, sloops_each: u32) -> Self {
+        let throughput = machines.max(0.0) * clock.max(0.0);
+        if throughput <= 1e-9 {
+            return Self { count: 0, clock: 0.0, shards_each: 0, sloops_each: 0 };
+        }
+        let count = (machines - 1e-6).ceil().max(1.0);
+        let clock = throughput / count;
+        Self { count: count as u32, clock, shards_each: power_shards_for(clock), sloops_each }
+    }
+    pub fn shards(&self) -> u32 {
+        self.count * self.shards_each
+    }
+    pub fn sloops(&self) -> u32 {
+        self.count * self.sloops_each
     }
 }
 
@@ -682,5 +753,40 @@ pub mod room {
             assert_eq!(decode_code("UUUU-UUUU-UUUU-UUUU"), None);
             assert_eq!(decode_code("0000-0000-0000-0000"), None, "no address, port 0");
         }
+    }
+}
+
+#[cfg(test)]
+mod machine_tests {
+    use super::*;
+
+    #[test]
+    fn shards_follow_clock_speed() {
+        assert_eq!(power_shards_for(1.0), 0);
+        assert_eq!(power_shards_for(1.0001), 1);
+        assert_eq!(power_shards_for(1.5), 1);
+        assert_eq!(power_shards_for(1.75), 2);
+        assert_eq!(power_shards_for(2.5), 3);
+    }
+
+    #[test]
+    fn whole_machines_keep_the_users_count() {
+        let m = MachineSetup::new(1.0, 2.5, 0);
+        assert_eq!((m.count, m.shards()), (1, 3), "one overclocked machine");
+        let m = MachineSetup::new(2.5, 1.0, 1);
+        assert_eq!(m.count, 3);
+        assert!((m.clock - 2.5 / 3.0).abs() < 1e-12);
+        assert_eq!((m.shards(), m.sloops()), (0, 3));
+        assert_eq!(MachineSetup::new(0.0, 1.0, 2).count, 0);
+    }
+
+    #[test]
+    fn somersloops_double_output_and_quadruple_power() {
+        let b = Building { class: "Build_ManufacturerMk1_C".into(), name: "Manufacturer".into(), power_mw: 55.0, power_exponent: 1.321929, icon: String::new(), sloop_slots: 4, sloop_boost: 0.25, sloop_power_exponent: 2.0 };
+        assert_eq!(b.amplification(0), 1.0);
+        assert_eq!(b.amplification(2), 1.5);
+        assert_eq!(b.amplification(9), 2.0, "capped at the slots");
+        assert!((b.power_with(55.0, 1.0, 4) - 220.0).abs() < 1e-9);
+        assert!((b.power_with(55.0, 1.0, 2) - 55.0 * 2.25).abs() < 1e-9);
     }
 }
