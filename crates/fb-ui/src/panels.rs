@@ -445,6 +445,7 @@ pub fn overview(app: &mut FactoryApp, ui: &mut Ui) {
     let game = app.user.game.clone();
     let empty = app.state.graph.nodes.is_empty();
     let mut focus = None;
+    let mut follow = None;
     let mut extraction_changed = false;
     {
         let FactoryApp { summary: s, user, room, planner, .. } = app;
@@ -452,25 +453,7 @@ pub fn overview(app: &mut FactoryApp, ui: &mut Ui) {
         padded(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 6.0;
             if room.active() {
-                widgets::section(ui, "In this room", None);
-                for p in room.peers.values() {
-                    ui.horizontal(|ui| {
-                        let (r, _) = ui.allocate_exact_size(vec2(12.0, 12.0), egui::Sense::hover());
-                        ui.painter().rect_filled(r, 0.0, crate::room::rgb(p.color));
-                        ui.label(RichText::new(&p.name).color(TEXT));
-                        let mut tags = Vec::new();
-                        if p.id == 0 {
-                            tags.push("host");
-                        }
-                        if p.id == room.me {
-                            tags.push("you");
-                        }
-                        if !tags.is_empty() {
-                            ui.label(RichText::new(tags.join(", ")).small().color(TEXT_DIM));
-                        }
-                    });
-                }
-                widgets::divider(ui);
+                follow = crate::room_extras::room_section(ui, room);
             }
             if empty {
                 ui.label(
@@ -588,5 +571,8 @@ pub fn overview(app: &mut FactoryApp, ui: &mut Ui) {
     }
     if focus.is_some() {
         app.focus_node = focus;
+    }
+    if let Some(id) = follow {
+        app.toggle_follow(id);
     }
 }

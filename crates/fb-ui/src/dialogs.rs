@@ -570,6 +570,10 @@ pub fn show(app: &mut FactoryApp, ctx: &egui::Context) {
                 ("Pan", "Middle-drag, or Ctrl+drag"),
                 ("Zoom", "Mouse wheel"),
                 ("Frame all", "Home"),
+                ("Ping a spot (in a room)", "Alt+click empty canvas"),
+                ("Message the room", "/"),
+                ("Follow someone's view", "Click them under In this room"),
+                ("Stop following", "Esc, or pan or click yourself"),
             ];
             let clicked = modal(
                 ctx,

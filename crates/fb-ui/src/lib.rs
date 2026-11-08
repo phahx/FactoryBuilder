@@ -21,6 +21,7 @@ pub mod project;
 pub mod project_ui;
 pub mod power_ui;
 pub mod room;
+pub mod room_extras;
 pub mod setup;
 pub mod theme;
 pub mod widgets;

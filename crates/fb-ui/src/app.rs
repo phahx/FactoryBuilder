@@ -1024,6 +1024,7 @@ impl FactoryApp {
     pub fn ui(&mut self, ctx: &egui::Context) {
         self.handle_messages(ctx);
         self.poll_room(ctx);
+        self.follow_doc();
         if let Some(id) = self.switch_to.take() {
             self.activate(id);
         }
@@ -1085,6 +1086,7 @@ impl FactoryApp {
             });
         self.node_menu(ctx);
         self.add_node_menu(ctx);
+        self.chat_box(ctx);
         crate::dialogs::show(self, ctx);
         crate::setup::show(self, ctx);
         self.commit(ctx);
@@ -1253,6 +1255,34 @@ impl FactoryApp {
                     self.room.cursors.insert(2, g(center + vec2(120.0, 90.0)));
                     self.room.cursor_doc.insert(1, self.active);
                     self.room.cursor_doc.insert(2, self.active);
+                    // Room extras, held still for the screenshot: Bo's ping,
+                    // Ada's message by her cursor (and Bo's earlier one in the
+                    // list), a node both have selected, and following Ada.
+                    let ping_at = g(center + vec2(220.0, -150.0));
+                    let view_centre = g(center);
+                    let now = _ctx.input(|i| i.time);
+                    let room = &mut self.room;
+                    room.pings.clear();
+                    room.messages.clear();
+                    room.bubbles.clear();
+                    room.selections.clear();
+                    room.views.clear();
+                    room.following = None;
+                    room.frozen = view == "room_cursors";
+                    if view == "room_cursors" {
+                        let doc = self.active;
+                        self.room.pings.push(crate::room::PingMark { id: 2, pos: ping_at, doc, at: now });
+                        self.add_message(2, "Smelters are done, moving on to the rods.".into(), now);
+                        self.room.bubbles.remove(&2);
+                        self.add_message(1, "Can we run the screws through here?".into(), now);
+                        let picked = first_recipe.or_else(|| self.state.node_order.first().copied());
+                        if let Some(n) = picked {
+                            self.room.selections.insert(1, (doc, vec![n]));
+                            self.room.selections.insert(2, (doc, vec![n]));
+                        }
+                        self.room.views.insert(1, crate::room::PeerView { doc, center: view_centre, zoom: z });
+                        self.room.following = Some(1);
+                    }
                     if view == "room_info" {
                         self.dialog = Dialog::RoomInfo;
                     } else {
@@ -1290,6 +1320,7 @@ impl FactoryApp {
         if ctx.wants_keyboard_input() || self.view == crate::map::View::Map {
             return; // typing in a field, or on the map: no graph editing keys
         }
+        self.room_keys(ctx);
         if hit(cmd_shift(Key::Z)) || hit(cmd(Key::Y)) {
             self.redo();
         }
@@ -1412,6 +1443,7 @@ impl FactoryApp {
             );
             return;
         }
+        self.follow_view(ui, rect);
         if self.frame_all {
             self.frame_all = false;
             self.fit_view(ui, false);
@@ -1439,6 +1471,7 @@ impl FactoryApp {
                 TEXT_DIM,
             );
         }
+        let selected_before = self.state.selected_nodes.clone();
         let resp = self
             .state
             .draw_graph_editor(ui, &self.templates, &mut self.user, Vec::new());
@@ -1507,6 +1540,7 @@ impl FactoryApp {
             self.changed();
             ui.ctx().request_repaint();
         }
+        self.room_after_draw(ui, rect, selected_before);
     }
 
     /// Fit every node into view (View > Frame all, Home).
@@ -1853,21 +1887,18 @@ impl FactoryApp {
                     self.say(ctx, format!("{} joined the room.", peer.name), false);
                 }
                 self.room.peers.insert(peer.id, peer);
+                // They need my view and selection: send them again.
+                self.room.sent_view = None;
+                self.room.sent_selection = None;
             }
             RoomEvent::Message(Wire::Left { id }) => {
                 if let Some(p) = self.room.peers.remove(&id) {
                     self.say(ctx, format!("{} left the room.", p.name), false);
                 }
-                self.room.cursors.remove(&id);
+                self.room.forget_peer(id);
             }
-            RoomEvent::Message(Wire::Cursor { id, x, y, doc }) => {
-                if id != self.room.me {
-                    self.room.cursors.insert(id, egui::pos2(x, y));
-                    // A cursor that moved to another graph jumps rather than glides.
-                    if self.room.cursor_doc.insert(id, doc) != Some(doc) {
-                        self.room.cursor_shown.insert(id, egui::pos2(x, y));
-                    }
-                }
+            RoomEvent::Message(w @ (Wire::Cursor { .. } | Wire::Ping { .. } | Wire::Chat { .. } | Wire::View { .. } | Wire::Selection { .. })) => {
+                self.peer_message(ctx, w);
             }
             RoomEvent::Message(Wire::Doc { from, json, .. }) => {
                 if from != self.room.me {
@@ -1941,6 +1972,9 @@ impl FactoryApp {
         let dt = ctx.input(|i| i.stable_dt).clamp(0.0, 0.1);
         let ease = 1.0 - (-dt / 0.025).exp();
         let dialog_open = !matches!(self.dialog, Dialog::None) || self.wizard.is_some() || self.view == crate::map::View::Map;
+        if !dialog_open {
+            self.paint_room_marks(ctx);
+        }
         let mut moving = false;
         for (id, target) in self.room.cursors.clone() {
             let shown = self.room.cursor_shown.entry(id).or_insert(target);
@@ -1955,7 +1989,8 @@ impl FactoryApp {
             }
             if let Some(peer) = self.room.peers.get(&id) {
                 let screen = rect.min + pan + shown.to_vec2() * z;
-                crate::room::paint_cursor(&painter, screen, crate::room::rgb(peer.color), Some(&peer.name));
+                let bubble = self.room.bubbles.get(&id).map(|(text, _)| text.as_str());
+                crate::room::paint_cursor(&painter, screen, crate::room::rgb(peer.color), Some(&peer.name), bubble);
             }
         }
         if moving {

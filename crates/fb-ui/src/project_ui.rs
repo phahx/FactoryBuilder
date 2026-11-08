@@ -148,6 +148,10 @@ pub fn tab_bar(app: &mut FactoryApp, ui: &mut Ui, bar: Rect) {
     if r.on_hover_text("Your save on the game's map").on_hover_cursor(CursorIcon::PointingHand).clicked() {
         action = Some(TabAction::Map);
     }
+    // Picking a tab myself takes my view back from whoever I was following.
+    if matches!(action, Some(TabAction::Open(_) | TabAction::Map | TabAction::New)) {
+        app.room.following = None;
+    }
     match action {
         Some(TabAction::Open(id)) => {
             app.view = View::Graph;
@@ -240,6 +244,9 @@ pub fn factories_panel(app: &mut FactoryApp, ui: &mut Ui) {
             action = Some(ListAction::AddCode);
         }
     });
+    if matches!(action, Some(ListAction::Open(_) | ListAction::New)) {
+        app.room.following = None;
+    }
     match action {
         Some(ListAction::Open(id)) => app.switch_to = Some(id),
         Some(ListAction::Rename(id)) => app.dialog = Dialog::RenameFactory { id, name: app.doc_name(id) },
@@ -359,9 +366,14 @@ pub fn project_overview(app: &mut FactoryApp, ui: &mut Ui) {
     let issues = app.summary.issues.clone();
     let extraction = app.planner.extraction.clone();
     let mut focus = None;
+    let mut follow = None;
+    let room = &app.room;
     let Some(assets) = app.user.assets.as_mut() else { return };
     padded(ui, |ui| {
         ui.spacing_mut().item_spacing.y = 6.0;
+        if room.active() {
+            follow = crate::room_extras::room_section(ui, room);
+        }
         ui.label(RichText::new(format!("{} {}", t.factories, if t.factories == 1 { "factory" } else { "factories" })).color(TEXT_DIM));
         crate::power_ui::overview_power(ui, assets, t.power_mw, t.generation);
         if t.power_shards > 0 {
@@ -418,5 +430,8 @@ pub fn project_overview(app: &mut FactoryApp, ui: &mut Ui) {
     });
     if focus.is_some() {
         app.focus_node = focus;
+    }
+    if let Some(id) = follow {
+        app.toggle_follow(id);
     }
 }
