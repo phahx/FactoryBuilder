@@ -532,6 +532,141 @@ impl Default for Settings {
     }
 }
 
+// --------------------------------------------------------------------- world
+
+/// The 2D world map: the game's map art, resource nodes, and what a save has
+/// built. World coordinates are Unreal centimetres (X east, Y south).
+pub mod world {
+    use crate::Purity;
+    use serde::{Deserialize, Serialize};
+
+    /// The game's map image and the world area it covers, plus every resource
+    /// node site. Written by the icon helper into `<icons>/map/map.json`.
+    #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+    pub struct MapInfo {
+        /// World X and Y (cm) of the image's top-left corner.
+        pub x_min: f64,
+        pub y_min: f64,
+        /// World width and height (cm) the square image covers.
+        pub size: f64,
+        /// Pixels per side of one tile.
+        pub tile_px: u32,
+        /// Zoom levels: level z has 2^z x 2^z tiles (`map/<z>/<x>_<y>.png`).
+        pub levels: u32,
+        pub nodes: Vec<MapNode>,
+    }
+
+    impl MapInfo {
+        /// 0..1 across the image for a world position.
+        pub fn to_unit(&self, x: f64, y: f64) -> (f64, f64) {
+            ((x - self.x_min) / self.size, (y - self.y_min) / self.size)
+        }
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+    pub enum SiteKind {
+        /// Ore/oil node for miners and oil extractors.
+        Node,
+        Geyser,
+        /// Resource Well satellite node (Resource Well Extractor).
+        WellSatellite,
+        /// Resource Well Pressurizer site.
+        WellCore,
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+    pub struct MapNode {
+        /// The level actor's name, e.g. "BP_ResourceNode100" (saves refer to
+        /// nodes by this name).
+        pub id: String,
+        pub kind: SiteKind,
+        /// Item class (`Desc_..._C`); None for geysers.
+        pub resource: Option<String>,
+        pub purity: Purity,
+        pub x: f64,
+        pub y: f64,
+        pub z: f64,
+    }
+
+    /// One session's saves, newest first.
+    #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+    pub struct Session {
+        pub session: String,
+        pub saves: Vec<crate::saves::SaveSummary>,
+    }
+
+    /// What a save has built, reduced to what the map and the importer need.
+    #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+    pub struct World {
+        pub save: crate::saves::SaveSummary,
+        /// Production buildings, extractors and generators.
+        pub machines: Vec<Machine>,
+        /// Belts, lifts and pipes, as lines to draw.
+        pub carriers: Vec<Carrier>,
+        /// Item flow between machines, resolved through belts, pipes,
+        /// splitters, mergers, valves and pumps.
+        pub links: Vec<Link>,
+        /// Other buildings worth a mark on the map (storage, splitters...).
+        pub structures: Vec<Structure>,
+        /// Resource nodes the save changed (1.2 game modes).
+        pub node_overrides: Vec<NodeOverride>,
+        /// Objects that couldn't be read fully (shown as a note, never fatal).
+        pub skipped: usize,
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+    pub struct Machine {
+        /// Index in `World::machines` (links refer to it).
+        pub id: u32,
+        /// Building class, e.g. "Build_ConstructorMk1_C".
+        pub class: String,
+        /// Recipe class, e.g. "Recipe_Wire_C" (None for extractors/idle).
+        pub recipe: Option<String>,
+        /// Clock speed, 1.0 = 100%.
+        pub clock: f32,
+        /// Production boost multiplier from Somersloops, 1.0 = none.
+        pub boost: f32,
+        pub x: f32,
+        pub y: f32,
+        pub z: f32,
+        /// Facing, degrees.
+        pub yaw: f32,
+        /// For extractors: the resource node they sit on (`MapNode::id`).
+        pub node: Option<String>,
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+    pub struct Carrier {
+        /// "Build_ConveyorBeltMk3_C", "Build_PipelineMK2_C", lifts...
+        pub class: String,
+        pub fluid: bool,
+        /// World X/Y points along it (spline points, or the two ends).
+        pub points: Vec<[f32; 2]>,
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+    pub struct Link {
+        pub from: u32,
+        pub to: u32,
+        /// The item carried, when it can be told from the recipes.
+        pub item: Option<String>,
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+    pub struct Structure {
+        pub class: String,
+        pub x: f32,
+        pub y: f32,
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+    pub struct NodeOverride {
+        pub id: String,
+        pub resource: Option<String>,
+        pub purity: Option<Purity>,
+    }
+}
+
 // --------------------------------------------------------------------- saves
 
 /// Reading progress from the player's save files.
