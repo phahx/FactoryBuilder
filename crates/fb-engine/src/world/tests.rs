@@ -912,38 +912,3 @@ fn real_save_power() {
     assert_eq!(hub.len(), 1, "the HUB is on the map");
     assert!(!w.machines.iter().any(|m| m.class.starts_with("Build_GeneratorIntegratedBiomass")), "its burners are part of it");
 }
-
-#[test]
-fn probe_factory_clusters() {
-    let Ok(dir) = std::env::var("FB_TEST_SAVES") else { return };
-    let Some(game) = real_game() else { return };
-    for save in ["early.sav", "late.sav"] {
-        let Ok(bytes) = std::fs::read(std::path::Path::new(&dir).join(save)) else { continue };
-        let w = read_world(&bytes, &game).unwrap();
-        let n = w.machines.len();
-        eprintln!("{save}: machines {n}, links {}, with item {}", w.links.len(), w.links.iter().filter(|l| l.item.is_some()).count());
-        fn find(p: &mut Vec<usize>, x: usize) -> usize { let mut x = x; while p[x] != x { p[x] = p[p[x]]; x = p[x]; } x }
-        // components by links
-        let mut p: Vec<usize> = (0..n).collect();
-        for l in &w.links { let (a, b) = (find(&mut p, l.from as usize), find(&mut p, l.to as usize)); p[a] = b; }
-        let mut sizes = std::collections::HashMap::new();
-        for i in 0..n { *sizes.entry(find(&mut p, i)).or_insert(0) += 1; }
-        let mut s: Vec<i32> = sizes.values().copied().collect(); s.sort_unstable_by(|a, b| b.cmp(a));
-        eprintln!("  link components {}: biggest {:?}", s.len(), &s[..s.len().min(12)]);
-        for gap_m in [30.0f32, 50.0, 100.0, 200.0] {
-            let gap = gap_m * 100.0;
-            let mut p: Vec<usize> = (0..n).collect();
-            for i in 0..n { for j in i + 1..n {
-                let (a, b) = (&w.machines[i], &w.machines[j]);
-                if (a.x - b.x).abs() < gap && (a.y - b.y).abs() < gap && (a.x - b.x).hypot(a.y - b.y) < gap {
-                    let (x, y) = (find(&mut p, i), find(&mut p, j)); p[x] = y;
-                }
-            }}
-            let mut sizes = std::collections::HashMap::new();
-            for i in 0..n { *sizes.entry(find(&mut p, i)).or_insert(0) += 1; }
-            let mut s: Vec<i32> = sizes.values().copied().collect(); s.sort_unstable_by(|a, b| b.cmp(a));
-            let cross = w.links.iter().filter(|l| find(&mut p, l.from as usize) != find(&mut p, l.to as usize)).count();
-            eprintln!("  spatial {gap_m} m: clusters {} (>=5 machines: {}), biggest {:?}, cross links {cross}", s.len(), s.iter().filter(|x| **x >= 5).count(), &s[..s.len().min(12)]);
-        }
-    }
-}
