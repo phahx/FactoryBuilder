@@ -120,9 +120,11 @@ fn make_status(state: &AppState) -> CmdResult<Status> {
             .icons_stamp
             .as_ref()
             .is_some_and(|s| setup::game_stamp(Path::new(&settings.game_dir)).is_some_and(|now| &now != s));
+    let map_found = Path::new(&settings.icons_dir).join("map").join("map.json").is_file();
     Ok(Status {
         icons_found,
         ui_assets_found,
+        map_found,
         projects_dir: projects_dir(state)?.to_string_lossy().into_owned(),
         game_changed,
         setup: state.identity.info(DEV),
@@ -181,6 +183,63 @@ fn icon(state: State<AppState>, class: String) -> CmdResult<Response> {
     }
     let dir = state.settings.lock().unwrap().icons_dir.clone();
     let bytes = std::fs::read(Path::new(&dir).join(format!("{class}.png"))).map_err(|e| e.to_string())?;
+    Ok(Response::new(bytes))
+}
+
+/// Largest map.json the app will read (the real one is about 90 KB).
+const MAP_JSON_MAX: u64 = 8 << 20;
+
+/// Reads and checks `<icons>/map/map.json`.
+fn read_map_info(icons_dir: &str) -> Result<fb_model::world::MapInfo, String> {
+    let path = Path::new(icons_dir).join("map").join("map.json");
+    let len = std::fs::metadata(&path).map_err(|e| format!("The map is not extracted yet ({e})."))?.len();
+    if len > MAP_JSON_MAX {
+        return Err("map.json is too large.".into());
+    }
+    let text = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    let info: fb_model::world::MapInfo = serde_json::from_str(&text).map_err(|e| format!("map.json is not valid: {e}"))?;
+    let finite = |v: f64| v.is_finite();
+    if !(finite(info.x_min) && finite(info.y_min) && finite(info.size) && info.size > 0.0) {
+        return Err("map.json has bad world bounds.".into());
+    }
+    if !(1..=8192).contains(&info.tile_px) || !(1..=10).contains(&info.levels) {
+        return Err("map.json has a bad tile size or level count.".into());
+    }
+    if info.nodes.len() > 100_000 || info.nodes.iter().any(|n| !(finite(n.x) && finite(n.y) && finite(n.z))) {
+        return Err("map.json has bad resource sites.".into());
+    }
+    Ok(info)
+}
+
+/// `<icons>/map/<z>/<x>_<y>.png`, built from the three integers only. Level z
+/// is a 2^z x 2^z grid, and z must be below the map's level count.
+fn map_tile_path(icons_dir: &Path, levels: u32, z: u32, x: u32, y: u32) -> Result<PathBuf, String> {
+    if z >= levels || z >= 31 {
+        return Err("bad map level".into());
+    }
+    let n = 1u32 << z;
+    if x >= n || y >= n {
+        return Err("bad map tile".into());
+    }
+    Ok(icons_dir.join("map").join(z.to_string()).join(format!("{x}_{y}.png")))
+}
+
+/// The extracted world map: bounds and resource sites.
+#[tauri::command]
+fn map_info(state: State<AppState>) -> CmdResult<fb_model::world::MapInfo> {
+    state.log("map_info");
+    let dir = state.settings.lock().unwrap().icons_dir.clone();
+    read_map_info(&dir)
+}
+
+/// PNG bytes of one map tile, sent as raw binary.
+#[tauri::command]
+fn map_tile(state: State<AppState>, z: u32, x: u32, y: u32) -> CmdResult<Response> {
+    state.log("map_tile");
+    let dir = state.settings.lock().unwrap().icons_dir.clone();
+    let levels = read_map_info(&dir)?.levels;
+    let path = map_tile_path(Path::new(&dir), levels, z, x, y)?;
+    let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
     Ok(Response::new(bytes))
 }
 
@@ -589,6 +648,8 @@ fn main() {
             load_game,
             icon,
             ui_asset,
+            map_info,
+            map_tile,
             solve,
             list_projects,
             save_project,
@@ -622,4 +683,42 @@ fn main() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running Factory Builder");
+}
+
+#[cfg(test)]
+mod map_tests {
+    use super::*;
+
+    #[test]
+    fn map_tile_path_validation() {
+        let dir = Path::new("icons");
+        let p = map_tile_path(dir, 4, 3, 7, 0).unwrap();
+        assert_eq!(p, dir.join("map").join("3").join("7_0.png"));
+        assert!(map_tile_path(dir, 4, 0, 0, 0).is_ok());
+        // z at or past the level count, or past what a u32 shift can express
+        assert!(map_tile_path(dir, 4, 4, 0, 0).is_err());
+        assert!(map_tile_path(dir, 40, 32, 0, 0).is_err());
+        // x or y outside the 2^z grid
+        assert!(map_tile_path(dir, 4, 0, 1, 0).is_err());
+        assert!(map_tile_path(dir, 4, 2, 4, 0).is_err());
+        assert!(map_tile_path(dir, 4, 2, 0, 4).is_err());
+        assert!(map_tile_path(dir, 4, 3, u32::MAX, 0).is_err());
+    }
+
+    #[test]
+    fn map_info_is_validated() {
+        let dir = std::env::temp_dir().join(format!("fb-map-test-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("map")).unwrap();
+        let write = |s: &str| std::fs::write(dir.join("map").join("map.json"), s).unwrap();
+        let d = dir.to_string_lossy().into_owned();
+        write(r#"{"x_min":-1.5,"y_min":-2,"size":10,"tile_px":1024,"levels":4,"nodes":[{"id":"BP_ResourceNode1","kind":"Node","resource":"Desc_Coal_C","purity":"Pure","x":1,"y":2,"z":3},{"id":"G","kind":"Geyser","resource":null,"purity":"Normal","x":1,"y":2,"z":3}]}"#);
+        assert_eq!(read_map_info(&d).unwrap().nodes.len(), 2);
+        write(r#"{"x_min":0,"y_min":0,"size":0,"tile_px":1024,"levels":4,"nodes":[]}"#);
+        assert!(read_map_info(&d).is_err());
+        write(r#"{"x_min":0,"y_min":0,"size":1,"tile_px":1024,"levels":99,"nodes":[]}"#);
+        assert!(read_map_info(&d).is_err());
+        write("not json");
+        assert!(read_map_info(&d).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

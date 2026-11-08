@@ -12,7 +12,7 @@
 // DLL with the same export. Nothing is searched for or downloaded.
 //
 // --progress prints machine-readable lines for the app's progress bar:
-//   @stage <name>          mount | icons | ui
+//   @stage <name>          mount | icons | ui | map
 //   @progress <done> <total>
 
 using System.Text;
@@ -193,7 +193,7 @@ if (Arg(args, "--json") is { } jsonPath)
 Directory.CreateDirectory(outDir);
 Stage("icons");
 const int UiCount = 17; // fonts + UI textures below, for one progress total
-int total = icons.Count + UiCount, step = 0;
+int total = icons.Count + UiCount + MapExport.Steps, step = 0;
 Progress(0, total);
 var cache = new Dictionary<string, byte[]?>(StringComparer.OrdinalIgnoreCase);
 var manifest = new SortedDictionary<string, string>(StringComparer.Ordinal);
@@ -274,4 +274,15 @@ foreach (var t in uiTextures)
     Progress(++step, total);
 }
 Console.WriteLine($"Wrote {uiOk}/{fonts.Length + uiTextures.Length} UI assets -> {uiDir}");
-return ok > 0 ? 0 : 1;
+
+// 5. The world map: tiles from the game's map art, resource sites and world bounds.
+Stage("map");
+var mapOk = false;
+try
+{
+    MapExport.Run(provider, outDir, () => Progress(++step, total));
+    mapOk = true;
+}
+catch (Exception e) { Console.Error.WriteLine($"  map: {e.GetType().Name}: {e.Message}"); }
+Progress(total, total);
+return ok > 0 && mapOk ? 0 : 1;
