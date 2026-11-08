@@ -662,6 +662,40 @@ pub mod world {
         pub y: f32,
     }
 
+    /// Top-down renders of the game's own models, written by the icon helper
+    /// to `<icons>/map/sprites/sprites.json` (images beside it).
+    #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+    pub struct Sprites {
+        /// Render resolution.
+        pub cm_per_px: f32,
+        /// Building class -> its top-down image.
+        pub buildings: std::collections::BTreeMap<String, Sprite>,
+        /// Belt/pipe class -> a straight piece to repeat along its curve.
+        pub strips: std::collections::BTreeMap<String, Strip>,
+    }
+
+    /// A building seen from above. The image covers `min..max` in the
+    /// building's local space (cm, Unreal axes: image right = local +X,
+    /// image down = local +Y), so it's placed by the actor's position and yaw.
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+    pub struct Sprite {
+        pub file: String,
+        pub min_x: f32,
+        pub min_y: f32,
+        pub max_x: f32,
+        pub max_y: f32,
+    }
+
+    /// A straight piece of belt or pipe seen from above: image right = along
+    /// the belt (`length_cm`), image down = across it (`width_cm`), centred on
+    /// the belt's line.
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+    pub struct Strip {
+        pub file: String,
+        pub length_cm: f32,
+        pub width_cm: f32,
+    }
+
     #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
     pub struct NodeOverride {
         pub id: String,
