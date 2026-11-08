@@ -95,11 +95,11 @@ fn native_name(s: &str) -> &str {
     s.rsplit('.').next().unwrap_or(s)
 }
 
-fn str_field<'a>(c: &'a Value, key: &str) -> &'a str {
+pub(crate) fn str_field<'a>(c: &'a Value, key: &str) -> &'a str {
     c.get(key).and_then(Value::as_str).unwrap_or("")
 }
 
-fn f64_field(c: &Value, key: &str) -> f64 {
+pub(crate) fn f64_field(c: &Value, key: &str) -> f64 {
     str_field(c, key).trim().parse().unwrap_or(0.0)
 }
 
@@ -266,6 +266,9 @@ pub fn parse_docs(root: &Value) -> Result<GameData, DocsError> {
             data.resource_limits.insert(item.to_string(), *limit);
         }
     }
+
+    crate::extraction::parse_extraction(&by_native, &mut data);
+    crate::build_cost::parse_build_costs(&by_native, &mut data);
 
     if data.recipes.is_empty() || data.items.is_empty() {
         return Err(DocsError::Shape("no recipes or items found"));

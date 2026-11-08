@@ -434,8 +434,9 @@ pub fn overview(app: &mut FactoryApp, ui: &mut Ui) {
     let game = app.user.game.clone();
     let empty = app.state.graph.nodes.is_empty();
     let mut focus = None;
+    let mut extraction_changed = false;
     {
-        let FactoryApp { summary: s, user, room, .. } = app;
+        let FactoryApp { summary: s, user, room, planner, .. } = app;
         let assets = user.assets.as_mut().expect("assets");
         padded(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 6.0;
@@ -531,7 +532,9 @@ pub fn overview(app: &mut FactoryApp, ui: &mut Ui) {
                     );
                 }
             };
-            flows(ui, assets, "Raw resources", &s.resources);
+            extraction_changed |=
+                crate::overview_extra::extraction(ui, assets, &game, &s.resources, &mut planner.extraction);
+            crate::overview_extra::build_cost(ui, assets, &game, &s.buildings, &s.resources, &planner.extraction);
             flows(ui, assets, "Inputs", &s.inputs);
             flows(ui, assets, "Byproducts", &s.sunk);
             if s.sink_points > 0.0 {
@@ -570,6 +573,9 @@ pub fn overview(app: &mut FactoryApp, ui: &mut Ui) {
                 }
             }
         });
+    }
+    if extraction_changed {
+        app.changed();
     }
     if focus.is_some() {
         app.focus_node = focus;

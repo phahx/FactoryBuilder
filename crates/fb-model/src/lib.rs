@@ -94,6 +94,102 @@ pub struct GameData {
     pub buildings: BTreeMap<ClassName, Building>,
     /// Default extraction limits per minute (editable in the planner).
     pub resource_limits: BTreeMap<ClassName, f64>,
+    /// Extractors (miners, pumps, well extractors) and belt speeds.
+    #[serde(default)]
+    pub extraction: ExtractionData,
+    /// Building class (`Build_*_C`) -> what the Build Gun costs to place one.
+    #[serde(default)]
+    pub build_costs: BTreeMap<ClassName, Vec<Amount>>,
+}
+
+/// Resource node purity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum Purity {
+    Impure,
+    #[default]
+    Normal,
+    Pure,
+}
+
+impl Purity {
+    pub const ALL: [Purity; 3] = [Purity::Impure, Purity::Normal, Purity::Pure];
+    /// Output multiplier of a node. Not in the Docs; from
+    /// https://satisfactory.wiki.gg/wiki/Miner ("Impure = 0.5, Normal = 1,
+    /// Pure = 2") and https://satisfactory.wiki.gg/wiki/Resource_well
+    /// (30 / 60 / 120 m³/min per Resource Well Extractor).
+    pub fn multiplier(self) -> f64 {
+        match self {
+            Purity::Impure => 0.5,
+            Purity::Normal => 1.0,
+            Purity::Pure => 2.0,
+        }
+    }
+    pub fn label(self) -> &'static str {
+        match self {
+            Purity::Impure => "Impure",
+            Purity::Normal => "Normal",
+            Purity::Pure => "Pure",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ExtractorKind {
+    /// Miner, Oil Extractor: sits on a resource node; output scales with purity.
+    Node,
+    /// Water Extractor: sits in water; no purity.
+    Water,
+    /// Resource Well Extractor: on a satellite node of a pressurised well.
+    Well,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Extractor {
+    pub class: ClassName,
+    pub name: String,
+    pub kind: ExtractorKind,
+    /// `mExtractCycleTime`
+    pub cycle_s: f64,
+    /// `mItemsPerCycle`; fluids already converted to m³.
+    pub per_cycle: f64,
+    /// Which resources it can take: all of the listed forms, or only
+    /// `resources` when that is non-empty.
+    pub forms: Vec<Form>,
+    pub resources: Vec<ClassName>,
+    pub power_mw: f64,
+    pub power_exponent: f64,
+    /// Descriptor class whose icon represents this building.
+    pub icon: ClassName,
+}
+
+impl Extractor {
+    /// Items (or m³) per minute at 100% clock on a node with multiplier 1.
+    pub fn base_per_min(&self) -> f64 {
+        self.per_cycle * 60.0 / self.cycle_s
+    }
+    /// Per minute on a node of `purity` at `clock` (1.0 = 100%).
+    pub fn per_min(&self, purity: Purity, clock: f64) -> f64 {
+        let p = if self.kind == ExtractorKind::Water { 1.0 } else { purity.multiplier() };
+        self.base_per_min() * p * clock
+    }
+    pub fn can_extract(&self, item: &str, form: Form) -> bool {
+        self.forms.contains(&form) && (self.resources.is_empty() || self.resources.iter().any(|r| r == item))
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Belt {
+    pub name: String,
+    /// Items per minute (`mSpeed` / 2).
+    pub per_min: f64,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ExtractionData {
+    /// Sorted by output at 100% on a normal node, slowest first.
+    pub extractors: Vec<Extractor>,
+    /// Slowest first.
+    pub belts: Vec<Belt>,
 }
 
 impl GameData {

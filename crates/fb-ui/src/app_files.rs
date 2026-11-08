@@ -170,6 +170,7 @@ impl FactoryApp {
             objective: plan.optimize,
             enabled,
             limits,
+            extraction: self.planner.extraction.clone(),
             recipe_filter: self.planner.recipe_filter.clone(),
         }
     }
