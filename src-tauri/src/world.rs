@@ -9,8 +9,6 @@ use fb_model::world::{MapInfo, Session, World};
 use fb_model::GameData;
 use std::path::Path;
 
-/// `<icons>/map/map.json` is a few hundred KB; anything this big isn't it.
-const MAX_MAP_JSON: u64 = 32 * 1024 * 1024;
 
 /// Saves grouped by session, each newest first; the session with the newest
 /// save comes first.
@@ -41,16 +39,13 @@ fn newest_of(saves: Vec<SaveSummary>, session: &str) -> Option<SaveSummary> {
     saves.into_iter().filter(|s| s.session == session).max_by_key(|s| s.saved_unix)
 }
 
-/// The world map file the icon helper writes, if it is there and sound.
+/// The world map file the icon helper writes, if it is there and sound
+/// (validated by the same reader the Map tab uses).
 fn map_info(icons_dir: &str) -> Option<MapInfo> {
     if icons_dir.is_empty() {
         return None;
     }
-    let path = Path::new(icons_dir).join("map").join("map.json");
-    if std::fs::metadata(&path).ok()?.len() > MAX_MAP_JSON {
-        return None;
-    }
-    serde_json::from_slice(&std::fs::read(path).ok()?).ok()
+    crate::read_map_info(icons_dir).ok()
 }
 
 /// What the save at `path` has built. The map's resource nodes (when the
