@@ -1,0 +1,30 @@
+[package]
+name = "fb-ui"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+fb-model.workspace = true
+fb-engine.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+egui = "0.29.1"
+eframe = { version = "0.29.1", default-features = false, features = ["glow", "default_fonts"] }
+egui_extras = { version = "0.29.1", features = ["image"] }
+image = { version = "0.25", default-features = false, features = ["png"] }
+egui_node_graph2 = { version = "0.7.0", features = ["persistence"] }
+miniz_oxide = "0.9.1"
+base64 = "0.23.1"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+web-sys = { version = "0.3", features = ["Window", "Document", "HtmlCanvasElement", "Element", "console", "DomTokenList", "HtmlHeadElement"] }
+serde-wasm-bindgen = "0.6"
+
+[dev-dependencies]
+fb-engine = { workspace = true, features = ["solver"] }

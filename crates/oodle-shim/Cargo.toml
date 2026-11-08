@@ -1,0 +1,11 @@
+[package]
+name = "oodle-shim"
+version.workspace = true
+edition.workspace = true
+description = "Drop-in OodleLZ_Decompress for the icon extractor, built on the open-source oozextract decoder"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+oozextract = "0.5.7"

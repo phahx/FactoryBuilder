@@ -1,0 +1,755 @@
+//! egui_node_graph2 types for factory graphs.
+//!
+//! Ports are typed by item class, so a wire can only join matching items.
+//! Machine nodes have one input per ingredient and one output per product,
+//! plus "Machines" and "Clock Speed" numbers. Resource/Input nodes supply one
+//! item; Output/Sink nodes take one.
+
+use crate::assets::{Assets, UiIcon};
+use crate::fmt::{fmt_num, fmt_rate_unit};
+use crate::theme::{self, *};
+use crate::widgets;
+use egui::{vec2, Align, Color32, Layout, RichText, Ui};
+use egui_node_graph2::*;
+use fb_model::{GameData, Recipe};
+use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
+use std::collections::HashMap;
+use std::rc::Rc;
+
+pub const MACHINES: &str = "Machines";
+pub const CLOCK: &str = "Clock Speed";
+pub const RATE: &str = "Rate";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ItemType(pub String);
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub enum PortValue {
+    #[default]
+    None,
+    /// An item port: wires only.
+    Item(String),
+    /// An editable number.
+    Number {
+        value: f64,
+        min: f64,
+        max: f64,
+        suffix: String,
+    },
+}
+
+impl PortValue {
+    pub fn number(&self) -> f64 {
+        match self {
+            PortValue::Number { value, .. } => *value,
+            _ => 0.0,
+        }
+    }
+    pub fn set_number(&mut self, v: f64) {
+        if let PortValue::Number {
+            value, min, max, ..
+        } = self
+        {
+            *value = v.clamp(*min, *max);
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum NodeKind {
+    Recipe {
+        recipe: String,
+    },
+    /// Raw resource extraction.
+    Resource {
+        item: String,
+    },
+    /// Supplied from another factory.
+    Input {
+        item: String,
+    },
+    /// A product this factory delivers.
+    Output {
+        item: String,
+    },
+    /// AWESOME Sink / storage: takes whatever arrives.
+    Sink {
+        item: String,
+    },
+}
+
+impl NodeKind {
+    pub fn template(&self) -> Template {
+        match self.clone() {
+            NodeKind::Recipe { recipe } => Template::Recipe(recipe),
+            NodeKind::Resource { item } => Template::Resource(item),
+            NodeKind::Input { item } => Template::Input(item),
+            NodeKind::Output { item } => Template::Output(item),
+            NodeKind::Sink { item } => Template::Sink(item),
+        }
+    }
+
+    /// Item shown in the title bar.
+    pub fn icon_item<'a>(&'a self, game: &'a GameData) -> Option<&'a str> {
+        match self {
+            NodeKind::Recipe { recipe } => game
+                .recipes
+                .get(recipe)
+                .and_then(|r| r.products.first())
+                .map(|p| p.item.as_str()),
+            NodeKind::Resource { item }
+            | NodeKind::Input { item }
+            | NodeKind::Output { item }
+            | NodeKind::Sink { item } => Some(item),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NodeData {
+    pub kind: NodeKind,
+    /// Colour label shown as a strip across the top of the header.
+    #[serde(default)]
+    pub color: Option<[u8; 3]>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum Template {
+    Recipe(String),
+    Resource(String),
+    Input(String),
+    Output(String),
+    Sink(String),
+}
+
+#[derive(Debug, Clone)]
+pub enum Resp {
+    /// The user committed a number on a node.
+    Edited,
+}
+impl UserResponseTrait for Resp {}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PortStat {
+    /// Actual flow per minute.
+    pub have: f64,
+    /// Wanted (inputs) or possible (outputs) per minute.
+    pub want: f64,
+    pub connected: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct NodeStat {
+    pub efficiency: f64,
+    pub power_mw: f64,
+}
+
+/// Shared state the graph widgets read: game data, assets, live stats.
+#[derive(Default, Serialize, Deserialize)]
+pub struct UserState {
+    #[serde(skip)]
+    pub game: Rc<GameData>,
+    #[serde(skip)]
+    pub assets: Option<Assets>,
+    #[serde(skip)]
+    pub ports: HashMap<(NodeId, String), PortStat>,
+    #[serde(skip)]
+    pub nodes: HashMap<NodeId, NodeStat>,
+    #[serde(skip)]
+    pub zoom: f32,
+}
+
+impl UserState {
+    fn z(&self) -> f32 {
+        self.zoom.max(0.2)
+    }
+
+    fn item_icon(&mut self, ui: &mut Ui, class: &str, size: f32) {
+        let size = size * self.z();
+        if let Some(a) = self.assets.as_mut() {
+            a.item(ui, class, size);
+        }
+    }
+
+    fn ui_icon(&mut self, ui: &mut Ui, icon: UiIcon, size: f32, tint: Color32) {
+        let size = size * self.z();
+        if let Some(a) = self.assets.as_mut() {
+            a.ui(ui, icon, size, tint);
+        }
+    }
+
+    pub fn item_color(&self, item: &str) -> Color32 {
+        if let Some(it) = self.game.items.get(item) {
+            if it.form.is_fluid() && it.color[3] > 0 {
+                let [r, g, b, _] = it.color;
+                return Color32::from_rgb(r, g, b);
+            }
+        }
+        // Solids: a stable muted hue per item so wires can be told apart.
+        let h = item
+            .bytes()
+            .fold(2166136261u32, |h, b| (h ^ b as u32).wrapping_mul(16777619));
+        egui::ecolor::Hsva::new((h % 360) as f32 / 360.0, 0.45, 0.8, 1.0).into()
+    }
+}
+
+pub type FactoryGraph = Graph<NodeData, ItemType, PortValue>;
+pub type EditorState = GraphEditorState<NodeData, ItemType, PortValue, Template, UserState>;
+
+impl DataTypeTrait<UserState> for ItemType {
+    fn data_type_color(&self, user_state: &mut UserState) -> Color32 {
+        if self.0.is_empty() {
+            DIVIDER
+        } else {
+            user_state.item_color(&self.0)
+        }
+    }
+    fn name(&self) -> Cow<'_, str> {
+        Cow::Borrowed(&self.0)
+    }
+}
+
+fn number(value: f64, min: f64, max: f64, suffix: &str) -> PortValue {
+    PortValue::Number {
+        value,
+        min,
+        max,
+        suffix: suffix.into(),
+    }
+}
+
+/// Port names are the item's display name; recipes never list the same item
+/// twice on one side, but fall back to the class name if one ever does.
+fn port_name(game: &GameData, item: &str, taken: &[(String, impl Copy)]) -> String {
+    let name = game.item_name(item).to_string();
+    if taken.iter().any(|(n, _)| *n == name) {
+        item.to_string()
+    } else {
+        name
+    }
+}
+
+impl Template {
+    pub fn kind(&self) -> NodeKind {
+        match self.clone() {
+            Template::Recipe(recipe) => NodeKind::Recipe { recipe },
+            Template::Resource(item) => NodeKind::Resource { item },
+            Template::Input(item) => NodeKind::Input { item },
+            Template::Output(item) => NodeKind::Output { item },
+            Template::Sink(item) => NodeKind::Sink { item },
+        }
+    }
+}
+
+impl NodeTemplateTrait for Template {
+    type NodeData = NodeData;
+    type DataType = ItemType;
+    type ValueType = PortValue;
+    type UserState = UserState;
+    type CategoryType = String;
+
+    fn node_finder_label(&self, s: &mut UserState) -> Cow<'_, str> {
+        Cow::Owned(self.node_graph_label(s))
+    }
+
+    fn node_finder_categories(&self, s: &mut UserState) -> Vec<String> {
+        vec![match self {
+            Template::Recipe(r) => s
+                .game
+                .recipes
+                .get(r)
+                .and_then(|r| s.game.buildings.get(&r.building))
+                .map(|b| b.name.clone())
+                .unwrap_or_else(|| "Machines".into()),
+            Template::Resource(_) => "Resources".into(),
+            Template::Input(_) => "Inputs".into(),
+            Template::Output(_) => "Outputs".into(),
+            Template::Sink(_) => "Sinks".into(),
+        }]
+    }
+
+    fn node_graph_label(&self, s: &mut UserState) -> String {
+        match self {
+            Template::Recipe(r) => s
+                .game
+                .recipes
+                .get(r)
+                .map(|r| r.name.clone())
+                .unwrap_or_else(|| r.clone()),
+            Template::Resource(i)
+            | Template::Input(i)
+            | Template::Output(i)
+            | Template::Sink(i) => s.game.item_name(i).to_string(),
+        }
+    }
+
+    fn user_data(&self, _s: &mut UserState) -> NodeData {
+        NodeData {
+            kind: self.kind(),
+            color: None,
+        }
+    }
+
+    fn build_node(&self, graph: &mut FactoryGraph, s: &mut UserState, node_id: NodeId) {
+        let game = s.game.clone();
+        let constant = |graph: &mut FactoryGraph, name: &str, v: PortValue| {
+            graph.add_input_param(
+                node_id,
+                name.into(),
+                ItemType(String::new()),
+                v,
+                InputParamKind::ConstantOnly,
+                true,
+            );
+        };
+        let item_in = |graph: &mut FactoryGraph, item: &str| {
+            let name = port_name(&game, item, &graph[node_id].inputs);
+            graph.add_wide_input_param(
+                node_id,
+                name,
+                ItemType(item.into()),
+                PortValue::Item(item.into()),
+                InputParamKind::ConnectionOnly,
+                None,
+                true,
+            );
+        };
+        let item_out = |graph: &mut FactoryGraph, item: &str| {
+            let name = port_name(&game, item, &graph[node_id].outputs);
+            graph.add_output_param(node_id, name, ItemType(item.into()));
+        };
+        let unit = |item: &str| {
+            if game.item_form(item).is_fluid() {
+                "m³/min"
+            } else {
+                "per min"
+            }
+        };
+        match self {
+            Template::Recipe(r) => {
+                let Some(recipe) = game.recipes.get(r) else {
+                    return;
+                };
+                constant(graph, MACHINES, number(1.0, 0.0, 10_000.0, ""));
+                constant(graph, CLOCK, number(100.0, 1.0, 250.0, "%"));
+                for a in &recipe.ingredients {
+                    item_in(graph, &a.item);
+                }
+                for a in &recipe.products {
+                    item_out(graph, &a.item);
+                }
+            }
+            Template::Resource(i) | Template::Input(i) => {
+                constant(graph, RATE, number(60.0, 0.0, 1e6, unit(i)));
+                item_out(graph, i);
+            }
+            Template::Output(i) => {
+                constant(graph, RATE, number(60.0, 0.0, 1e6, unit(i)));
+                item_in(graph, i);
+            }
+            Template::Sink(i) => item_in(graph, i),
+        }
+    }
+}
+
+/// Everything that can be added from the right-click finder.
+pub struct AllTemplates(pub Vec<Template>);
+
+impl AllTemplates {
+    pub fn from_game(game: &GameData) -> Self {
+        let mut v: Vec<Template> = game.recipes.keys().cloned().map(Template::Recipe).collect();
+        for (class, item) in &game.items {
+            if item.raw {
+                v.push(Template::Resource(class.clone()));
+            }
+            v.push(Template::Input(class.clone()));
+            v.push(Template::Output(class.clone()));
+            v.push(Template::Sink(class.clone()));
+        }
+        Self(v)
+    }
+}
+
+impl NodeTemplateIter for &AllTemplates {
+    type Item = Template;
+    fn all_kinds(&self) -> Vec<Template> {
+        self.0.clone()
+    }
+}
+
+impl WidgetValueTrait for PortValue {
+    type Response = Resp;
+    type UserState = UserState;
+    type NodeData = NodeData;
+
+    fn value_widget(
+        &mut self,
+        name: &str,
+        node_id: NodeId,
+        ui: &mut Ui,
+        s: &mut UserState,
+        _d: &NodeData,
+    ) -> Vec<Resp> {
+        match self {
+            PortValue::Number {
+                value,
+                min,
+                max,
+                suffix,
+            } => {
+                let z = s.z();
+                let mut changed = false;
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(name).color(TEXT_DIM));
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if !suffix.is_empty() {
+                            ui.label(RichText::new(suffix.as_str()).color(TEXT_DIM));
+                        }
+                        let id = egui::Id::new(("node-number", node_id, name));
+                        let mut v = *value;
+                        if widgets::num_field(ui, id, &mut v, 72.0 * z) {
+                            *value = v.clamp(*min, *max);
+                            changed = true;
+                        }
+                    });
+                });
+                if changed {
+                    vec![Resp::Edited]
+                } else {
+                    vec![]
+                }
+            }
+            PortValue::Item(item) => {
+                let item = item.clone();
+                port_row(ui, s, node_id, name, &item, true);
+                vec![]
+            }
+            PortValue::None => vec![],
+        }
+    }
+
+    fn value_widget_connected(
+        &mut self,
+        name: &str,
+        node_id: NodeId,
+        ui: &mut Ui,
+        s: &mut UserState,
+        d: &NodeData,
+    ) -> Vec<Resp> {
+        self.value_widget(name, node_id, ui, s, d)
+    }
+}
+
+/// Item port: icon + name, and below it "have / want per min" (inputs) or
+/// "rate per min" (outputs), coloured by how well it's supplied.
+fn port_row(ui: &mut Ui, s: &mut UserState, node_id: NodeId, name: &str, item: &str, input: bool) {
+    let stat = s
+        .ports
+        .get(&(node_id, name.to_string()))
+        .copied()
+        .unwrap_or_default();
+    let form = s.game.item_form(item);
+    let layout = if input {
+        Layout::left_to_right(Align::Center)
+    } else {
+        Layout::right_to_left(Align::Center)
+    };
+    // Sized allocation: `with_layout` would hand the row all remaining
+    // height and centre it there, stretching the node.
+    ui.allocate_ui_with_layout(vec2(ui.available_width(), 0.0), layout, |ui| {
+        ui.spacing_mut().item_spacing.x = 6.0;
+        s.item_icon(ui, item, 24.0);
+        ui.vertical(|ui| {
+            ui.spacing_mut().item_spacing.y = 0.0;
+            let align = if input {
+                Layout::top_down(Align::Min)
+            } else {
+                Layout::top_down(Align::Max)
+            };
+            ui.with_layout(align, |ui| {
+                ui.label(RichText::new(name).color(TEXT));
+                let (text, color) = if input {
+                    let t = if stat.connected {
+                        format!(
+                            "{} / {}",
+                            crate::fmt::fmt_rate(stat.have),
+                            fmt_rate_unit(stat.want, form)
+                        )
+                    } else {
+                        format!("{} · not connected", fmt_rate_unit(stat.want, form))
+                    };
+                    (t, supply_color(stat.have, stat.want))
+                } else if stat.connected {
+                    (
+                        fmt_rate_unit(stat.have, form),
+                        theme::supply_color(stat.have, stat.want),
+                    )
+                } else {
+                    (
+                        format!("{} · not connected", fmt_rate_unit(stat.want, form)),
+                        if stat.want > 1e-9 { ACCENT } else { TEXT_DIM },
+                    )
+                };
+                ui.label(RichText::new(text).small().color(color));
+            });
+        });
+    });
+}
+
+impl NodeDataTrait for NodeData {
+    type Response = Resp;
+    type UserState = UserState;
+    type DataType = ItemType;
+    type ValueType = PortValue;
+
+    fn output_ui(
+        &self,
+        ui: &mut Ui,
+        node_id: NodeId,
+        graph: &FactoryGraph,
+        s: &mut UserState,
+        name: &str,
+    ) -> Vec<NodeResponse<Resp, NodeData>> {
+        if let Ok(out) = graph[node_id].get_output(name) {
+            let item = graph[out].typ.0.clone();
+            port_row(ui, s, node_id, name, &item, false);
+        }
+        vec![]
+    }
+
+    fn top_bar_ui(
+        &self,
+        ui: &mut Ui,
+        node_id: NodeId,
+        _graph: &FactoryGraph,
+        s: &mut UserState,
+    ) -> Vec<NodeResponse<Resp, NodeData>> {
+        // The library lays this out right to left, before the title.
+        {
+            let caption = match &self.kind {
+                NodeKind::Recipe { .. } => {
+                    let eff = s.nodes.get(&node_id).map(|n| n.efficiency).unwrap_or(1.0);
+                    let color = supply_color(eff, 1.0);
+                    ui.label(
+                        RichText::new(format!("{:.0}%", eff * 100.0))
+                            .small()
+                            .color(color),
+                    )
+                    .on_hover_text(
+                        "Running speed: how much of its full rate this machine group can run at.",
+                    );
+                    None
+                }
+                NodeKind::Resource { .. } => Some("Resource"),
+                NodeKind::Input { .. } => Some("Input"),
+                NodeKind::Output { .. } => Some("Output"),
+                NodeKind::Sink { .. } => Some("Sink"),
+            };
+            if let Some(c) = caption {
+                ui.label(RichText::new(c).small().color(TEXT_DIM));
+            }
+            let game = s.game.clone();
+            if let Some(item) = self.kind.icon_item(&game) {
+                ui.add_space(4.0);
+                s.item_icon(ui, item, 20.0);
+            }
+        }
+        vec![]
+    }
+
+    fn titlebar_color(
+        &self,
+        _ui: &Ui,
+        _node_id: NodeId,
+        _graph: &FactoryGraph,
+        _s: &mut UserState,
+    ) -> Option<Color32> {
+        Some(HEADER)
+    }
+
+    fn titlebar_strip(
+        &self,
+        _node_id: NodeId,
+        _graph: &FactoryGraph,
+        _s: &mut UserState,
+    ) -> Option<Color32> {
+        self.color.map(|[r, g, b]| Color32::from_rgb(r, g, b))
+    }
+
+    fn separator(
+        &self,
+        ui: &mut Ui,
+        _node_id: NodeId,
+        param: AnyParameterId,
+        graph: &FactoryGraph,
+        _s: &mut UserState,
+    ) {
+        // A hairline between the numbers and the item ports.
+        if let AnyParameterId::Input(i) = param {
+            let is_number = matches!(graph[i].value, PortValue::Number { .. });
+            let next_is_item = graph[graph[i].node]
+                .inputs
+                .iter()
+                .skip_while(|(_, id)| *id != i)
+                .nth(1)
+                .is_some_and(|(_, id)| matches!(graph[*id].value, PortValue::Item(_)));
+            if is_number && next_is_item {
+                ui.add_space(2.0);
+                let (r, _) =
+                    ui.allocate_exact_size(vec2(ui.available_width(), 1.0), egui::Sense::hover());
+                ui.painter().rect_filled(r, 0.0, DIVIDER);
+                ui.add_space(2.0);
+            }
+        }
+    }
+
+    fn bottom_ui(
+        &self,
+        ui: &mut Ui,
+        node_id: NodeId,
+        graph: &FactoryGraph,
+        s: &mut UserState,
+    ) -> Vec<NodeResponse<Resp, NodeData>> {
+        let game = s.game.clone();
+        match &self.kind {
+            NodeKind::Recipe { recipe } => {
+                let Some(r) = game.recipes.get(recipe) else {
+                    ui.colored_label(DANGER, "This recipe is not in the game data.");
+                    return vec![];
+                };
+                let machines = input_number(graph, node_id, MACHINES);
+                let clock = input_number(graph, node_id, CLOCK) / 100.0;
+                let power = s.nodes.get(&node_id).map(|n| n.power_mw).unwrap_or(0.0);
+                let (r_div, _) =
+                    ui.allocate_exact_size(vec2(ui.available_width(), 1.0), egui::Sense::hover());
+                ui.painter().rect_filled(r_div, 0.0, DIVIDER);
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 6.0;
+                    if let Some(b) = game.buildings.get(&r.building) {
+                        s.item_icon(ui, &b.icon, 32.0);
+                    }
+                    ui.vertical(|ui| {
+                        ui.spacing_mut().item_spacing.y = 0.0;
+                        let name = game
+                            .buildings
+                            .get(&r.building)
+                            .map(|b| b.name.as_str())
+                            .unwrap_or(&r.building);
+                        ui.label(RichText::new(name).color(TEXT));
+                        ui.label(
+                            RichText::new(build_hint(machines, clock))
+                                .small()
+                                .color(TEXT_DIM),
+                        );
+                    });
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        ui.label(
+                            RichText::new(format!("{} MW", fmt_num(power)))
+                                .small()
+                                .color(TEXT_DIM),
+                        );
+                        s.ui_icon(ui, UiIcon::Power, 14.0, TEXT_DIM);
+                    });
+                });
+            }
+            NodeKind::Sink { item } => {
+                let got = graph[node_id]
+                    .inputs
+                    .first()
+                    .and_then(|(n, _)| s.ports.get(&(node_id, n.clone())))
+                    .map(|p| p.have)
+                    .unwrap_or(0.0);
+                let pts = game.items.get(item).map(|i| i.sink_points).unwrap_or(0) as f64 * got;
+                ui.label(
+                    RichText::new(format!(
+                        "{} points per min in the AWESOME Sink",
+                        fmt_num(pts)
+                    ))
+                    .small()
+                    .color(TEXT_DIM),
+                );
+            }
+            _ => {}
+        }
+        vec![]
+    }
+}
+
+/// "Build 3 at 100%" / "Build 4 at 81.25%": whole machines for the throughput.
+pub fn build_hint(machines: f64, clock: f64) -> String {
+    let throughput = machines * clock;
+    if throughput <= 1e-9 {
+        return "Idle".into();
+    }
+    let whole = (throughput - 1e-6).ceil().max(1.0);
+    format!(
+        "Build {} at {}% clock speed",
+        whole as i64,
+        fmt_num(throughput / whole * 100.0)
+    )
+}
+
+pub fn input_number(graph: &FactoryGraph, node: NodeId, name: &str) -> f64 {
+    graph[node]
+        .get_input(name)
+        .map(|i| graph[i].value.number())
+        .unwrap_or(0.0)
+}
+
+/// Items (or m³) per minute per input and output port at 100% speed.
+pub fn node_rates(
+    game: &GameData,
+    graph: &FactoryGraph,
+    node: NodeId,
+) -> (Vec<(String, f64)>, Vec<(String, f64)>) {
+    let n = &graph[node];
+    let item_inputs = n
+        .inputs
+        .iter()
+        .filter(|(_, id)| matches!(graph[*id].value, PortValue::Item(_)));
+    let per = |r: &Recipe, item: &str, list: &[fb_model::Amount]| {
+        list.iter()
+            .filter(|a| a.item == item)
+            .map(|a| r.per_min(a))
+            .sum::<f64>()
+    };
+    match &n.user_data.kind {
+        NodeKind::Recipe { recipe } => {
+            let Some(r) = game.recipes.get(recipe) else {
+                return (vec![], vec![]);
+            };
+            let k = input_number(graph, node, MACHINES) * input_number(graph, node, CLOCK) / 100.0;
+            let ins = item_inputs
+                .map(|(name, id)| (name.clone(), per(r, &graph[*id].typ.0, &r.ingredients) * k))
+                .collect();
+            let outs = n
+                .outputs
+                .iter()
+                .map(|(name, id)| (name.clone(), per(r, &graph[*id].typ.0, &r.products) * k))
+                .collect();
+            (ins, outs)
+        }
+        NodeKind::Resource { .. } | NodeKind::Input { .. } => {
+            let rate = input_number(graph, node, RATE);
+            (
+                vec![],
+                n.outputs
+                    .iter()
+                    .map(|(name, _)| (name.clone(), rate))
+                    .collect(),
+            )
+        }
+        NodeKind::Output { .. } => {
+            let rate = input_number(graph, node, RATE);
+            (
+                item_inputs.map(|(name, _)| (name.clone(), rate)).collect(),
+                vec![],
+            )
+        }
+        NodeKind::Sink { .. } => (
+            item_inputs.map(|(name, _)| (name.clone(), 0.0)).collect(),
+            vec![],
+        ),
+    }
+}

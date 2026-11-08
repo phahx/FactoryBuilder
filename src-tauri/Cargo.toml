@@ -1,0 +1,31 @@
+[package]
+name = "factory-builder"
+version.workspace = true
+edition.workspace = true
+description = "Satisfactory factory planner"
+
+[build-dependencies]
+tauri-build = { version = "2.7.4", features = [] }
+
+[dependencies]
+fb-model.workspace = true
+fb-engine = { workspace = true, features = ["solver"] }
+serde.workspace = true
+serde_json.workspace = true
+# custom-protocol: production mode (normally added by the Tauri CLI, which we don't use).
+tauri = { version = "2.12.5", features = ["custom-protocol"] }
+tokio = { version = "1.54.1", features = ["net", "sync", "macros", "rt-multi-thread", "time"] }
+tokio-tungstenite = "0.30.0"
+futures-util = "0.3.34"
+igd-next = { version = "0.18.0", features = ["aio_tokio"] }
+tauri-plugin-dialog = "2"
+base64 = "0.23.1"
+
+[target.'cfg(windows)'.dependencies]
+windows-registry = "0.6.1"
+# Already built for tao/wry with these features; used for shortcuts and dialogs.
+windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_System_Com", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
+
+[features]
+# Development build: Developer settings, and never hands off to an installed copy.
+dev = []

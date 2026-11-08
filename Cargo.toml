@@ -1,0 +1,26 @@
+[workspace]
+resolver = "2"
+members = ["crates/fb-model", "crates/fb-engine", "crates/fb-ui", "crates/oodle-shim", "src-tauri"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+fb-model = { path = "crates/fb-model" }
+fb-engine = { path = "crates/fb-engine", default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+petgraph = "0.8.3"
+good_lp = { version = "1.15.3", default-features = false, features = ["microlp"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+
+[profile.dev.package."*"]
+opt-level = 2
+
+[patch.crates-io]
+egui_node_graph2 = { path = "crates/egui_node_graph2" }

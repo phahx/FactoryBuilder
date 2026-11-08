@@ -1,0 +1,23 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <InvariantGlobalization>true</InvariantGlobalization>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="CUE4Parse" Version="1.2.2.202611" />
+    <PackageReference Include="CUE4Parse-Conversion" Version="1.2.2.202611" />
+    <!-- Transitive (via IndexRange); 9.0.0 has a DoS advisory, GHSA-73j8-2gch-69rq. -->
+    <PackageReference Include="Microsoft.Bcl.Memory" Version="9.0.14" />
+    <!-- SixLabors.ImageSharp stays at 3.1.12 (pinned exactly by CUE4Parse-Conversion;
+         3.2.0 needs a paid license key to build). Its advisories cover the TIFF codec,
+         ICC-profile parsing when decoding a file, and the HistogramEqualization
+         processor. CUE4Parse-Conversion only wraps decoded pixels (LoadPixelData) and
+         writes PNG (PngEncoder); it never parses an image file, so none are reachable. -->
+  </ItemGroup>
+
+</Project>

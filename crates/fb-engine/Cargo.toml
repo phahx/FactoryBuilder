@@ -1,0 +1,17 @@
+[package]
+name = "fb-engine"
+version.workspace = true
+edition.workspace = true
+
+[features]
+default = ["solver"]
+# Docs parser + planner, used by the native backend.
+solver = ["dep:serde_json"]
+
+[dependencies]
+fb-model.workspace = true
+serde.workspace = true
+serde_json = { workspace = true, optional = true }
+petgraph.workspace = true
+# microlp is pure Rust, so the wasm UI can use good_lp for the flow sim too.
+good_lp.workspace = true
