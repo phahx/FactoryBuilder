@@ -1272,13 +1272,18 @@ impl FactoryApp {
                     self.wizard = Some(w);
                 }
                 // The Map tab with the self-test's sample save.
-                "map" | "map_zoom" => {
+                "map" | "map_zoom" | "map_close" => {
                     self.dialog = Dialog::None;
                     self.view = crate::map::View::Map;
                     if self.map.world.is_none() {
                         self.backend.call("selftest_save", json!({}), Msg::SelftestSave);
                     }
-                    self.map.selftest_zoom = view == "map_zoom";
+                    self.map.selftest_zoom = match view.as_str() {
+                        "map_zoom" => Some(0.012),
+                        "map_close" => Some(0.08),
+                        _ => None,
+                    };
+                    self.map.selftest_zoomed = false;
                 }
                 // Import the zoomed-in selection and show the result.
                 "map_import" => {

@@ -45,7 +45,7 @@ const PROBE_JS: &str = r#"
   // then read the canvas in a later animation frame (before it clears).
   const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
   r.screenshots = [];
-  for (const view of ['graph', 'zoomed', 'finder', 'finder_search', 'menu', 'room_cursors', 'room_info', 'setup_install', 'setup_game', 'setup_icons', 'setup_name', 'settings_dev', 'map', 'map_zoom', 'map_import', 'export']) {
+  for (const view of ['graph', 'zoomed', 'finder', 'finder_search', 'menu', 'room_cursors', 'room_info', 'setup_install', 'setup_game', 'setup_icons', 'setup_name', 'settings_dev', 'map', 'map_zoom', 'map_close', 'map_import', 'export']) {
     try {
       window.__fbSelftestView = view;
       for (let i = 0; i < 6; i++) {

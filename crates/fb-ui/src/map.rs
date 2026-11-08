@@ -52,9 +52,10 @@ pub struct MapState {
     carrier_boxes: Vec<[f32; 4]>,
     /// The map area on screen last frame.
     pub rect: Option<Rect>,
-    /// Self-test: zoom into the busiest part of the save and select it.
-    pub selftest_zoom: bool,
-    selftest_zoomed: bool,
+    /// Self-test: zoom (px per cm) into the busiest part of the save and
+    /// select it.
+    pub selftest_zoom: Option<f64>,
+    pub selftest_zoomed: bool,
 }
 
 impl MapState {
@@ -297,7 +298,7 @@ pub fn map_ui(app: &mut FactoryApp, ui: &mut egui::Ui) {
     }
     // Self-test: centre on the median machine, zoomed in, with the machines
     // near it selected (so the screenshot shows marks and the selection).
-    if state.selftest_zoom && !state.selftest_zoomed {
+    if let (Some(zoom), false) = (state.selftest_zoom, state.selftest_zoomed) {
         if let Some(w) = &state.world {
             if !w.machines.is_empty() {
                 // The machine with the most others within 100 m.
@@ -308,12 +309,12 @@ pub fn map_ui(app: &mut FactoryApp, ui: &mut egui::Ui) {
                     .unwrap();
                 let (cx, cy) = (busiest.x as f64, busiest.y as f64);
                 state.center = (cx, cy);
-                state.scale = 0.012;
+                state.scale = zoom;
                 state.selected = w.machines.iter().filter(|m| ((m.x as f64 - cx).abs() < 4000.0) && ((m.y as f64 - cy).abs() < 3000.0)).map(|m| m.id).collect();
                 state.selftest_zoomed = true;
             }
         }
-    } else if !state.selftest_zoom && state.selftest_zoomed {
+    } else if state.selftest_zoom.is_none() && state.selftest_zoomed {
         state.fitted = false;
         state.selftest_zoomed = false;
         state.selected.clear();
@@ -380,7 +381,15 @@ pub fn map_ui(app: &mut FactoryApp, ui: &mut egui::Ui) {
             if b[2] < vw[0] || b[0] > vw[2] || b[3] < vw[1] || b[1] > vw[3] {
                 continue;
             }
-            crate::map_draw::carrier(&ctx2, assets, app.map.sprites.as_ref(), &mut batch, &painter, &view, c);
+            // Lifts have a top-down render of their own, placed like a building.
+            let sprites = app.map.sprites.as_ref();
+            if let Some(p) = c.points.first() {
+                let mut unused = Vec::new();
+                if crate::map_draw::building(&ctx2, assets, sprites, &mut batch, &mut unused, &view, &c.class, p[0], p[1], c.yaw, false) {
+                    continue;
+                }
+            }
+            crate::map_draw::carrier(&ctx2, assets, sprites, &mut batch, &painter, &view, c);
         }
     }
     std::mem::take(&mut batch).paint(&painter);
