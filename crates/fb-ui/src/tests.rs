@@ -1388,3 +1388,65 @@ fn generator_list_picks_fuels() {
     assert_eq!(app.planner_mut().power.mode, PowerMode::Grid);
     assert_eq!(app.planner_mut().power.generators.len(), 2, "the choice is kept for next time");
 }
+
+// ------------------------------------------------------- belts and shards
+
+fn plan_plates(ctx: &egui::Context, app: &mut FactoryApp, rate: f64) {
+    app.planner_mut().targets = vec![Target { item: "Desc_IronPlate_C".into(), rate }];
+    app.press_plan();
+    frames(ctx, app, 8);
+}
+
+#[test]
+fn wires_name_the_belt_they_need() {
+    let Some((ctx, mut app, _)) = harness() else { return };
+    frames(&ctx, &mut app, 2);
+    plan_plates(&ctx, &mut app, 60.0);
+    // 90 ore/min needs a Mk.2 (120); 60 plates/min fit a Mk.1 (60).
+    let texts = app.wire_label_texts.clone();
+    assert!(texts.contains(&"Mk.2".to_string()), "{texts:?}");
+    assert!(texts.contains(&"Mk.1".to_string()), "{texts:?}");
+    plan_plates(&ctx, &mut app, 3000.0);
+    // 4500 ore/min is more than one Mk.6 (1200) carries: 4 in parallel.
+    assert!(app.wire_label_texts.contains(&"4× Mk.6".to_string()), "{:?}", app.wire_label_texts);
+    app.wire_labels = false;
+    frames(&ctx, &mut app, 1);
+    assert!(app.wire_label_texts.is_empty() || !app.wire_labels);
+}
+
+#[test]
+fn somersloops_and_shards_change_output_power_and_totals() {
+    let Some((ctx, mut app, _)) = harness() else { return };
+    frames(&ctx, &mut app, 2);
+    plan_plates(&ctx, &mut app, 60.0);
+    let plates = app
+        .graph()
+        .iter_nodes()
+        .find(|id| matches!(&app.graph()[*id].user_data.kind, crate::graph::NodeKind::Recipe { recipe } if recipe == "Recipe_IronPlate_C"))
+        .unwrap();
+    let game = app.user.game.clone();
+    let constructor = &game.buildings["Build_ConstructorMk1_C"];
+    assert_eq!((constructor.sloop_slots, constructor.sloop_boost), (1, 1.0), "from the Docs");
+    assert_eq!(game.buildings["Build_SmelterMk1_C"].sloop_slots, 1, "the Smelter takes one (wiki)");
+    let out_before = crate::graph::node_rates(&game, app.graph(), plates).1[0].1;
+    let power_before = app.power();
+    let set = |app: &mut FactoryApp, name: &str, v: f64| {
+        let input = app.state.graph[plates].get_input(name).unwrap();
+        app.state.graph[input].value.set_number(v);
+    };
+    set(&mut app, crate::graph::SLOOPS, 1.0);
+    frames(&ctx, &mut app, 2);
+    let (ins, outs) = crate::graph::node_rates(&game, app.graph(), plates);
+    assert!((outs[0].1 - 2.0 * out_before).abs() < 1e-9, "one Somersloop doubles a Constructor's output");
+    assert!((ins[0].1 - 90.0).abs() < 1e-9, "inputs stay the same");
+    let machines = crate::graph::input_number(app.graph(), plates, crate::graph::MACHINES);
+    let whole = (machines - 1e-6).ceil();
+    assert_eq!(app.summary.somersloops as f64, whole);
+    // Power: x (1 + 1)^2 = 4 for those Constructors (4 MW each at 100%).
+    let added = app.power() - power_before;
+    assert!((added - whole * 4.0 * 3.0).abs() < 1e-6, "added {added} MW");
+    set(&mut app, crate::graph::CLOCK, 250.0);
+    set(&mut app, crate::graph::MACHINES, 1.0);
+    frames(&ctx, &mut app, 2);
+    assert_eq!(app.summary.power_shards, 3, "one machine at 250% takes 3 Power Shards");
+}

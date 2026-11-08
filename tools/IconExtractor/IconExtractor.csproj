@@ -13,11 +13,15 @@
     <PackageReference Include="CUE4Parse-Conversion" Version="1.2.2.202611" />
     <!-- Transitive (via IndexRange); 9.0.0 has a DoS advisory, GHSA-73j8-2gch-69rq. -->
     <PackageReference Include="Microsoft.Bcl.Memory" Version="9.0.14" />
-    <!-- SixLabors.ImageSharp stays at 3.1.12 (pinned exactly by CUE4Parse-Conversion;
-         3.2.0 needs a paid license key to build). Its advisories cover the TIFF codec,
-         ICC-profile parsing when decoding a file, and the HistogramEqualization
-         processor. CUE4Parse-Conversion only wraps decoded pixels (LoadPixelData) and
-         writes PNG (PngEncoder); it never parses an image file, so none are reachable. -->
+    <!-- SixLabors.ImageSharp is NOT shipped. CUE4Parse-Conversion depends on it
+         (3.1.12, affected by CVE-2026-106118 / GHSA-v76p-62qx-wwq2 and other TIFF/ICC
+         advisories; fixed versions need a paid license key to build), but the only
+         ImageSharp members it references are encoders and LoadPixelData, and the
+         code paths this tool uses never touch them: built without ImageSharp, an
+         extraction gives the same 765 files byte for byte. ExcludeAssets keeps the
+         assembly out of the published exe. NuGet's audit still lists the package
+         because it stays in the dependency graph. -->
+    <PackageReference Include="SixLabors.ImageSharp" Version="3.1.12" ExcludeAssets="all" />
   </ItemGroup>
 
 </Project>

@@ -160,6 +160,9 @@ pub fn menu_bar(app: &mut FactoryApp, ctx: &egui::Context) {
                         ui.close_menu();
                         app.request_arrange();
                     }
+                    ui.separator();
+                    ui.checkbox(&mut app.wire_labels, "Belt and pipe labels")
+                        .on_hover_text("Show on each wire the slowest belt or pipe that carries it.");
                 });
                 ui.menu_button("Room", |ui| {
                     ui.set_min_width(260.0);

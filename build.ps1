@@ -39,10 +39,14 @@ try {
     cargo build -p oodle-shim --release
     if ($LASTEXITCODE) { throw 'oodle-shim build failed' }
 
-    if ($Package) {
-        cargo build -p factory-builder --release
-    } else {
-        cargo build -p factory-builder --release --features dev
+    $appArgs = @('build', '-p', 'factory-builder', '--release')
+    if (-not $Package) { $appArgs += @('--features', 'dev') }
+    cargo @appArgs
+    if ($LASTEXITCODE) {
+        # Antivirus sometimes holds the freshly linked exe for a moment; a
+        # second try then succeeds. Real compile errors fail again.
+        Write-Host 'App build failed; trying once more.'
+        cargo @appArgs
     }
     if ($LASTEXITCODE) { throw 'app build failed' }
     New-Item -ItemType Directory -Force target\release\tools | Out-Null
@@ -70,6 +74,8 @@ try {
     foreach ($m in $listed) {
         $name = $m.Matches[0].Groups[1].Value
         $ver = $m.Matches[0].Groups[2].Value
+        # In the dependency graph but not shipped (see IconExtractor.csproj).
+        if ($name -eq 'SixLabors.ImageSharp') { continue }
         $spec = Get-ChildItem (Join-Path $nuget "$($name.ToLower())\$ver") -Filter *.nuspec -ErrorAction SilentlyContinue | Select-Object -First 1
         $license = 'see package'
         if ($spec) {

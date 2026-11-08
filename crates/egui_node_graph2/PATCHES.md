@@ -27,3 +27,5 @@ marked with a `FactoryBuilder:` comment.
 - Wide (multi-connection) inputs call `value_widget` like single inputs (was a bare label).
 - Title bar: `top_bar_ui` is laid out first (right to left); the title takes the rest
   and truncates with "…" (hover shows the full name).
+- `GraphResponse::wires`: each wire drawn this frame with its bezier points (the app
+  labels wires with the belt or pipe they need).

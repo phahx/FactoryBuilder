@@ -80,6 +80,23 @@ pub(crate) fn parse_extraction(by_native: &BTreeMap<&str, Vec<&Value>>, data: &m
         .collect();
     belts.sort_by(|a, b| a.per_min.total_cmp(&b.per_min));
     data.extraction.belts = belts;
+
+    // Pipelines: `mFlowLimit` is m³ per second. The "Clean" variants carry
+    // the same as the plain ones, so one entry per speed.
+    let mut pipes: Vec<Belt> = by_native
+        .get("FGBuildablePipeline")
+        .into_iter()
+        .flatten()
+        .copied()
+        .filter(|c| !str_field(c, "ClassName").contains("NoIndicator"))
+        .filter_map(|c| {
+            let flow = f64_field(c, "mFlowLimit");
+            (flow > 0.0).then(|| Belt { name: str_field(c, "mDisplayName").to_string(), per_min: flow * 60.0 })
+        })
+        .collect();
+    pipes.sort_by(|a, b| a.per_min.total_cmp(&b.per_min));
+    pipes.dedup_by(|a, b| a.per_min == b.per_min);
+    data.extraction.pipes = pipes;
 }
 
 #[cfg(test)]
@@ -129,5 +146,15 @@ mod tests {
         assert_eq!(belts.len(), 6);
         assert_eq!(belts[0].per_min, 60.0);
         assert_eq!(belts[5].per_min, 1200.0);
+        // Pipes: Mk.1 = 5 m³/s, Mk.2 = 10 m³/s.
+        let pipes: Vec<(&str, f64)> = g.extraction.pipes.iter().map(|p| (p.name.as_str(), p.per_min)).collect();
+        assert_eq!(pipes, [("Pipeline Mk.1", 300.0), ("Pipeline Mk.2", 600.0)]);
+        let c = g.extraction.carrier(false, 130.0).unwrap();
+        assert_eq!((c.kind.name.as_str(), c.lines), ("Conveyor Belt Mk.3", 1));
+        let c = g.extraction.carrier(false, 2500.0).unwrap();
+        assert_eq!((c.kind.per_min, c.lines), (1200.0, 3));
+        let c = g.extraction.carrier(true, 600.0).unwrap();
+        assert_eq!((c.kind.name.as_str(), c.lines), ("Pipeline Mk.2", 1));
+        assert!(g.extraction.carrier(true, 0.0).is_none());
     }
 }

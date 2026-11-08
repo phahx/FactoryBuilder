@@ -91,6 +91,9 @@ pub struct GraphResponse<UserResponse: UserResponseTrait, NodeData: NodeDataTrai
     pub node_rects: NodeRects,
     /// FactoryBuilder: bubble (hook) positions of every port drawn this frame.
     pub port_locations: PortLocations,
+    /// FactoryBuilder: every wire drawn this frame with its cubic bezier
+    /// points (screen space), for labels on wires.
+    pub wires: Vec<(InputId, OutputId, [Pos2; 4])>,
 }
 impl<UserResponse: UserResponseTrait, NodeData: NodeDataTrait> Default
     for GraphResponse<UserResponse, NodeData>
@@ -103,6 +106,7 @@ impl<UserResponse: UserResponseTrait, NodeData: NodeDataTrait> Default
             node_context_menu: None,
             node_rects: Default::default(),
             port_locations: Default::default(),
+            wires: Vec::new(),
         }
     }
 }
@@ -410,6 +414,7 @@ where
 
         // draw existing connections
         // FactoryBuilder: each wire starts at its own bubble on the output.
+        let mut wires = Vec::new();
         let mut wire_order: std::collections::HashMap<OutputId, Vec<InputId>> = Default::default();
         for (input, outputs) in self.graph.iter_connection_groups() {
             for (hook_n, &output) in outputs.iter().enumerate() {
@@ -423,6 +428,7 @@ where
                 let hooks = &port_locations[&AnyParameterId::Output(output)];
                 let src_pos = hooks[k.min(hooks.len() - 1)];
                 let dst_pos = conn_locations[&input][hook_n];
+                wires.push((input, output, wire_points(&self.pan_zoom, src_pos, dst_pos)));
                 draw_connection(
                     &self.pan_zoom,
                     ui.painter(),
@@ -619,6 +625,7 @@ where
             node_context_menu,
             node_rects: node_rects_for_menu,
             port_locations: port_locations.clone(),
+            wires,
         }
     }
 }
@@ -636,18 +643,20 @@ fn draw_connection(
         color,
     };
 
-    let control_scale = ((dst_pos.x - src_pos.x) * pan_zoom.zoom / 2.0).max(30.0 * pan_zoom.zoom);
-    let src_control = src_pos + Vec2::X * control_scale;
-    let dst_control = dst_pos - Vec2::X * control_scale;
-
     let bezier = CubicBezierShape::from_points_stroke(
-        [src_pos, src_control, dst_control, dst_pos],
+        wire_points(pan_zoom, src_pos, dst_pos),
         false,
         Color32::TRANSPARENT,
         connection_stroke,
     );
 
     painter.add(bezier);
+}
+
+/// FactoryBuilder: the bezier of a wire (shared by drawing and `GraphResponse::wires`).
+fn wire_points(pan_zoom: &PanZoom, src_pos: Pos2, dst_pos: Pos2) -> [Pos2; 4] {
+    let control_scale = ((dst_pos.x - src_pos.x) * pan_zoom.zoom / 2.0).max(30.0 * pan_zoom.zoom);
+    [src_pos, src_pos + Vec2::X * control_scale, dst_pos - Vec2::X * control_scale, dst_pos]
 }
 
 #[derive(Clone, Copy, Debug)]

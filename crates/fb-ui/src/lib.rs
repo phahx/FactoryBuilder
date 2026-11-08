@@ -19,6 +19,7 @@ pub mod room;
 pub mod setup;
 pub mod theme;
 pub mod widgets;
+pub mod wires;
 
 #[cfg(test)]
 mod tests;

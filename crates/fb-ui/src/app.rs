@@ -128,6 +128,12 @@ pub struct FactoryApp {
     pub(crate) startup_checked: bool,
     /// First-launch setup (or just its icons step), while open.
     pub(crate) wizard: Option<crate::setup::Wizard>,
+    /// Flow per minute on each wire (input end, output end), from the simulation.
+    pub(crate) wire_flow: std::collections::HashMap<(egui_node_graph2::InputId, egui_node_graph2::OutputId), f64>,
+    /// View > Belt and pipe labels.
+    pub(crate) wire_labels: bool,
+    #[cfg(test)]
+    pub(crate) wire_label_texts: Vec<String>,
     /// "Not now" on the icons notice, for this session.
     pub(crate) notice_dismissed: bool,
 }
@@ -211,6 +217,10 @@ impl FactoryApp {
             startup_checked: false,
             wizard: None,
             notice_dismissed: false,
+            wire_flow: Default::default(),
+            wire_labels: true,
+            #[cfg(test)]
+            wire_label_texts: Vec::new(),
         };
         app.committed = app.project_json();
         app.backend.call("status", json!({}), Msg::Status);
@@ -951,6 +961,7 @@ impl FactoryApp {
                 .collect()
         };
         let mut links = Vec::new();
+        let mut link_wires = Vec::new();
         for (input, outputs) in g.iter_connection_groups() {
             let Some(to) = g.try_get_input(input).map(|i| i.node) else {
                 continue;
@@ -969,6 +980,7 @@ impl FactoryApp {
                     to_node: index[&to],
                     to_port,
                 });
+                link_wires.push((input, output));
             }
         }
         let result = match &self.sim_cache {
@@ -980,6 +992,7 @@ impl FactoryApp {
             }
         };
 
+        self.wire_flow = link_wires.into_iter().zip(result.link_flow.iter().copied()).collect();
         self.user.ports.clear();
         self.user.nodes.clear();
         let mut connected_in = BTreeSet::new();
@@ -1472,6 +1485,9 @@ impl FactoryApp {
         }
         self.editor_rect = rect;
         self.send_cursor(ui.ctx(), rect);
+        if self.wire_labels {
+            crate::wires::paint_labels(self, ui, &resp.wires, &resp.node_rects);
+        }
         #[cfg(test)]
         {
             self.port_hooks = resp.port_locations.clone();

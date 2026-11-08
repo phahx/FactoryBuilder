@@ -288,6 +288,32 @@ pub struct ExtractionData {
     pub extractors: Vec<Extractor>,
     /// Slowest first.
     pub belts: Vec<Belt>,
+    /// Pipelines, slowest first (`per_min` in m³/min).
+    #[serde(default)]
+    pub pipes: Vec<Belt>,
+}
+
+/// What carries a wire's flow: the slowest belt (or pipe) that's fast
+/// enough, or several of the fastest.
+#[derive(Debug, Clone)]
+pub struct Carrier<'a> {
+    pub kind: &'a Belt,
+    /// Parallel lines needed (1 when one is enough).
+    pub lines: u32,
+}
+
+impl ExtractionData {
+    pub fn carrier(&self, fluid: bool, per_min: f64) -> Option<Carrier<'_>> {
+        let list = if fluid { &self.pipes } else { &self.belts };
+        if per_min <= 1e-9 {
+            return None;
+        }
+        if let Some(b) = list.iter().find(|b| b.per_min >= per_min - 1e-6) {
+            return Some(Carrier { kind: b, lines: 1 });
+        }
+        let fastest = list.last()?;
+        Some(Carrier { kind: fastest, lines: (per_min / fastest.per_min - 1e-9).ceil() as u32 })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
