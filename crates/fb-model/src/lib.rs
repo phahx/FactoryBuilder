@@ -510,6 +510,9 @@ pub struct Status {
     /// Game font + UI icon files found in `<icons_dir>/ui`.
     #[serde(default)]
     pub ui_assets_found: usize,
+    /// `<icons_dir>/map/map.json` exists (the world map was extracted).
+    #[serde(default)]
+    pub map_found: bool,
     pub projects_dir: String,
     /// The game changed since the icons were extracted.
     #[serde(default)]
