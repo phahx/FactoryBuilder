@@ -632,7 +632,10 @@ pub mod world {
         pub x: f32,
         pub y: f32,
         pub z: f32,
-        /// Facing, degrees.
+        /// Facing, degrees: rotation about world Z from the actor's quaternion
+        /// (Unreal yaw; positive turns local +X towards world +Y, which is
+        /// clockwise on the map). A sprite's local (x, y) lands at world
+        /// (x cos - y sin, x sin + y cos) + position.
         pub yaw: f32,
         /// For extractors: the resource node they sit on (`MapNode::id`).
         pub node: Option<String>,
@@ -645,6 +648,10 @@ pub mod world {
         pub fluid: bool,
         /// World X/Y points along it (spline points, or the two ends).
         pub points: Vec<[f32; 2]>,
+        /// The actor's facing, degrees (see `Machine::yaw`); what places a
+        /// lift's top-down sprite.
+        #[serde(default)]
+        pub yaw: f32,
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -660,6 +667,9 @@ pub mod world {
         pub class: String,
         pub x: f32,
         pub y: f32,
+        /// Facing, degrees (see `Machine::yaw`).
+        #[serde(default)]
+        pub yaw: f32,
     }
 
     /// Top-down renders of the game's own models, written by the icon helper

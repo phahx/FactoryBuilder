@@ -244,6 +244,81 @@ fn map_tile(state: State<AppState>, z: u32, x: u32, y: u32) -> CmdResult<Respons
     Ok(Response::new(bytes))
 }
 
+/// Largest sprites.json the app will read (the real one is about 10 KB).
+const SPRITES_JSON_MAX: u64 = 1 << 20;
+
+/// A sprite image name as the helper writes them: `[A-Za-z0-9_]+\.png`, so
+/// it can't name anything outside `<icons>/map/sprites`.
+fn valid_sprite_file(name: &str) -> bool {
+    match name.strip_suffix(".png") {
+        Some(stem) => !stem.is_empty() && stem.len() <= 128 && stem.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_'),
+        None => false,
+    }
+}
+
+/// Reads and checks `<icons>/map/sprites/sprites.json` (top-down renders of
+/// the buildings, belts and pipes).
+fn read_sprites(icons_dir: &str) -> Result<fb_model::world::Sprites, String> {
+    if icons_dir.is_empty() {
+        return Err("The map sprites are not extracted yet.".into());
+    }
+    let path = Path::new(icons_dir).join("map").join("sprites").join("sprites.json");
+    let len = std::fs::metadata(&path).map_err(|e| format!("The map sprites are not extracted yet ({e})."))?.len();
+    if len > SPRITES_JSON_MAX {
+        return Err("sprites.json is too large.".into());
+    }
+    let text = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    let s: fb_model::world::Sprites = serde_json::from_str(&text).map_err(|e| format!("sprites.json is not valid: {e}"))?;
+    let ok = |v: f32| v.is_finite() && v.abs() <= 1.0e6;
+    if !(s.cm_per_px.is_finite() && s.cm_per_px > 0.0 && s.cm_per_px <= 100.0) {
+        return Err("sprites.json has a bad resolution.".into());
+    }
+    if s.buildings.len() > 2000 || s.strips.len() > 2000 {
+        return Err("sprites.json lists too many sprites.".into());
+    }
+    for (class, b) in &s.buildings {
+        let sane = valid_sprite_file(&b.file) && [b.min_x, b.min_y, b.max_x, b.max_y].into_iter().all(ok) && b.min_x < b.max_x && b.min_y < b.max_y;
+        if !sane {
+            return Err(format!("sprites.json has a bad entry for {class}."));
+        }
+    }
+    for (class, t) in &s.strips {
+        let sane = valid_sprite_file(&t.file) && ok(t.length_cm) && ok(t.width_cm) && t.length_cm > 0.0 && t.width_cm > 0.0;
+        if !sane {
+            return Err(format!("sprites.json has a bad entry for {class}."));
+        }
+    }
+    Ok(s)
+}
+
+/// `<icons>/map/sprites/<file>`, only for a well-formed name that sprites.json lists.
+fn sprite_path(icons_dir: &Path, sprites: &fb_model::world::Sprites, file: &str) -> Result<PathBuf, String> {
+    let listed = sprites.buildings.values().any(|b| b.file == file) || sprites.strips.values().any(|t| t.file == file);
+    if !valid_sprite_file(file) || !listed {
+        return Err("bad sprite name".into());
+    }
+    Ok(icons_dir.join("map").join("sprites").join(file))
+}
+
+/// Where each building, belt and pipe sprite is and how it is placed.
+#[tauri::command]
+fn map_sprites(state: State<AppState>) -> CmdResult<fb_model::world::Sprites> {
+    state.log("map_sprites");
+    let dir = state.settings.lock().unwrap().icons_dir.clone();
+    read_sprites(&dir)
+}
+
+/// PNG bytes of one sprite listed in sprites.json, sent as raw binary.
+#[tauri::command]
+fn map_sprite(state: State<AppState>, file: String) -> CmdResult<Response> {
+    state.log("map_sprite");
+    let dir = state.settings.lock().unwrap().icons_dir.clone();
+    let sprites = read_sprites(&dir)?;
+    let path = sprite_path(Path::new(&dir), &sprites, &file)?;
+    let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+    Ok(Response::new(bytes))
+}
+
 /// A file from `<icons>/ui`: the game's Open Sans faces and UI icon PNGs.
 #[tauri::command]
 fn ui_asset(state: State<AppState>, name: String) -> CmdResult<Response> {
@@ -691,6 +766,8 @@ fn main() {
             ui_asset,
             map_info,
             map_tile,
+            map_sprites,
+            map_sprite,
             solve,
             list_projects,
             save_project,
@@ -765,5 +842,69 @@ mod map_tests {
         write("not json");
         assert!(read_map_info(&d).is_err());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn sprite_names_are_strict() {
+        for good in ["Build_ConstructorMk1_C.png", "a.png", "X_9.png"] {
+            assert!(valid_sprite_file(good), "{good}");
+        }
+        let long = format!("{}.png", "a".repeat(129));
+        for bad in ["", ".png", "a.PNG", "a.png.png", "../a.png", "..\\a.png", "a/b.png", "a\\b.png", "C:a.png", "a b.png", "a-b.png", "a.jpg", "a", "é.png", "a.png\0", long.as_str()] {
+            assert!(!valid_sprite_file(bad), "{bad:?}");
+        }
+        let mut s = fb_model::world::Sprites { cm_per_px: 4.0, ..Default::default() };
+        s.buildings.insert("Build_A_C".into(), fb_model::world::Sprite { file: "Build_A_C.png".into(), min_x: -1.0, min_y: -1.0, max_x: 1.0, max_y: 1.0 });
+        s.strips.insert("Build_B_C".into(), fb_model::world::Strip { file: "Build_B_C.png".into(), length_cm: 200.0, width_cm: 184.0 });
+        let dir = Path::new("icons");
+        assert_eq!(sprite_path(dir, &s, "Build_A_C.png").unwrap(), dir.join("map").join("sprites").join("Build_A_C.png"));
+        assert!(sprite_path(dir, &s, "Build_B_C.png").is_ok());
+        // well formed but not listed, or not well formed
+        assert!(sprite_path(dir, &s, "Build_C_C.png").is_err());
+        assert!(sprite_path(dir, &s, "sprites.png").is_err());
+        assert!(sprite_path(dir, &s, "../Build_A_C.png").is_err());
+    }
+
+    #[test]
+    fn sprites_json_is_validated() {
+        let dir = std::env::temp_dir().join(format!("fb-sprites-test-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("map").join("sprites")).unwrap();
+        let file = dir.join("map").join("sprites").join("sprites.json");
+        let write = |s: &str| std::fs::write(&file, s).unwrap();
+        let d = dir.to_string_lossy().into_owned();
+        assert!(read_sprites(&d).is_err(), "missing");
+        assert!(read_sprites("").is_err(), "no icon folder");
+        write(r#"{"cm_per_px":4.0,"buildings":{"Build_ConstructorMk1_C":{"file":"Build_ConstructorMk1_C.png","min_x":-452,"min_y":-504,"max_x":452,"max_y":472}},"strips":{"Build_ConveyorBeltMk1_C":{"file":"Build_ConveyorBeltMk1_C.png","length_cm":200,"width_cm":184}}}"#);
+        let s = read_sprites(&d).unwrap();
+        assert_eq!(s.buildings["Build_ConstructorMk1_C"].max_y, 472.0);
+        assert_eq!(s.strips["Build_ConveyorBeltMk1_C"].width_cm, 184.0);
+        for bad in [
+            r#"{"cm_per_px":0,"buildings":{},"strips":{}}"#,
+            r#"{"cm_per_px":4,"buildings":{"A":{"file":"../x.png","min_x":0,"min_y":0,"max_x":1,"max_y":1}},"strips":{}}"#,
+            r#"{"cm_per_px":4,"buildings":{"A":{"file":"A.png","min_x":1,"min_y":0,"max_x":1,"max_y":1}},"strips":{}}"#,
+            r#"{"cm_per_px":4,"buildings":{"A":{"file":"A.png","min_x":0,"min_y":0,"max_x":1e30,"max_y":1}},"strips":{}}"#,
+            r#"{"cm_per_px":4,"buildings":{},"strips":{"B":{"file":"B.png","length_cm":0,"width_cm":10}}}"#,
+            r#"{"cm_per_px":4,"buildings":{},"strips":{"B":{"file":"B.exe","length_cm":200,"width_cm":10}}}"#,
+            "not json",
+        ] {
+            write(bad);
+            assert!(read_sprites(&d).is_err(), "{bad}");
+        }
+        std::fs::write(&file, vec![b' '; (SPRITES_JSON_MAX + 1) as usize]).unwrap();
+        assert!(read_sprites(&d).unwrap_err().contains("too large"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// With FB_TEST_ICONS (an icon folder the helper extracted into): the real
+    /// sprites.json passes the checks and every image it lists is a PNG.
+    #[test]
+    fn real_sprites_are_valid() {
+        let Ok(dir) = std::env::var("FB_TEST_ICONS") else { return };
+        let s = read_sprites(&dir).unwrap();
+        assert!(!s.buildings.is_empty() && !s.strips.is_empty());
+        for file in s.buildings.values().map(|b| &b.file).chain(s.strips.values().map(|t| &t.file)) {
+            let bytes = std::fs::read(sprite_path(Path::new(&dir), &s, file).unwrap()).unwrap();
+            assert!(bytes.starts_with(b"\x89PNG"), "{file}");
+        }
     }
 }

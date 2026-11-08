@@ -170,6 +170,33 @@ fn component_payload(tags: &[Vec<u8>], complete: bool) -> Vec<u8> {
     v
 }
 
+/// `Xf::yaw` is Unreal's yaw (FQuat::Rotator): positive turns local +X towards
+/// world +Y. A building's local point (x, y) lands at world position +
+/// (x cos(yaw) - y sin(yaw), x sin(yaw) + y cos(yaw)), which is how the map
+/// places its top-down sprites. Checked against late.sav: 1185 of 1238
+/// Constructor ports (and 288 of 294 Foundry ports, which are not mirror
+/// symmetric) meet a belt end of the right direction with this formula; with
+/// -yaw, yaw+90 or a mirrored Y almost none do.
+#[test]
+fn yaw_is_unreal_yaw() {
+    for deg in [0.0f64, 30.0, 90.0, -120.0, 179.0] {
+        let h = deg.to_radians() / 2.0;
+        let xf = Xf::from_toc(&[0.0, 0.0, h.sin() as f32, h.cos() as f32, 10.0, 20.0, 0.0, 1.0, 1.0, 1.0]);
+        assert!((xf.yaw() - deg).abs() < 1e-3, "{deg}: {}", xf.yaw());
+        // The quaternion's own rotation agrees with the 2D formula above.
+        let (local_x, local_y) = (300.0, -150.0);
+        let p = xf.point([local_x, local_y, 0.0]);
+        let a = xf.yaw().to_radians();
+        let want = [10.0 + local_x * a.cos() - local_y * a.sin(), 20.0 + local_x * a.sin() + local_y * a.cos()];
+        assert!((p[0] - want[0]).abs() < 1e-2 && (p[1] - want[1]).abs() < 1e-2, "{deg}: {p:?} vs {want:?}");
+    }
+    // +90 turns local +X onto world +Y.
+    let h = 45f64.to_radians();
+    let xf = Xf::from_toc(&[0.0, 0.0, h.sin() as f32, h.cos() as f32, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0]);
+    let p = xf.vector([1.0, 0.0, 0.0]);
+    assert!(p[0].abs() < 1e-6 && (p[1] - 1.0).abs() < 1e-6, "{p:?}");
+}
+
 #[test]
 fn complete_tags_are_read() {
     let tags = vec![
@@ -605,6 +632,9 @@ fn check_factory(w: &World) {
     let mut marks: Vec<&str> = w.structures.iter().map(|s| s.class.as_str()).collect();
     marks.sort();
     assert_eq!(marks, ["Build_ConveyorAttachmentSplitter_C", "Build_PipelineJunction_Cross_C", "Build_StorageContainerMk1_C"]);
+    // Marks and carriers carry the actor's facing too (sprites are turned by it).
+    assert!(w.structures.iter().all(|s| (s.yaw - 90.0).abs() < 1e-3), "{:?}", w.structures);
+    assert!((lift.yaw - 90.0).abs() < 1e-3);
     assert_eq!(w.node_overrides, vec![NodeOverride { id: "BP_ResourceNode1".into(), resource: Some("Desc_OreIron_C".into()), purity: Some(Purity::Pure) }]);
     assert_eq!(w.skipped, 1);
     assert_eq!((w.save.session.as_str(), w.save.save_version), ("My session", 60));

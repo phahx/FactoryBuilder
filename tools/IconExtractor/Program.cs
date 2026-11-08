@@ -12,7 +12,7 @@
 // DLL with the same export. Nothing is searched for or downloaded.
 //
 // --progress prints machine-readable lines for the app's progress bar:
-//   @stage <name>          mount | icons | ui | map
+//   @stage <name>          mount | icons | ui | map | sprites
 //   @progress <done> <total>
 
 using System.Text;
@@ -179,6 +179,13 @@ if (Arg(args, "--locres") is { } locPath)
     Console.WriteLine("locres written");
     return 0;
 }
+//   --sprites-only [Class] render only the map sprites (or one class) into --out
+if (args.Contains("--sprites-only"))
+{
+    var one = Arg(args, "--sprites-only") is { } c && !c.StartsWith("--") ? c : null;
+    SpriteExport.Run(provider, SpriteExport.ListJobs(docsPath), outDir, () => { }, one);
+    return 0;
+}
 if (Arg(args, "--json") is { } jsonPath)
 {
     Directory.CreateDirectory(outDir);
@@ -193,7 +200,8 @@ if (Arg(args, "--json") is { } jsonPath)
 Directory.CreateDirectory(outDir);
 Stage("icons");
 const int UiCount = 17; // fonts + UI textures below, for one progress total
-int total = icons.Count + UiCount + MapExport.Steps, step = 0;
+var spriteJobs = SpriteExport.ListJobs(docsPath);
+int total = icons.Count + UiCount + MapExport.Steps + spriteJobs.Count, step = 0;
 Progress(0, total);
 var cache = new Dictionary<string, byte[]?>(StringComparer.OrdinalIgnoreCase);
 var manifest = new SortedDictionary<string, string>(StringComparer.Ordinal);
@@ -284,5 +292,15 @@ try
     mapOk = true;
 }
 catch (Exception e) { Console.Error.WriteLine($"  map: {e.GetType().Name}: {e.Message}"); }
+
+// 6. Top-down renders of the buildings, belts and pipes for the map. Optional:
+//    without them the map falls back to icons, so a failure here doesn't fail
+//    the extraction (it is reported on stderr).
+Stage("sprites");
+try
+{
+    SpriteExport.Run(provider, spriteJobs, outDir, () => Progress(++step, total));
+}
+catch (Exception e) { Console.Error.WriteLine($"  sprites: {e.GetType().Name}: {e.Message}"); }
 Progress(total, total);
 return ok > 0 && mapOk ? 0 : 1;
