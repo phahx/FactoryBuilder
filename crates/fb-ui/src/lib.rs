@@ -10,6 +10,7 @@ pub mod finder;
 pub mod fmt;
 pub mod graph;
 pub mod menu;
+pub mod overview_extra;
 pub mod panels;
 pub mod portable;
 pub mod progress_ui;

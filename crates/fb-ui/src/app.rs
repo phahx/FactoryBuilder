@@ -30,6 +30,9 @@ pub struct Planner {
     pub objective: Objective,
     pub enabled: BTreeSet<String>,
     pub limits: BTreeMap<String, f64>,
+    /// Overview extractor choices (miner tier, purity, clock speed).
+    #[serde(default)]
+    pub extraction: crate::overview_extra::ExtractionSettings,
     #[serde(skip)]
     pub recipe_filter: String,
 }

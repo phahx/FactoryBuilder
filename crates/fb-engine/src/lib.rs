@@ -6,7 +6,11 @@
 //! only `layout` and `sim`.
 
 #[cfg(feature = "solver")]
+pub mod build_cost;
+#[cfg(feature = "solver")]
 pub mod docs;
+#[cfg(feature = "solver")]
+pub mod extraction;
 pub mod layout;
 pub mod progress;
 #[cfg(feature = "solver")]

@@ -1135,3 +1135,84 @@ fn developer_settings_only_in_development_builds() {
         }
     }
 }
+
+// ---------------------------------------------------- extraction and build cost
+
+#[test]
+fn overview_extraction_and_build_cost() {
+    use crate::overview_extra::*;
+    let Some((ctx, mut app, _)) = harness() else { return };
+    frames(&ctx, &mut app, 2);
+    plan_hmf(&ctx, &mut app);
+    let game = app.user.game.clone();
+    let res = app.summary.resources.clone();
+    let iron = *res.get("Desc_OreIron_C").expect("the plan mines iron");
+    assert!(iron > 0.0);
+
+    // Default: Miner Mk.1 on Normal nodes at 100% = 60 per min each.
+    let s = app.planner.extraction.clone();
+    assert_eq!(s, ExtractionSettings::default());
+    let p = plan_resource(&game, "Desc_OreIron_C", iron, &s).unwrap();
+    assert_eq!((p.class.as_str(), p.per_each), ("Build_MinerMk1_C", 60.0));
+    assert_eq!(p.count, (iron / 60.0 - 1e-6).ceil() as u64);
+    assert!(plan_text(&p, true).contains("Miner Mk.1 on Normal nodes at 100%"));
+
+    // Mk.3, Pure, 250%: 240 * 2 * 2.5 = 1200 per min each; 3 shards each.
+    let fast = ExtractionSettings { miner: "Build_MinerMk3_C".into(), purity: Purity::Pure, clock_pct: 250.0 };
+    let q = plan_resource(&game, "Desc_OreIron_C", iron, &fast).unwrap();
+    assert_eq!(q.per_each, 1200.0);
+    assert_eq!(q.shards_total, q.count * 3);
+    assert_eq!(q.belt, BeltNote::Fits("Conveyor Belt Mk.6".into()));
+    assert_eq!(shards_per_machine(1.0), 0);
+    assert_eq!(shards_per_machine(1.01), 1);
+    assert_eq!(shards_per_machine(2.0), 2);
+    assert_eq!(shards_per_machine(2.5), 3);
+
+    // Fluids use their own extractors.
+    let water = plan_resource(&game, "Desc_Water_C", 250.0, &s).unwrap();
+    assert_eq!((water.class.as_str(), water.count, water.purity), ("Build_WaterPump_C", 3, None));
+    let oil = plan_resource(&game, "Desc_LiquidOil_C", 250.0, &s).unwrap();
+    assert_eq!((oil.class.as_str(), oil.count), ("Build_OilPump_C", 3));
+    let n2 = plan_resource(&game, "Desc_NitrogenGas_C", 250.0, &s).unwrap();
+    assert_eq!((n2.class.as_str(), n2.count), ("Build_FrackingExtractor_C", 5));
+
+    // Build cost: machines (whole) plus extractors, from the Docs recipes.
+    let plans = plan_all(&game, &res, &s);
+    let totals = build_cost_totals(&game, &app.summary.buildings, &plans);
+    assert!(!app.summary.buildings.is_empty() && !totals.is_empty());
+    let mut expect: std::collections::BTreeMap<String, f64> = Default::default();
+    let mut machines: Vec<(String, f64)> = app.summary.buildings.iter().map(|(b, (w, _))| (b.clone(), *w)).collect();
+    machines.extend(plans.iter().map(|p| (p.class.clone(), p.count as f64)));
+    for (b, n) in machines {
+        for a in &game.build_costs[&b] {
+            *expect.entry(a.item.clone()).or_default() += a.amount * n;
+        }
+    }
+    assert_eq!(totals, expect);
+    // One Constructor costs 2 Reinforced Iron Plate + 8 Cable.
+    let only = std::collections::BTreeMap::from([("Build_ConstructorMk1_C".to_string(), (3.0, 2.2))]);
+    let t = build_cost_totals(&game, &only, &[]);
+    assert_eq!(t["Desc_IronPlateReinforced_C"], 6.0);
+    assert_eq!(t["Desc_Cable_C"], 24.0);
+
+    // The sections render (closed and with settings changed) without panics.
+    frames(&ctx, &mut app, 2);
+    app.planner_mut().extraction = fast;
+    frames(&ctx, &mut app, 2);
+}
+
+#[test]
+fn extraction_settings_save_with_the_project_and_old_files_load() {
+    let Some((ctx, mut app, _)) = harness() else { return };
+    frames(&ctx, &mut app, 2);
+    app.planner_mut().extraction.clock_pct = 150.0;
+    app.planner_mut().extraction.purity = Purity::Pure;
+    let json = serde_json::to_string(&app.planner).unwrap();
+    let back: crate::app::Planner = serde_json::from_str(&json).unwrap();
+    assert_eq!(back.extraction, app.planner.extraction);
+    // A planner saved before this feature has no "extraction" key.
+    let mut v: Value = serde_json::from_str(&json).unwrap();
+    v.as_object_mut().unwrap().remove("extraction");
+    let old: crate::app::Planner = serde_json::from_value(v).unwrap();
+    assert_eq!(old.extraction, crate::overview_extra::ExtractionSettings::default());
+}
