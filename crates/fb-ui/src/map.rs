@@ -213,6 +213,7 @@ pub fn map_ui(app: &mut FactoryApp, ui: &mut egui::Ui) {
     // Toolbar: session, what's shown, and the import action.
     let mut pick: Option<String> = None;
     let mut import = false;
+    let mut whole = false;
     let mut clear = false;
     let mut extract = false;
     let mut layers_changed = false;
@@ -232,22 +233,21 @@ pub fn map_ui(app: &mut FactoryApp, ui: &mut egui::Ui) {
             }
         });
         // What's drawn over the map.
-        if let Some(assets) = app.user.assets.as_mut() {
-            ui.add_space(16.0);
+        ui.add_space(8.0);
+        egui::ComboBox::from_id_salt("map_layers").selected_text("Layers").width(110.0).show_ui(ui, |ui| {
             let mut power = !app.map.hide_power;
             let tip = "Power lines, what each one carries, and their circuits' figures.";
-            if widgets::checkbox(ui, assets, &mut power, "Power").on_hover_text(tip).clicked() {
+            if ui.checkbox(&mut power, "Power").on_hover_text(tip).changed() {
                 app.map.hide_power = !power;
                 layers_changed = true;
             }
-            ui.add_space(12.0);
             let mut flow = !app.map.hide_flow;
             let tip = "Arrows along belts showing the way items move (when zoomed in).";
-            if widgets::checkbox(ui, assets, &mut flow, "Belt direction").on_hover_text(tip).clicked() {
+            if ui.checkbox(&mut flow, "Belt direction").on_hover_text(tip).changed() {
                 app.map.hide_flow = !flow;
                 layers_changed = true;
             }
-        }
+        });
         let status = if app.map.loading.is_some() {
             "Reading the save…".to_string()
         } else if let Some(e) = &app.map.world_error {
@@ -265,9 +265,10 @@ pub fn map_ui(app: &mut FactoryApp, ui: &mut egui::Ui) {
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             let n = app.map.selected.len();
             import = widgets::button_enabled(ui, "Import into planner", n > 0).on_hover_text("Adds the selected machines to the project as a new factory, one node per recipe.").clicked();
+            let tip = "A new project of every factory in the save, linked on the master graph by the belts and pipes between them.";
+            whole = widgets::button_enabled(ui, "Make project from save…", app.map.world.is_some()).on_hover_text(tip).clicked();
             if n > 0 {
-                clear = widgets::button(ui, "Clear selection").clicked();
-                ui.label(RichText::new(format!("{n} selected")).color(TEXT));
+                clear = widgets::button(ui, &format!("Clear selection ({n})")).clicked();
             } else if app.map.world.is_some() {
                 ui.label(RichText::new("Drag on the map to select machines").small().color(TEXT_DIM));
             }
@@ -288,6 +289,9 @@ pub fn map_ui(app: &mut FactoryApp, ui: &mut egui::Ui) {
     }
     if import {
         app.import_selection(&ctx);
+    }
+    if whole {
+        app.dialog = crate::dialogs::Dialog::WorldProject(crate::dialogs::WorldProject { gap_m: 50.0, preview: None });
     }
 
     let rect = ui.available_rect_before_wrap();

@@ -565,6 +565,8 @@ impl FactoryApp {
             docs.insert(0, Doc { id: MASTER, name: "Project".into(), body: Some(Box::new(DocBody::new(Planner::default()))), info: None });
         }
         let active = if docs.iter().any(|d| d.id == active) { active } else { MASTER };
+        // A different project: Find was searching the old one.
+        self.find = None;
         let body = docs.iter_mut().find(|d| d.id == active).and_then(|d| d.body.take()).map(|b| *b).unwrap_or_else(|| DocBody::new(Planner::default()));
         self.docs = docs;
         self.tabs = tabs.into_iter().filter(|t| *t != MASTER && self.docs.iter().any(|d| d.id == *t)).collect();

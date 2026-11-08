@@ -4,11 +4,15 @@
 //! nodes, flows from outside the selection become inputs, and products that
 //! leave it become outputs. The result is a normal factory file, so the
 //! existing import (beside the current graph, undoable) does the rest.
+//!
+//! "Make project from save" does that for every group of machines on the
+//! map at once: each is a factory, linked on the master graph by the belts
+//! and pipes between them.
 
-use crate::portable::{FactoryFile, Kind, Node, Wire};
+use crate::portable::{FactoryFile, Kind, Link, Node, ProjectFactory, ProjectFile, Wire};
 use fb_model::world::{MapInfo, Machine, World};
 use fb_model::{GameData, Purity};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 /// What came out of an import, for the message to the user.
 #[derive(Debug, Default, Clone, PartialEq)]
@@ -48,6 +52,13 @@ fn extractor_rate(game: &GameData, map: Option<&MapInfo>, world: &World, m: &Mac
 }
 
 pub fn import(world: &World, selected: &BTreeSet<u32>, game: &GameData, map: Option<&MapInfo>) -> (FactoryFile, ImportReport) {
+    import_with(world, selected, game, map, false)
+}
+
+/// `from_factories`: what comes in from outside the selection comes from
+/// another factory (an input), even raw resources (otherwise those are
+/// resource nodes, mined for this factory).
+fn import_with(world: &World, selected: &BTreeSet<u32>, game: &GameData, map: Option<&MapInfo>, from_factories: bool) -> (FactoryFile, ImportReport) {
     let mut report = ImportReport::default();
     let mut groups: BTreeMap<Group, Vec<&Machine>> = BTreeMap::new();
     let mut group_of: BTreeMap<u32, Group> = BTreeMap::new();
@@ -162,7 +173,7 @@ pub fn import(world: &World, selected: &BTreeSet<u32>, game: &GameData, map: Opt
     let mut extra: Vec<(Node, Option<(usize, usize, bool)>)> = Vec::new();
     for (g, item) in &from_outside {
         if let Some(i) = in_port(g, item) {
-            let kind = if game.items.get(item).is_some_and(|it| it.raw) { Kind::Resource } else { Kind::Input };
+            let kind = if !from_factories && game.items.get(item).is_some_and(|it| it.raw) { Kind::Resource } else { Kind::Input };
             let r = rate(g, item, true);
             extra.push((Node { kind, class: item.clone(), machines: None, clock: None, sloops: None, rate: Some((r * 1000.0).round() / 1000.0), name: None, color: None, x: 0.0, y: 0.0 }, Some((index[g], i, true))));
         }
@@ -204,4 +215,267 @@ pub fn import(world: &World, selected: &BTreeSet<u32>, game: &GameData, map: Opt
     }
     report.nodes = f.nodes.len();
     (f, report)
+}
+
+// ------------------------------------------------- a project from a save
+
+/// Groups of machines (ids) that stand together: each machine is within
+/// `gap_cm` of another in its group. Found on a grid, so it stays quick on
+/// big saves. Groups are in order of their first machine.
+pub fn sites(world: &World, gap_cm: f32) -> Vec<Vec<u32>> {
+    fn find(p: &mut [usize], mut x: usize) -> usize {
+        while p[x] != x {
+            p[x] = p[p[x]];
+            x = p[x];
+        }
+        x
+    }
+    let gap = gap_cm.max(1.0);
+    let ms = &world.machines;
+    let mut parent: Vec<usize> = (0..ms.len()).collect();
+    let cell = |v: f32| (v / gap).floor() as i64;
+    let mut grid: HashMap<(i64, i64), Vec<usize>> = HashMap::new();
+    for (i, m) in ms.iter().enumerate() {
+        grid.entry((cell(m.x), cell(m.y))).or_default().push(i);
+    }
+    for (i, m) in ms.iter().enumerate() {
+        let (cx, cy) = (cell(m.x), cell(m.y));
+        for dx in -1..=1 {
+            for dy in -1..=1 {
+                for &j in grid.get(&(cx + dx, cy + dy)).into_iter().flatten() {
+                    if j > i && (m.x - ms[j].x).hypot(m.y - ms[j].y) < gap {
+                        let (a, b) = (find(&mut parent, i), find(&mut parent, j));
+                        parent[a] = b;
+                    }
+                }
+            }
+        }
+    }
+    let mut groups: BTreeMap<usize, Vec<u32>> = BTreeMap::new();
+    let mut first: HashMap<usize, usize> = HashMap::new();
+    for i in 0..ms.len() {
+        let root = find(&mut parent, i);
+        let key = *first.entry(root).or_insert(i);
+        groups.entry(key).or_default().push(ms[i].id);
+    }
+    groups.into_values().collect()
+}
+
+/// What came out of making a project from a save.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct WorldReport {
+    pub factories: usize,
+    /// Links between factories on the master graph.
+    pub links: usize,
+    /// Machines brought in.
+    pub machines: usize,
+    /// Machines that couldn't be (no recipe set, generators...).
+    pub left_out: usize,
+}
+
+
+/// A project of the whole save: every group of machines standing within
+/// `gap_cm` of each other is a factory (as Import into planner makes it),
+/// and the belts and pipes running between groups are links on the master
+/// graph. Blocks sit where the factories are on the map.
+pub fn world_project(world: &World, game: &GameData, map: Option<&MapInfo>, gap_cm: f32) -> (ProjectFile, WorldReport) {
+    let mut report = WorldReport::default();
+    let mut p = ProjectFile::new(Some(world.save.name.clone()));
+    let mut factory_of: HashMap<u32, u32> = HashMap::new();
+    let mut names: BTreeMap<String, usize> = BTreeMap::new();
+    // Each block: where the factory is (world cm) and the block's size.
+    let mut boxes: Vec<(f32, f32, f32, f32)> = Vec::new();
+    for site in sites(world, gap_cm) {
+        let set: BTreeSet<u32> = site.iter().copied().collect();
+        let (mut f, r) = import_with(world, &set, game, map, true);
+        report.left_out += r.left_out;
+        if r.machines == 0 {
+            continue;
+        }
+        report.machines += r.machines;
+        let id = p.factories.len() as u32 + 1;
+        for m in &site {
+            factory_of.insert(*m, id);
+        }
+        let base = site_name(game, &f);
+        let n = names.entry(base.clone()).or_default();
+        *n += 1;
+        f.name = Some(if *n == 1 { base } else { format!("{base} {n}") });
+        let ms: Vec<&Machine> = site.iter().filter_map(|m| world.machines.get(*m as usize)).collect();
+        let cx = ms.iter().map(|m| m.x).sum::<f32>() / ms.len() as f32;
+        let cy = ms.iter().map(|m| m.y).sum::<f32>() / ms.len() as f32;
+        let ports = f.nodes.iter().filter(|n| n.kind == Kind::Input).count().max(f.nodes.iter().filter(|n| n.kind == Kind::Output).count());
+        boxes.push((cx, cy, 320.0, 130.0 + 34.0 * ports as f32));
+        p.factories.push(ProjectFactory { id, x: 0.0, y: 0.0, color: None, factory: f });
+    }
+    for (f, (x, y)) in p.factories.iter_mut().zip(grid(&boxes)) {
+        (f.x, f.y) = (x, y);
+    }
+
+    // Links: an item belted or piped from one factory to another, when the
+    // first sends it out and the second takes it in.
+    let has = |id: u32, kind: Kind, item: &str| p.factories[id as usize - 1].factory.nodes.iter().any(|n| n.kind == kind && n.class == item);
+    let mut pairs: BTreeSet<(u32, u32, String)> = BTreeSet::new();
+    for l in &world.links {
+        let (Some(item), Some(&a), Some(&b)) = (&l.item, factory_of.get(&l.from), factory_of.get(&l.to)) else { continue };
+        if a != b && has(a, Kind::Output, item) && has(b, Kind::Input, item) {
+            pairs.insert((a, b, item.clone()));
+        }
+    }
+    let mut slots: BTreeMap<(u32, String), usize> = BTreeMap::new();
+    for (from, to, item) in pairs {
+        let slot = slots.entry((from, item.clone())).or_default();
+        p.links.push(Link { from, to, item, slot: *slot });
+        *slot += 1;
+    }
+    report.factories = p.factories.len();
+    report.links = p.links.len();
+    (p, report)
+}
+
+/// A factory's name: the most advanced thing it makes (by sink points;
+/// fluids have none, so then what most machines make). Power plants are
+/// named for their generators, and sites with only miners and pumps are
+/// "<resource> extraction".
+fn site_name(game: &GameData, f: &FactoryFile) -> String {
+    let points = |c: &str| game.items.get(c).map(|i| i.sink_points).unwrap_or(0);
+    let recipes: Vec<(&fb_model::Recipe, f64)> =
+        f.nodes.iter().filter(|n| n.kind == Kind::Recipe).filter_map(|n| game.recipes.get(&n.class).map(|r| (r, n.machines.unwrap_or(0.0)))).collect();
+    let made = recipes
+        .iter()
+        .filter(|(r, _)| !r.is_generator())
+        .flat_map(|(r, machines)| r.products.iter().map(move |a| (a.item.as_str(), *machines)))
+        .max_by(|a, b| points(a.0).cmp(&points(b.0)).then(a.1.total_cmp(&b.1)));
+    if let Some((item, _)) = made {
+        return game.item_name(item).to_string();
+    }
+    let power = recipes.iter().filter(|(r, _)| r.is_generator()).max_by(|a, b| a.1.total_cmp(&b.1));
+    if let Some(b) = power.and_then(|(r, _)| game.buildings.get(&r.building)) {
+        let count: f64 = recipes.iter().filter(|(r, _)| r.building == b.class).map(|x| x.1).sum();
+        return if count > 1.0 { format!("{}s", b.name) } else { b.name.clone() };
+    }
+    let rate = |n: &Node| n.rate.unwrap_or(0.0);
+    match f.nodes.iter().filter(|n| matches!(n.kind, Kind::Resource | Kind::Output)).max_by(|a, b| rate(a).total_cmp(&rate(b))) {
+        Some(n) => format!("{} extraction", game.item_name(&n.class)),
+        None => "Factory".into(),
+    }
+}
+
+/// Places blocks (world x, y, block width, height) in a compact grid that
+/// keeps the map's order: rows from north to south, each from west to east.
+/// The whole world fits on screen; neighbours on the map stay near.
+/// Returns each block's top-left corner (graph units).
+fn grid(boxes: &[(f32, f32, f32, f32)]) -> Vec<(f32, f32)> {
+    const GAP: f32 = 70.0;
+    let cols = (boxes.len() as f32).sqrt().ceil().max(1.0) as usize;
+    let mut order: Vec<usize> = (0..boxes.len()).collect();
+    order.sort_by(|a, b| boxes[*a].1.total_cmp(&boxes[*b].1));
+    let mut out = vec![(0.0, 0.0); boxes.len()];
+    let mut top = 0.0;
+    for row in order.chunks_mut(cols) {
+        row.sort_by(|a, b| boxes[*a].0.total_cmp(&boxes[*b].0));
+        let mut left = 0.0;
+        for &i in row.iter() {
+            out[i] = (left, top);
+            left += boxes[i].2 + GAP;
+        }
+        top += row.iter().map(|i| boxes[*i].3).fold(0.0, f32::max) + GAP;
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fb_model::world::{Link as WLink, Machine};
+
+    fn machine(id: u32, x: f32, recipe: &str) -> Machine {
+        Machine { id, class: "Build_ConstructorMk1_C".into(), recipe: Some(recipe.into()), clock: 1.0, boost: 1.0, x, y: 0.0, z: 0.0, yaw: 0.0, node: None }
+    }
+
+    #[test]
+    fn machines_standing_together_are_one_site() {
+        let mut w = World::default();
+        // 0-1-2 chained 30 m apart, 3 far away.
+        w.machines = vec![machine(0, 0.0, "a"), machine(1, 3000.0, "a"), machine(2, 6000.0, "a"), machine(3, 50_000.0, "a")];
+        assert_eq!(sites(&w, 5000.0), vec![vec![0, 1, 2], vec![3]]);
+        assert_eq!(sites(&w, 2000.0), vec![vec![0], vec![1], vec![2], vec![3]]);
+    }
+
+    #[test]
+    fn blocks_keep_the_maps_order() {
+        // Four factories: two in the north (west, east), two in the south.
+        let b = [(900.0, 10.0, 300.0, 200.0), (-500.0, 0.0, 300.0, 150.0), (100.0, 5000.0, 300.0, 200.0), (-900.0, 4000.0, 300.0, 200.0)];
+        let at = grid(&b);
+        assert_eq!(at, vec![(370.0, 0.0), (0.0, 0.0), (370.0, 270.0), (0.0, 270.0)]);
+    }
+
+    #[test]
+    fn belts_between_sites_are_links() {
+        let mut game = GameData::default();
+        let item = |c: &str| fb_model::Item { class: c.into(), name: c.into(), description: String::new(), form: fb_model::Form::Solid, sink_points: 1, raw: false, color: [0; 4] };
+        for c in ["Ingot", "Plate"] {
+            game.items.insert(c.into(), item(c));
+        }
+        let recipe = |c: &str, i: Vec<&str>, o: &str| fb_model::Recipe {
+            class: c.into(),
+            name: c.into(),
+            alternate: false,
+            duration_s: 6.0,
+            ingredients: i.into_iter().map(|x| fb_model::Amount { item: x.into(), amount: 1.0 }).collect(),
+            products: vec![fb_model::Amount { item: o.into(), amount: 1.0 }],
+            building: "Build_ConstructorMk1_C".into(),
+            variable_power_mw: None,
+            generates_mw: 0.0,
+        };
+        game.recipes.insert("MakeIngot".into(), recipe("MakeIngot", vec![], "Ingot"));
+        game.recipes.insert("MakePlate".into(), recipe("MakePlate", vec!["Ingot"], "Plate"));
+        let mut w = World::default();
+        w.machines = vec![machine(0, 0.0, "MakeIngot"), machine(1, 100_000.0, "MakePlate")];
+        w.links = vec![WLink { from: 0, to: 1, item: Some("Ingot".into()) }];
+        let (p, r) = world_project(&w, &game, None, 5000.0);
+        assert_eq!((r.factories, r.links, r.machines), (2, 1, 2));
+        let names: Vec<_> = p.factories.iter().map(|f| f.factory.name.clone().unwrap()).collect();
+        assert_eq!(names, ["Ingot", "Plate"], "named for what they make");
+        assert_eq!(p.links, vec![Link { from: 1, to: 2, item: "Ingot".into(), slot: 0 }]);
+        // The plate factory's ingots come from another factory: an input,
+        // not a resource.
+        assert!(p.factories[1].factory.nodes.iter().any(|n| n.kind == Kind::Input && n.class == "Ingot"));
+        assert!(p.factories[0].x < p.factories[1].x, "blocks sit the way the factories do");
+    }
+
+    /// The late-game save (FB_TEST_SAVES), with the extracted map's resource
+    /// nodes when FB_TEST_MAP points at a map.json.
+    #[test]
+    fn real_save_project() {
+        let Ok(dir) = std::env::var("FB_TEST_SAVES") else { return };
+        let game_dir = std::env::var("SATISFACTORY_DIR").unwrap_or_else(|_| r"C:\Program Files (x86)\Steam\steamapps\common\Satisfactory".into());
+        let Ok(game) = fb_engine::docs::load_game_data(std::path::Path::new(&game_dir)) else { return };
+        let Ok(bytes) = std::fs::read(std::path::Path::new(&dir).join("late.sav")) else { return };
+        let mut w = fb_engine::world::read_world(&bytes, &game).unwrap();
+        let map: Option<MapInfo> = std::env::var("FB_TEST_MAP").ok().and_then(|p| std::fs::read_to_string(p).ok()).and_then(|t| serde_json::from_str(&t).ok());
+        if let Some(m) = &map {
+            fb_engine::world::apply_map(&mut w, m, &game);
+        }
+        let (p, r) = world_project(&w, &game, map.as_ref(), 5000.0);
+        eprintln!("{r:?} (map: {})", map.is_some());
+        for f in p.factories.iter().take(60) {
+            let kinds = |k: Kind| f.factory.nodes.iter().filter(|n| n.kind == k).count();
+            eprintln!("  {:>3} {:<32} at ({:>7.0}, {:>7.0}) recipes {:>2} in {:>2} out {:>2}", f.id, f.factory.name.clone().unwrap_or_default(), f.x, f.y, kinds(Kind::Recipe), kinds(Kind::Input), kinds(Kind::Output));
+        }
+        let mut out: BTreeMap<String, (usize, usize)> = BTreeMap::new();
+        for m in &w.machines {
+            let planned = m.recipe.as_ref().is_some_and(|r| game.recipes.contains_key(r));
+            if !planned && extractor_rate(&game, map.as_ref(), &w, m).is_none() {
+                let e = out.entry(m.class.clone()).or_default();
+                e.0 += 1;
+                e.1 += m.recipe.is_some() as usize;
+            }
+        }
+        eprintln!("left out (class: count, with a recipe set): {out:?}");
+        assert!(r.factories > 10 && r.links > 10, "{r:?}");
+        assert_eq!(p.valid_links().count(), p.links.len());
+        let names: BTreeSet<_> = p.factories.iter().map(|f| f.factory.name.clone()).collect();
+        assert_eq!(names.len(), p.factories.len(), "names are unique");
+    }
 }

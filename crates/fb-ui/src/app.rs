@@ -468,6 +468,7 @@ impl FactoryApp {
             Pending::OpenProject(p) => {
                 let ctx = self.backend_ctx();
                 self.open_project(&ctx, *p, None);
+                self.view = crate::map::View::Graph;
             }
         }
     }
@@ -1268,6 +1269,19 @@ impl FactoryApp {
                 // Import the zoomed-in selection and show the result.
                 "map_import" => {
                     self.import_selection(_ctx);
+                }
+                // Make project from save: the dialog, then the project.
+                "world_dialog" => {
+                    self.view = crate::map::View::Map;
+                    self.dialog = Dialog::WorldProject(crate::dialogs::WorldProject { gap_m: 50.0, preview: None });
+                }
+                "world_project" => {
+                    self.dialog = Dialog::None;
+                    if let Some(w) = self.map.world.clone() {
+                        let (p, _) = crate::map_import::world_project(&w, &self.user.game, self.map.info.as_ref(), 5000.0);
+                        self.dirty = false;
+                        self.run_pending(Pending::OpenProject(Box::new(p)));
+                    }
                 }
                 // The first factory with two comment frames, Find open and the minimap.
                 "frames" => {

@@ -52,6 +52,16 @@ pub enum Dialog {
     RoomInfo,
     /// Pick a save to use the recipes it has unlocked.
     Saves(crate::progress_ui::SavesDialog),
+    /// Make a project of every factory in the save on the Map tab.
+    WorldProject(WorldProject),
+}
+
+/// The Make project from save dialog: how close machines stand to be one
+/// factory, and what that makes (worked out again when it changes).
+#[derive(Debug, Clone, PartialEq)]
+pub struct WorldProject {
+    pub gap_m: f64,
+    pub preview: Option<(f64, crate::map_import::WorldReport)>,
 }
 
 impl Dialog {
@@ -252,6 +262,56 @@ pub fn show(app: &mut FactoryApp, ctx: &egui::Context) {
                     app.delete_factories(&ids);
                 }
                 _ => {}
+            }
+        }
+        Dialog::WorldProject(mut d) => {
+            let Some(world) = app.map.world.clone() else {
+                app.dialog = Dialog::None;
+                return;
+            };
+            let game = app.user.game.clone();
+            let map = app.map.info.clone();
+            let make = |gap_m: f64| crate::map_import::world_project(&world, &game, map.as_ref(), (gap_m * 100.0) as f32);
+            if d.preview.as_ref().is_none_or(|p| p.0 != d.gap_m) {
+                d.preview = Some((d.gap_m, make(d.gap_m).1));
+            }
+            let r = d.preview.clone().map(|p| p.1).unwrap_or_default();
+            let clicked = modal(
+                ctx,
+                "Make a project from this save",
+                520.0,
+                |ui| {
+                    ui.label(RichText::new("Every group of machines becomes a factory, like Import into planner makes it. Belts and pipes running from one group to another become links on the master graph. Trains, trucks and drones aren't followed.").color(TEXT_DIM));
+                    ui.add_space(12.0);
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("Machines within").color(TEXT));
+                        let mut v = d.gap_m;
+                        if widgets::num_field(ui, egui::Id::new("world_gap"), &mut v, 64.0) {
+                            d.gap_m = v.clamp(5.0, 2000.0);
+                        }
+                        ui.label(RichText::new("m of each other are one factory").color(TEXT));
+                    });
+                    ui.add_space(12.0);
+                    let text = format!(
+                        "{} factories · {} links between them · {} machines",
+                        r.factories, r.links, r.machines
+                    );
+                    ui.label(RichText::new(text).color(TEXT));
+                    if r.left_out > 0 {
+                        ui.label(RichText::new(format!("{} machines left out: ones with no recipe set, generators with no fuel in them, and geothermal generators.", r.left_out)).small().color(TEXT_DIM));
+                    }
+                    ui.label(RichText::new("It opens as a new project; the one open now is closed (you're asked to save it first).").small().color(TEXT_DIM));
+                },
+                &[("Cancel", true), ("Make project", r.factories > 0)],
+            );
+            match clicked {
+                Some(0) => app.dialog = Dialog::None,
+                Some(1) => {
+                    app.dialog = Dialog::None;
+                    let (p, _) = make(d.gap_m);
+                    app.guard(Pending::OpenProject(Box::new(p)));
+                }
+                _ => app.dialog = Dialog::WorldProject(d),
             }
         }
         Dialog::RenameFactory { id, mut name } => {
