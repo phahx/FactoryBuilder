@@ -273,6 +273,7 @@ pub fn parse_docs(root: &Value) -> Result<GameData, DocsError> {
                 // Power ramps linearly from `constant` to `constant + factor`
                 // over each cycle, so the average is the midpoint.
                 variable_power_mw: variable.then_some(constant + factor / 2.0),
+                generates_mw: 0.0,
             },
         );
     }
@@ -282,6 +283,7 @@ pub fn parse_docs(root: &Value) -> Result<GameData, DocsError> {
             data.resource_limits.insert(item.to_string(), *limit);
         }
     }
+    crate::power::add_generators(root, &mut data);
 
     crate::schematics::parse(&classes_of("FGSchematic"), &classes_of("FGRecipe"), &mut data);
     crate::extraction::parse_extraction(&by_native, &mut data);

@@ -61,7 +61,9 @@ mod tests {
     fn every_production_recipe_has_an_unlock() {
         let Some(g) = game() else { return };
         let unlocked: BTreeSet<&String> = g.schematics.values().flat_map(|s| s.recipes.iter()).collect();
-        let missing: Vec<&String> = g.recipes.keys().filter(|r| !unlocked.contains(r)).collect();
+        // Generator recipes are made up from the generators (power.rs); the
+        // Power section picks those, not the recipe list.
+        let missing: Vec<&String> = g.recipes.values().filter(|r| !r.is_generator() && !unlocked.contains(&r.class)).map(|r| &r.class).collect();
         assert!(missing.is_empty(), "{missing:?}");
         let s = &g.schematics["Schematic_Alternate_Screw_C"];
         assert_eq!(s.kind, SchematicKind::Alternate);

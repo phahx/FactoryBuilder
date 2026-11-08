@@ -229,6 +229,7 @@ pub fn planner(app: &mut FactoryApp, ui: &mut Ui) {
                     ),
                 ],
             );
+            changed |= crate::power_ui::power_section(ui, assets, &game, &mut planner.power);
             ui.add_space(6.0);
             let label = if *solving {
                 "Planning…"
@@ -292,7 +293,7 @@ fn recipes(
     let std_off = game
         .recipes
         .values()
-        .filter(|r| !r.alternate && !planner.enabled.contains(&r.class))
+        .filter(|r| !r.alternate && !r.is_generator() && !planner.enabled.contains(&r.class))
         .count();
     let summary = match (on, std_off) {
         (0, 0) => "Standard recipes only".to_string(),
@@ -329,6 +330,7 @@ fn recipes(
         let mut list: Vec<&Recipe> = game
             .recipes
             .values()
+            .filter(|r| !r.is_generator())
             .filter(|r| filter.is_empty() || r.name.to_lowercase().contains(&filter))
             .collect();
         list.sort_by(|a, b| b.alternate.cmp(&a.alternate).then(a.name.cmp(&b.name)));
@@ -482,15 +484,7 @@ pub fn overview(app: &mut FactoryApp, ui: &mut Ui) {
                 );
                 return;
             }
-            ui.horizontal(|ui| {
-                assets.ui(ui, UiIcon::Power, 22.0, ACCENT);
-                ui.label(
-                    RichText::new(format!("{} MW", fmt_num(s.power_mw)))
-                        .font(theme::semibold(20.0))
-                        .color(TEXT),
-                );
-            });
-            ui.label(RichText::new("Power consumption").small().color(TEXT_DIM));
+            crate::power_ui::overview_power(ui, assets, s.power_mw, s.generation);
             if s.power_shards > 0 || s.somersloops > 0 {
                 ui.add_space(4.0);
                 if s.power_shards > 0 {

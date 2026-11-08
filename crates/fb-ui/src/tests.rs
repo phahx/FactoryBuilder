@@ -847,7 +847,7 @@ fn plan_hmf(ctx: &egui::Context, app: &mut FactoryApp) {
         Target { item: "Desc_Plastic_C".into(), rate: 30.0 },
     ];
     let g = fb_engine::docs::load_game_data(std::path::Path::new(&game_dir())).unwrap();
-    app.planner_mut().enabled = g.recipes.keys().cloned().collect();
+    app.planner_mut().enabled = g.recipes.values().filter(|r| !r.is_generator()).map(|r| r.class.clone()).collect();
     app.press_plan();
     frames(ctx, app, 8);
 }
@@ -1249,4 +1249,142 @@ fn recipes_from_a_save_replace_the_choices_and_undo() {
     app.undo();
     frames(&ctx, &mut app, 1);
     assert_eq!(app.planner_mut().enabled, before, "undo brings the old choices back");
+}
+
+// ------------------------------------------------------------------ power
+
+/// Every piece of text drawn on one frame.
+fn drawn_texts(ctx: &egui::Context, app: &mut FactoryApp) -> Vec<String> {
+    fn walk(shape: &egui::Shape, out: &mut Vec<String>) {
+        match shape {
+            egui::Shape::Text(t) => out.push(t.galley.text().to_string()),
+            egui::Shape::Vec(v) => v.iter().for_each(|s| walk(s, out)),
+            _ => {}
+        }
+    }
+    crate::widgets::TEST_BUTTONS.with(|b| b.borrow_mut().clear());
+    let input = egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1600.0, 960.0))),
+        focused: true,
+        ..Default::default()
+    };
+    let out = ctx.run(input, |ctx| app.ui(ctx));
+    let mut texts = Vec::new();
+    for s in &out.shapes {
+        walk(&s.shape, &mut texts);
+    }
+    texts
+}
+
+#[test]
+fn generate_power_plans_coal_generators() {
+    let Some((ctx, mut app, store)) = harness() else { return };
+    frames(&ctx, &mut app, 2);
+    assert_eq!(app.planner_mut().power.mode, PowerMode::Grid, "new factories use the grid");
+    app.planner_mut().targets = vec![Target { item: "Desc_IronPlate_C".into(), rate: 60.0 }];
+    press(&ctx, &mut app, "Generate it here");
+    assert_eq!(app.planner_mut().power.mode, PowerMode::Generate);
+    assert_eq!(app.planner_mut().power.generators, vec![DEFAULT_GENERATOR.to_string()]);
+    press(&ctx, &mut app, "Plan factory");
+    frames(&ctx, &mut app, 4);
+    // Ore, smelters, constructors, output + generators, coal, water.
+    assert_eq!(app.node_count(), 7, "{:?}", app.node_labels());
+    assert!(app.node_labels().contains(&"Coal-Powered Generator · Coal".to_string()), "{:?}", app.node_labels());
+    assert!((app.min_efficiency() - 1.0).abs() < 1e-6, "generators get all their coal and water");
+    // 3 Smelters + 3 Constructors at 4 MW = 24 MW, made by 24 / 75 = 0.32 generators.
+    assert!((app.power() - 24.0).abs() < 1e-6, "power {}", app.power());
+    let made = app.generation().expect("the graph has generators");
+    assert!((made - 24.0).abs() < 1e-6, "generated {made}");
+    let texts = drawn_texts(&ctx, &mut app);
+    assert!(texts.iter().any(|t| t == "Produces 24 MW"), "generator node shows its MW");
+    assert!(texts.iter().any(|t| t == "Build 1 at 32% clock speed"), "one generator at 32%");
+    assert!(texts.iter().any(|t| t == "Power production"), "overview shows production");
+
+    // Saved with the project and in the portable file (only what differs).
+    app.save_as("power.fbfactory");
+    frames(&ctx, &mut app, 2);
+    let text = store.borrow().get("power.fbfactory").cloned().expect("written");
+    let f = crate::portable::FactoryFile::parse(&text).unwrap();
+    assert!(f.plan.generate_power);
+    assert_eq!(f.plan.generators, None, "default generator list isn't stored");
+    let project: serde_json::Value = serde_json::from_str(&app.project_json()).unwrap();
+    assert_eq!(project["planner"]["power"]["mode"], "Generate");
+
+    let (ctx2, mut other, _) = harness().unwrap();
+    frames(&ctx2, &mut other, 2);
+    other.open_factory(&ctx2, f, None);
+    frames(&ctx2, &mut other, 3);
+    assert_eq!(other.planner_mut().power, app.planner_mut().power);
+    assert!((other.generation().unwrap_or(0.0) - 24.0).abs() < 1e-6);
+}
+
+#[test]
+fn power_settings_round_trip_and_old_files_use_the_grid() {
+    let Some((ctx, mut app, _)) = harness() else { return };
+    frames(&ctx, &mut app, 2);
+    let nuclear = "Generator__Build_GeneratorNuclear_C__Desc_NuclearFuelRod_C".to_string();
+    app.planner_mut().power = PowerSettings { mode: PowerMode::Generate, generators: vec![nuclear.clone(), "Not_A_Generator".into()] };
+    let f = app.to_portable();
+    assert_eq!(f.plan.generators.as_deref(), Some(&[nuclear.clone(), "Not_A_Generator".to_string()][..]));
+    let (ctx2, mut other, _) = harness().unwrap();
+    frames(&ctx2, &mut other, 2);
+    other.open_factory(&ctx2, f, None);
+    frames(&ctx2, &mut other, 1);
+    assert_eq!(other.planner_mut().power.generators, vec![nuclear], "unknown classes are dropped");
+
+    // A version 1 file from before power plants.
+    let old = r#"{"format":"factory-builder","version":1,"plan":{"products":[{"item":"Desc_IronPlate_C","rate":10}],"optimize":"Resources"},"nodes":[],"wires":[]}"#;
+    let f = crate::portable::FactoryFile::parse(old).unwrap();
+    other.open_factory(&ctx2, f, None);
+    frames(&ctx2, &mut other, 1);
+    assert_eq!(other.planner_mut().power, PowerSettings::default());
+    // An old project (no "power" in the planner) loads too.
+    let planner: crate::app::Planner = serde_json::from_str(r#"{"targets":[],"inputs":[],"objective":"Power","enabled":[],"limits":{}}"#).unwrap();
+    assert_eq!(planner.power.mode, PowerMode::Grid);
+}
+
+/// Where `label` was drawn on one frame.
+fn text_rect(ctx: &egui::Context, app: &mut FactoryApp, label: &str) -> Option<egui::Rect> {
+    fn walk(shape: &egui::Shape, label: &str, out: &mut Option<egui::Rect>) {
+        match shape {
+            egui::Shape::Text(t) if t.galley.text() == label => *out = Some(t.visual_bounding_rect()),
+            egui::Shape::Vec(v) => v.iter().for_each(|s| walk(s, label, out)),
+            _ => {}
+        }
+    }
+    crate::widgets::TEST_BUTTONS.with(|b| b.borrow_mut().clear());
+    let input = egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1600.0, 960.0))),
+        focused: true,
+        ..Default::default()
+    };
+    let out = ctx.run(input, |ctx| app.ui(ctx));
+    let mut found = None;
+    for s in &out.shapes {
+        walk(&s.shape, label, &mut found);
+    }
+    found
+}
+
+#[test]
+fn generator_list_picks_fuels() {
+    let Some((ctx, mut app, _)) = harness() else { return };
+    frames(&ctx, &mut app, 2);
+    assert!(text_rect(&ctx, &mut app, "Generators").is_none(), "no generator list while using the grid");
+    press(&ctx, &mut app, "Generate it here");
+    let header = text_rect(&ctx, &mut app, "Generators").expect("generator list");
+    assert!(text_rect(&ctx, &mut app, "Coal-Powered Generator · Coal").is_some(), "closed list sums up the choice");
+    click(&ctx, &mut app, header.center(), egui::PointerButton::Primary);
+    assert!(text_rect(&ctx, &mut app, "Nuclear Power Plant").is_some(), "generators are listed by building");
+    let row = text_rect(&ctx, &mut app, "Compacted Coal").expect("fuel row");
+    click(&ctx, &mut app, row.center(), egui::PointerButton::Primary);
+    let mut want = vec![DEFAULT_GENERATOR.to_string(), "Generator__Build_GeneratorCoal_C__Desc_CompactedCoal_C".to_string()];
+    want.sort();
+    assert_eq!(app.planner_mut().power.generators, want);
+    let g = fb_engine::docs::load_game_data(std::path::Path::new(&game_dir())).unwrap();
+    let total = g.recipes.values().filter(|r| r.is_generator()).count();
+    assert!(text_rect(&ctx, &mut app, &format!("2 of {total} allowed")).is_some());
+    press(&ctx, &mut app, "From the grid");
+    assert_eq!(app.planner_mut().power.mode, PowerMode::Grid);
+    assert_eq!(app.planner_mut().power.generators.len(), 2, "the choice is kept for next time");
 }

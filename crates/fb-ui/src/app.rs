@@ -35,6 +35,9 @@ pub struct Planner {
     pub extraction: crate::overview_extra::ExtractionSettings,
     #[serde(skip)]
     pub recipe_filter: String,
+    /// Grid or generate, and the generators allowed (old projects: grid).
+    #[serde(default)]
+    pub power: PowerSettings,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -51,6 +54,8 @@ pub(crate) struct Project {
 #[derive(Default)]
 pub(crate) struct Summary {
     pub power_mw: f64,
+    /// MW the generators in the graph produce; None when there are none.
+    pub generation: Option<f64>,
     /// building class -> (whole machines, machines at 100%)
     pub buildings: BTreeMap<String, (f64, f64)>,
     pub resources: BTreeMap<String, f64>,
@@ -334,11 +339,12 @@ impl FactoryApp {
                     self.planner.enabled = g
                         .recipes
                         .values()
-                        .filter(|r| !r.alternate)
+                        .filter(|r| !r.alternate && !r.is_generator())
                         .map(|r| r.class.clone())
                         .collect();
                     self.planner.limits = g.resource_limits.clone();
                     self.planner.objective = Objective::Resources;
+                    self.planner.power = PowerSettings::default();
                 }
             }
         }
@@ -635,7 +641,7 @@ impl FactoryApp {
             self.planner.enabled = game
                 .recipes
                 .values()
-                .filter(|r| !r.alternate)
+                .filter(|r| !r.alternate && !r.is_generator())
                 .map(|r| r.class.clone())
                 .collect();
         }
@@ -677,6 +683,7 @@ impl FactoryApp {
             enabled_recipes: self.planner.enabled.iter().cloned().collect(),
             resource_limits: self.planner.limits.clone(),
             objective: self.planner.objective,
+            power: self.planner.power.clone(),
         };
         self.backend
             .call("solve", json!({ "request": req }), Msg::Solved);
@@ -1066,6 +1073,9 @@ impl FactoryApp {
                 }
             }
             sum.power_mw += power;
+            if let Some(mw) = crate::power_ui::generated_mw(&game, g, id, eff) {
+                *sum.generation.get_or_insert(0.0) += mw;
+            }
             self.user.nodes.insert(
                 id,
                 NodeStat {
@@ -1899,6 +1909,7 @@ impl FactoryApp {
                 "links": self.state.graph.iter_connections().count(),
                 "min_efficiency": self.user.nodes.values().map(|n| n.efficiency).fold(1.0, f64::min),
                 "power_mw": s.power_mw,
+                "generated_mw": s.generation,
                 "outputs": s.outputs,
                 "issues": s.issues.iter().map(|i| i.1.clone()).collect::<Vec<_>>(),
                 "assets": self.user.assets.as_ref().map(|a| a.counts()),
@@ -2034,6 +2045,10 @@ impl FactoryApp {
     #[cfg(test)]
     pub(crate) fn power(&self) -> f64 {
         self.summary.power_mw
+    }
+    #[cfg(test)]
+    pub(crate) fn generation(&self) -> Option<f64> {
+        self.summary.generation
     }
     #[cfg(test)]
     pub(crate) fn undo_steps(&self) -> usize {

@@ -17,6 +17,8 @@ pub mod progress;
 pub mod save;
 #[cfg(feature = "solver")]
 mod schematics;
+#[cfg(feature = "solver")]
+pub mod power;
 pub mod sim;
 #[cfg(feature = "solver")]
 pub mod solver;
