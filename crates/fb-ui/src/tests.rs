@@ -1566,3 +1566,42 @@ fn a_missing_map_is_offered_for_extraction() {
     let w = app.wizard.as_ref().expect("the extraction step opens");
     assert!(w.icons_only && w.step() == crate::setup::Step::Icons);
 }
+
+// ------------------------------------------------------------ zoom space
+
+/// Room cursors and shared node positions use graph coordinates
+/// (screen = editor min + pan + graph x zoom). Zooming must keep every
+/// node's graph position, or people at different zooms disagree.
+#[test]
+fn zooming_keeps_graph_coordinates_stable() {
+    let Some((ctx, mut app, _)) = harness() else { return };
+    frames(&ctx, &mut app, 2);
+    plan_plates(&ctx, &mut app, 60.0);
+    let graph_pos = |app: &FactoryApp| -> Vec<(egui_node_graph2::NodeId, egui::Pos2)> {
+        let z = app.state.pan_zoom.zoom;
+        app.state.node_positions.iter().map(|(id, p)| (id, (p.to_vec2() / z).to_pos2())).collect()
+    };
+    let before = graph_pos(&app);
+    let z0 = app.state.pan_zoom.zoom;
+    let rect = app.editor_rect;
+    let centre_before = (rect.center() - rect.min - app.state.pan_zoom.pan) / z0;
+    let wheel = |dy: f32| egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: egui::vec2(0.0, dy), modifiers: Default::default() };
+    frame_with(&ctx, &mut app, vec![egui::Event::PointerMoved(rect.center())]);
+    for dy in [120.0, 120.0, -60.0] {
+        frame_with(&ctx, &mut app, vec![wheel(dy)]);
+        frames(&ctx, &mut app, 4);
+    }
+    let z1 = app.state.pan_zoom.zoom;
+    assert!((z1 - z0).abs() > 0.05, "the wheel zoomed ({z0} -> {z1})");
+    for ((id, a), (_, b)) in before.iter().zip(graph_pos(&app)) {
+        assert!((*a - b).length() < 0.01, "{id:?} moved in graph space: {a:?} -> {b:?}");
+    }
+    let centre_after = (rect.center() - rect.min - app.state.pan_zoom.pan) / z1;
+    assert!((centre_before - centre_after).length() < 0.5, "zoomed about the centre of the view");
+    // A cursor sent at a node's corner lands on that node on screen.
+    let (id, g) = graph_pos(&app)[0];
+    let screen = rect.min + app.state.pan_zoom.pan + g.to_vec2() * z1;
+    let drawn = app.node_rects[&id].min;
+    assert!((screen - drawn).length() < 1.0, "{screen:?} vs {drawn:?}");
+}
+

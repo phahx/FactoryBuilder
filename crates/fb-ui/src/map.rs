@@ -397,7 +397,7 @@ pub fn map_ui(app: &mut FactoryApp, ui: &mut egui::Ui) {
 
     // Resource nodes.
     let occupied: BTreeSet<&str> = state.world.as_ref().map(|w| w.machines.iter().filter_map(|m| m.node.as_deref()).collect()).unwrap_or_default();
-    let node_px = ((state.scale * 1800.0) as f32).clamp(10.0, 26.0);
+    let node_px = ((state.scale * 1800.0) as f32).clamp(16.0, 28.0);
     let mut hover: Option<String> = None;
     let pointer = resp.hover_pos();
     for n in &info.nodes {
@@ -451,10 +451,18 @@ pub fn map_ui(app: &mut FactoryApp, ui: &mut egui::Ui) {
             }
         }
         let mut icons = Vec::new();
+        // What each drawn machine makes (or mines), shown on top of its render.
+        let mut makes: Vec<(Pos2, f32, String)> = Vec::new();
         for m in &w.machines {
             let p = state.to_screen(rect, m.x as f64, m.y as f64);
             let selected = state.selected.contains(&m.id) || drag_rect.is_some_and(|d| d.contains(p));
             if crate::map_draw::building(&ctx2, assets, sprites, &mut batch, &mut outline, &view, &m.class, m.x, m.y, m.yaw, selected) {
+                let across = sprites.and_then(|sp| sp.buildings.get(&m.class)).map(|s| ((s.max_x - s.min_x).min(s.max_y - s.min_y) as f64 * state.scale) as f32).unwrap_or(0.0);
+                if across >= 14.0 && rect.contains(p) {
+                    if let Some(item) = made_by(&app.user.game, &info, w, m) {
+                        makes.push((p, (across * 0.45).clamp(14.0, 40.0), item));
+                    }
+                }
                 continue;
             }
             if rect.contains(p) {
@@ -463,6 +471,13 @@ pub fn map_ui(app: &mut FactoryApp, ui: &mut egui::Ui) {
         }
         std::mem::take(&mut batch).paint(&painter);
         crate::map_draw::outlines(&painter, std::mem::take(&mut outline));
+        for (p, px, item) in makes {
+            let r = Rect::from_center_size(p, vec2(px, px));
+            painter.rect_filled(r.expand(px * 0.12), px * 0.18, CONTENT.gamma_multiply(0.85));
+            if let Some(uri) = assets.item_uri(&item) {
+                egui::Image::new(uri).paint_at(&canvas, r);
+            }
+        }
         // No render (yet): the building's icon, or a dot when zoomed out.
         for (class, p, selected) in icons {
             let r = Rect::from_center_size(p, vec2(size, size));
@@ -505,7 +520,75 @@ pub fn map_ui(app: &mut FactoryApp, ui: &mut egui::Ui) {
         egui::show_tooltip_at_pointer(&ctx, ui.layer_id(), egui::Id::new("map_hover"), |ui| {
             ui.label(text);
         });
+    } else if let (Some(q), Some(w), Some(assets)) = (pointer, app.map.world.as_ref(), app.user.assets.as_mut()) {
+        // Machines (topmost first), then splitters, storage and the like.
+        let view = crate::map_draw::View { rect, center: app.map.center, scale: app.map.scale };
+        let sprites = app.map.sprites.as_ref();
+        let size = ((app.map.scale * MACHINE_CM) as f32).clamp(3.0, 28.0);
+        let under = |class: &str, x: f32, y: f32, yaw: f32| -> bool {
+            match sprites.and_then(|sp| sp.buildings.get(class)) {
+                Some(s) => crate::map_draw::contains(&crate::map_draw::corners(&view, s, x, y, yaw), q),
+                None => view.screen(x as f64, y as f64).distance(q) <= (size * 0.5).max(4.0),
+            }
+        };
+        let game = app.user.game.clone();
+        if let Some(m) = w.machines.iter().rev().find(|m| under(&m.class, m.x, m.y, m.yaw)) {
+            egui::show_tooltip_at_pointer(&ctx, ui.layer_id(), egui::Id::new("map_machine"), |ui| {
+                machine_tip(ui, assets, &game, &info, w, m);
+            });
+        } else if let Some(s) = w.structures.iter().rev().find(|s| under(&s.class, s.x, s.y, s.yaw)) {
+            egui::show_tooltip_at_pointer(&ctx, ui.layer_id(), egui::Id::new("map_structure"), |ui| {
+                widgets::tooltip_title(ui, game.building_names.get(&s.class).map(String::as_str).unwrap_or(&s.class));
+            });
+        }
     }
+}
+
+/// The item a machine makes (its recipe's main product) or mines (its node's
+/// resource, or the save's override).
+fn made_by(game: &fb_model::GameData, info: &MapInfo, w: &World, m: &fb_model::world::Machine) -> Option<String> {
+    if let Some(r) = m.recipe.as_ref().and_then(|r| game.recipes.get(r)) {
+        return r.icon_item().map(str::to_string);
+    }
+    let id = m.node.as_deref()?;
+    w.node_overrides
+        .iter()
+        .find(|o| o.id == id)
+        .and_then(|o| o.resource.clone())
+        .or_else(|| info.nodes.iter().find(|n| n.id == id).and_then(|n| n.resource.clone()))
+}
+
+/// Hover tip for a machine on the map: what it is, what it makes and how
+/// it's set up.
+fn machine_tip(ui: &mut egui::Ui, assets: &mut crate::assets::Assets, game: &fb_model::GameData, info: &MapInfo, w: &World, m: &fb_model::world::Machine) {
+    let name = game.building_names.get(&m.class).map(String::as_str).unwrap_or(&m.class);
+    widgets::tooltip_title(ui, name);
+    if let Some(r) = m.recipe.as_ref().and_then(|r| game.recipes.get(r)) {
+        ui.label(RichText::new(&r.name).color(TEXT));
+        let k = m.clock as f64 * m.boost as f64;
+        for a in &r.products {
+            let amount = crate::fmt::fmt_rate_unit(r.per_min(a) * k, game.item_form(&a.item));
+            widgets::tip_item(ui, assets, &a.item, game.item_name(&a.item), &amount);
+        }
+    } else if let Some(item) = made_by(game, info, w, m) {
+        let purity = m.node.as_deref().and_then(|id| {
+            w.node_overrides.iter().find(|o| o.id == id).and_then(|o| o.purity).or_else(|| info.nodes.iter().find(|n| n.id == id).map(|n| n.purity))
+        });
+        let on = match purity {
+            Some(Purity::Impure) => "Impure node",
+            Some(Purity::Normal) => "Normal node",
+            Some(Purity::Pure) => "Pure node",
+            None => "",
+        };
+        widgets::tip_item(ui, assets, &item, game.item_name(&item), on);
+    } else {
+        ui.label(RichText::new("No recipe set").color(TEXT_DIM));
+    }
+    let mut setup = format!("{}% clock speed", crate::fmt::fmt_num(m.clock as f64 * 100.0));
+    if m.boost > 1.0001 {
+        setup += &format!(" · {}× output from Somersloops", crate::fmt::fmt_num(m.boost as f64));
+    }
+    ui.label(RichText::new(setup).small().color(TEXT_DIM));
 }
 
 fn theme_font(size: f32) -> egui::FontId {

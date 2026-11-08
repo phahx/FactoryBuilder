@@ -188,6 +188,10 @@ pub struct GameData {
     pub buildings: BTreeMap<ClassName, Building>,
     /// Default extraction limits per minute (editable in the planner).
     pub resource_limits: BTreeMap<ClassName, f64>,
+    /// Display name of every building (`Build_..._C`), including ones that
+    /// aren't production machines (splitters, storage, miners...).
+    #[serde(default)]
+    pub building_names: BTreeMap<ClassName, String>,
     /// What unlocks recipes and buildings: HUB milestones, MAM research,
     /// alternates (hard drives) and so on.
     #[serde(default)]

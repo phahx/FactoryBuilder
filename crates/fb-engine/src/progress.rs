@@ -91,3 +91,15 @@ mod tests {
         assert!(recipes_up_to_tier(&g, 2).contains("Recipe_IngotCaterium_C"));
     }
 }
+
+#[cfg(all(test, feature = "solver"))]
+mod name_tests {
+    #[test]
+    fn every_building_has_a_name() {
+        let dir = std::env::var("SATISFACTORY_DIR").unwrap_or_else(|_| r"C:\Program Files (x86)\Steam\steamapps\common\Satisfactory".into());
+        let Ok(g) = crate::docs::load_game_data(std::path::Path::new(&dir)) else { return };
+        assert_eq!(g.building_names.get("Build_ConveyorAttachmentSplitter_C").map(String::as_str), Some("Conveyor Splitter"));
+        assert_eq!(g.building_names.get("Build_MinerMk2_C").map(String::as_str), Some("Miner Mk.2"));
+        assert!(g.building_names.len() > 300, "{}", g.building_names.len());
+    }
+}

@@ -65,6 +65,32 @@ const PROBE_JS: &str = r#"
     } catch (e) { r.screenshot_err = String(e); }
   }
   await sleep(3000);
+  // Hover tips: put the pointer on something, wait past the tooltip delay,
+  // then read (no further pointer events, so the tip stays up).
+  const hovers = [
+    ['zoomed', 'tip_product', 1400, 202], ['zoomed', 'tip_building', 1400, 327],
+    ['zoomed', 'tip_raw', 1400, 636], ['zoomed', 'tip_extractor', 1440, 664],
+    ['zoomed', 'tip_node_icon', 903, 398], ['zoomed', 'tip_node_title', 760, 407],
+    ['zoomed', 'tip_footer', 703, 690], ['zoomed', 'tip_port', 697, 553],
+    ['zoomed', 'tip_wire_label', 625, 610], ['zoomed', 'tip_target', 90, 164],
+    ['map_zoom', 'tip_map_node', 853, 251],
+    ['map_close', 'tip_map_machine', 540, 300], ['map_close', 'tip_map_splitter', 463, 145],
+  ];
+  const hit = document.elementFromPoint(900, 400);
+  r.hit_test = hit ? (hit.tagName + '#' + hit.id) : null;
+  r.viewport = [window.innerWidth, window.innerHeight, document.visibilityState];
+  for (const [view, name, x, y] of hovers) {
+    try {
+      window.__fbSelftestView = view;
+      await sleep(400);
+      // eframe listens for mousemove (not pointermove).
+      canvas.dispatchEvent(new MouseEvent('mousemove', { clientX: x, clientY: y, bubbles: true }));
+      await sleep(1400);
+      const png = await new Promise((res) => requestAnimationFrame(() => res(canvas.toDataURL('image/png'))));
+      await inv('selftest_screenshot', { dataUrl: png, name });
+      r.screenshots.push(name);
+    } catch (e) { r.screenshot_err = String(e); }
+  }
   r.errors = window.__fbErrors;
   await inv('selftest_report', { report: JSON.stringify(r) });
 })();

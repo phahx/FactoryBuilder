@@ -29,3 +29,6 @@ marked with a `FactoryBuilder:` comment.
   and truncates with "…" (hover shows the full name).
 - `GraphResponse::wires`: each wire drawn this frame with its bezier points (the app
   labels wires with the belt or pipe they need).
+- Zoom scales node positions about the graph origin and moves the pan (was: offset the
+  nodes, keep the pan), so positions are always graph position x zoom. Room cursors and
+  shared positions no longer drift between people at different zoom levels.

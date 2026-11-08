@@ -86,6 +86,8 @@ pub fn apply(ctx: &egui::Context) {
         s.item_spacing = egui::vec2(8.0, 6.0);
         s.button_padding = egui::vec2(12.0, 7.0);
         s.interact_size = egui::vec2(40.0, 28.0);
+        // Tooltips wrap at a readable width (egui's default is 500 px).
+        s.tooltip_width = 340.0;
         s.menu_margin = egui::Margin::same(4.0);
         s.window_margin = egui::Margin::same(0.0);
         s.indent = 16.0;

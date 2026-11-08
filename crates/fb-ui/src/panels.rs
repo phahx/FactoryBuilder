@@ -356,7 +356,7 @@ fn recipes(
                         }));
                     });
                     widgets::checkbox_box(ui, assets, box_rect, enabled, row.hovered());
-                    let row = row.on_hover_ui(|ui| recipe_tooltip(ui, game, r));
+                    let row = row.on_hover_ui(|ui| recipe_tooltip(ui, assets, game, r));
                     if row.clicked() {
                         if enabled {
                             planner.enabled.remove(&r.class);
@@ -416,7 +416,7 @@ fn limits(
     changed
 }
 
-pub fn recipe_tooltip(ui: &mut Ui, game: &GameData, r: &Recipe) {
+pub fn recipe_tooltip(ui: &mut Ui, assets: &mut Assets, game: &GameData, r: &Recipe) {
     widgets::tooltip_title(ui, &r.name);
     let b = game
         .buildings
@@ -427,16 +427,11 @@ pub fn recipe_tooltip(ui: &mut Ui, game: &GameData, r: &Recipe) {
         RichText::new(format!("{b} · {} seconds per cycle", fmt_num(r.duration_s))).color(TEXT_DIM),
     );
     for (label, list) in [("Ingredients", &r.ingredients), ("Products", &r.products)] {
-        ui.label(RichText::new(label).color(TEXT));
+        ui.add_space(2.0);
+        ui.label(RichText::new(label).small().color(TEXT_DIM));
         for a in list {
-            ui.label(
-                RichText::new(format!(
-                    "  {} · {}",
-                    game.item_name(&a.item),
-                    fmt_rate_unit(r.per_min(a), game.item_form(&a.item))
-                ))
-                .color(TEXT_DIM),
-            );
+            let amount = fmt_rate_unit(r.per_min(a), game.item_form(&a.item));
+            widgets::tip_item(ui, assets, &a.item, game.item_name(&a.item), &amount);
         }
     }
 }
@@ -515,17 +510,14 @@ pub fn overview(app: &mut FactoryApp, ui: &mut Ui) {
                 widgets::section(ui, "Buildings", None);
                 for (b, (whole, machines)) in &s.buildings {
                     if let Some(bd) = game.buildings.get(b) {
-                        ui.horizontal(|ui| {
-                            ui.spacing_mut().item_spacing.x = 6.0;
+                        widgets::split_row(ui, 26.0, |ui| {
+                            ui.label(RichText::new(format!("{whole}")).color(TEXT)).on_hover_text(format!(
+                                "{} machines' worth of work at 100% clock speed",
+                                fmt_num(*machines)
+                            ));
+                        }, |ui| {
                             assets.item(ui, &bd.icon, 24.0);
-                            ui.label(RichText::new(&bd.name).color(TEXT));
-                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                ui.label(RichText::new(format!("{whole}")).color(TEXT))
-                                    .on_hover_text(format!(
-                                        "{} machines' worth of work at 100% clock speed",
-                                        fmt_num(*machines)
-                                    ));
-                            });
+                            widgets::name_label(ui, RichText::new(&bd.name).color(TEXT));
                         });
                     }
                 }

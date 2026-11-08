@@ -10,7 +10,7 @@ use crate::fmt::{fmt_num, fmt_rate_unit};
 use crate::graph::{build_hint, input_number, FactoryGraph, NodeKind, UserState, CLOCK, MACHINES};
 use crate::theme::{self, *};
 use crate::widgets;
-use egui::{vec2, Align, Layout, RichText, Ui};
+use egui::{vec2, RichText, Ui};
 use egui_node_graph2::NodeId;
 use fb_model::{GameData, PowerMode, PowerSettings, Recipe};
 
@@ -61,13 +61,11 @@ pub fn power_section(ui: &mut Ui, assets: &mut Assets, game: &GameData, power: &
         widgets::caption(ui, "Which generators and fuels the plan may use. Hover one to see what it burns.");
         for (building, list) in &groups {
             let Some(b) = game.buildings.get(*building) else { continue };
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 6.0;
+            widgets::split_row(ui, 26.0, |ui| {
+                ui.label(RichText::new(format!("{} MW each", fmt_num(list[0].generates_mw))).small().color(TEXT_DIM));
+            }, |ui| {
                 assets.item(ui, &b.icon, 24.0);
-                ui.label(RichText::new(&b.name).color(TEXT));
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    ui.label(RichText::new(format!("{} MW each", fmt_num(list[0].generates_mw))).small().color(TEXT_DIM));
-                });
+                widgets::name_label(ui, RichText::new(&b.name).color(TEXT));
             });
             ui.spacing_mut().item_spacing.y = 0.0;
             for r in list {
@@ -81,7 +79,7 @@ pub fn power_section(ui: &mut Ui, assets: &mut Assets, game: &GameData, power: &
                     ui.label(RichText::new(game.item_name(fuel)).color(if on { TEXT } else { TEXT_DIM }));
                 });
                 widgets::checkbox_box(ui, assets, box_rect, on, row.hovered());
-                if row.on_hover_ui(|ui| generator_tooltip(ui, game, r)).clicked() {
+                if row.on_hover_ui(|ui| generator_tooltip(ui, assets, game, r)).clicked() {
                     if on {
                         power.generators.retain(|c| c != &r.class);
                     } else {
@@ -98,19 +96,18 @@ pub fn power_section(ui: &mut Ui, assets: &mut Assets, game: &GameData, power: &
 }
 
 /// What one generator burns and makes, per minute at 100% clock speed.
-pub fn generator_tooltip(ui: &mut Ui, game: &GameData, r: &Recipe) {
+pub fn generator_tooltip(ui: &mut Ui, assets: &mut Assets, game: &GameData, r: &Recipe) {
     widgets::tooltip_title(ui, &r.name);
     ui.label(RichText::new(format!("Produces {} MW per generator", fmt_num(r.generates_mw))).color(TEXT));
     for (label, list) in [("Uses", &r.ingredients), ("Byproduct", &r.products)] {
         if list.is_empty() {
             continue;
         }
-        ui.label(RichText::new(label).color(TEXT));
+        ui.add_space(2.0);
+        ui.label(RichText::new(label).small().color(TEXT_DIM));
         for a in list.iter() {
-            ui.label(
-                RichText::new(format!("  {} · {}", game.item_name(&a.item), fmt_rate_unit(r.per_min(a), game.item_form(&a.item))))
-                    .color(TEXT_DIM),
-            );
+            let amount = fmt_rate_unit(r.per_min(a), game.item_form(&a.item));
+            widgets::tip_item(ui, assets, &a.item, game.item_name(&a.item), &amount);
         }
     }
 }
@@ -135,23 +132,22 @@ pub fn generator_footer(ui: &mut Ui, s: &mut UserState, graph: &FactoryGraph, no
     let setup = crate::graph::machine_setup(&game, graph, node_id);
     let (r_div, _) = ui.allocate_exact_size(vec2(ui.available_width(), 1.0), egui::Sense::hover());
     ui.painter().rect_filled(r_div, 0.0, DIVIDER);
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 6.0;
-        let b = game.buildings.get(&r.building);
+    let b = game.buildings.get(&r.building);
+    let extra = crate::graph::extras_hint(&setup);
+    widgets::split_row_with(ui, if extra.is_some() { 48.0 } else { 36.0 }, s, |ui, s| {
+        ui.label(RichText::new(format!("Produces {} MW", fmt_num(produced))).small().color(TEXT));
+        s.ui_icon(ui, UiIcon::Power, 14.0, TEXT);
+    }, |ui, s| {
         if let Some(b) = b {
             s.item_icon(ui, &b.icon, 32.0);
         }
         ui.vertical(|ui| {
             ui.spacing_mut().item_spacing.y = 0.0;
-            ui.label(RichText::new(b.map(|b| b.name.as_str()).unwrap_or(&r.building)).color(TEXT));
-            ui.label(RichText::new(build_hint(&setup)).small().color(TEXT_DIM));
-            if let Some(extra) = crate::graph::extras_hint(&setup) {
-                ui.label(RichText::new(extra).small().color(ACCENT));
+            widgets::name_label(ui, RichText::new(b.map(|b| b.name.as_str()).unwrap_or(&r.building)).color(TEXT));
+            widgets::name_label(ui, RichText::new(build_hint(&setup)).small().color(TEXT_DIM));
+            if let Some(extra) = &extra {
+                widgets::name_label(ui, RichText::new(extra).small().color(ACCENT));
             }
-        });
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            ui.label(RichText::new(format!("Produces {} MW", fmt_num(produced))).small().color(TEXT));
-            s.ui_icon(ui, UiIcon::Power, 14.0, TEXT);
         });
     });
 }

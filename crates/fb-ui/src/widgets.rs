@@ -363,12 +363,54 @@ pub fn list_row(ui: &mut Ui, height: f32, add: impl FnOnce(&mut Ui)) -> Response
 
 /// A non-interactive row: icon, label, value on the right.
 pub fn info_row(ui: &mut Ui, assets: &mut Assets, class: &str, label: &str, value: RichText) {
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 6.0;
+    split_row(ui, 26.0, |ui| {
+        ui.label(value);
+    }, |ui| {
         assets.item(ui, class, 24.0);
-        ui.label(RichText::new(label).color(TEXT));
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| ui.label(value));
+        name_label(ui, RichText::new(label).color(TEXT));
     });
+}
+
+/// A row whose right-hand part (a number, a unit) is laid out first, so the
+/// left-hand part takes only the space left and truncates instead of
+/// running underneath it.
+pub fn split_row(ui: &mut Ui, height: f32, right: impl FnOnce(&mut Ui), left: impl FnOnce(&mut Ui)) {
+    let height = scaled(ui, height);
+    ui.allocate_ui_with_layout(vec2(ui.available_width(), height), Layout::right_to_left(Align::Center), |ui| {
+        ui.spacing_mut().item_spacing.x = 6.0;
+        right(ui);
+        ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            left(ui);
+        });
+    });
+}
+
+/// `split_row` for parts that both need the same mutable state (passed to
+/// each in turn).
+pub fn split_row_with<T>(ui: &mut Ui, height: f32, state: &mut T, right: impl FnOnce(&mut Ui, &mut T), left: impl FnOnce(&mut Ui, &mut T)) {
+    let height = scaled(ui, height);
+    ui.allocate_ui_with_layout(vec2(ui.available_width(), height), Layout::right_to_left(Align::Center), |ui| {
+        ui.spacing_mut().item_spacing.x = 6.0;
+        right(ui, state);
+        ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            left(ui, state);
+        });
+    });
+}
+
+/// A size given at 100% scaled like the rest of this UI. Graph nodes are
+/// drawn with a zoomed style, where the theme's control height (28 px at
+/// 100%) is scaled by the zoom.
+fn scaled(ui: &Ui, px: f32) -> f32 {
+    px * ui.spacing().interact_size.y / 28.0
+}
+
+/// A label that truncates with "…" when there's no room (egui shows the
+/// full text on hover).
+pub fn name_label(ui: &mut Ui, text: RichText) -> Response {
+    ui.add(egui::Label::new(text).truncate())
 }
 
 /// BPW_ComboboxSearch: an item picker with icons and a search field.
@@ -481,6 +523,16 @@ pub fn item_combo(
 }
 
 /// Vanilla tooltip body: orange title, then white lines.
+/// One item in a tooltip: its icon, name and an amount, on one line.
+pub fn tip_item(ui: &mut Ui, assets: &mut Assets, class: &str, name: &str, amount: &str) {
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 6.0;
+        assets.item(ui, class, 20.0);
+        ui.label(RichText::new(name).color(TEXT));
+        ui.label(RichText::new(amount).color(TEXT_DIM));
+    });
+}
+
 pub fn tooltip_title(ui: &mut Ui, title: &str) {
     ui.label(
         RichText::new(title)

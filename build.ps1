@@ -46,12 +46,27 @@ try {
     cargo build -p oodle-shim --release
     if ($LASTEXITCODE) { throw 'oodle-shim build failed' }
 
+    # A running copy of the app locks its exe, but Windows lets a running exe
+    # be renamed: move it aside so the new build can be written (the running
+    # copy carries on). Old moved-aside copies are removed once they're closed.
+    $exe = 'target\release\factory-builder.exe'
+    Get-ChildItem 'target\release' -Filter 'factory-builder.exe.running-*' -ErrorAction SilentlyContinue |
+        ForEach-Object { try { Remove-Item -LiteralPath $_.FullName -ErrorAction Stop } catch {} }
+    if (Test-Path $exe) {
+        $locked = $false
+        try { [IO.File]::Open((Resolve-Path $exe).Path, 'Open', 'ReadWrite', 'None').Close() } catch { $locked = $true }
+        if ($locked) {
+            $aside = "$exe.running-$(Get-Date -Format yyyyMMdd-HHmmss)"
+            Move-Item -LiteralPath $exe -Destination $aside
+            Write-Host "factory-builder.exe is running; moved it to $aside so the new build can be written."
+        }
+    }
     $appArgs = @('build', '-p', 'factory-builder', '--release')
     if (-not $Package) { $appArgs += @('--features', 'dev') }
     cargo @appArgs
     if ($LASTEXITCODE) {
-        # Antivirus sometimes holds the freshly linked exe for a moment; a
-        # second try then succeeds. Real compile errors fail again.
+        # Antivirus can hold a freshly linked exe for a moment; a second try
+        # then succeeds. Real compile errors fail again.
         Write-Host 'App build failed; trying once more.'
         cargo @appArgs
     }

@@ -286,6 +286,14 @@ pub fn parse_docs(root: &Value) -> Result<GameData, DocsError> {
     crate::power::add_generators(root, &mut data);
 
     crate::schematics::parse(&classes_of("FGSchematic"), &classes_of("FGRecipe"), &mut data);
+    for classes in by_native.values() {
+        for c in classes {
+            let (class, name) = (str_field(c, "ClassName"), str_field(c, "mDisplayName"));
+            if class.starts_with("Build_") && !name.is_empty() {
+                data.building_names.insert(class.to_string(), name.to_string());
+            }
+        }
+    }
     crate::extraction::parse_extraction(&by_native, &mut data);
     crate::build_cost::parse_build_costs(&by_native, &mut data);
 

@@ -198,17 +198,18 @@ where
     }
 
     fn update_node_positions_after_zoom(&mut self, zoom_delta: f32) {
-        // Update node positions, zoom towards center
+        // FactoryBuilder: zoom towards the centre as before, but by scaling
+        // node positions about the graph origin and moving the pan, so a
+        // node's position is always (graph position x zoom). The original
+        // kept the pan and offset the nodes instead, which made positions
+        // depend on each person's zoom history: cursors and shared positions
+        // in planning rooms drifted between people at different zooms.
         let half_size = self.pan_zoom.clip_rect.size() / 2.0;
         for (_id, node_pos) in self.node_positions.iter_mut() {
-            // 1. Get node local position (relative to origo)
-            let local_pos = node_pos.to_vec2() - half_size + self.pan_zoom.pan;
-            // 2. Scale local position by zoom delta
-            let scaled_local_pos = (local_pos * zoom_delta).to_pos2();
-            // 3. Transform back to global position
-            *node_pos = scaled_local_pos + half_size - self.pan_zoom.pan;
-            // This way we can retain pan untouched when zooming :)
+            *node_pos = (node_pos.to_vec2() * zoom_delta).to_pos2();
         }
+        // Keep the point at the centre of the view where it was.
+        self.pan_zoom.pan = half_size - (half_size - self.pan_zoom.pan) * zoom_delta;
     }
 
     fn draw_graph_editor_inside_zoom(

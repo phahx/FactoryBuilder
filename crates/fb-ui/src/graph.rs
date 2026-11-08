@@ -628,35 +628,25 @@ impl NodeDataTrait for NodeData {
                 let (r_div, _) =
                     ui.allocate_exact_size(vec2(ui.available_width(), 1.0), egui::Sense::hover());
                 ui.painter().rect_filled(r_div, 0.0, DIVIDER);
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 6.0;
-                    if let Some(b) = game.buildings.get(&r.building) {
-                        s.item_icon(ui, &b.icon, 32.0);
+                let extra = extras_hint(&setup);
+                let name = game.buildings.get(&r.building).map(|b| b.name.clone()).unwrap_or_else(|| r.building.clone());
+                let icon = game.buildings.get(&r.building).map(|b| b.icon.clone());
+                // Power on the right first, so the building name and the
+                // build line truncate instead of running under it.
+                widgets::split_row_with(ui, if extra.is_some() { 48.0 } else { 36.0 }, s, |ui, s| {
+                    ui.label(RichText::new(format!("{} MW", fmt_num(power))).small().color(TEXT_DIM));
+                    s.ui_icon(ui, UiIcon::Power, 14.0, TEXT_DIM);
+                }, |ui, s| {
+                    if let Some(icon) = &icon {
+                        s.item_icon(ui, icon, 32.0);
                     }
                     ui.vertical(|ui| {
                         ui.spacing_mut().item_spacing.y = 0.0;
-                        let name = game
-                            .buildings
-                            .get(&r.building)
-                            .map(|b| b.name.as_str())
-                            .unwrap_or(&r.building);
-                        ui.label(RichText::new(name).color(TEXT));
-                        ui.label(
-                            RichText::new(build_hint(&setup))
-                                .small()
-                                .color(TEXT_DIM),
-                        );
-                        if let Some(extra) = extras_hint(&setup) {
-                            ui.label(RichText::new(extra).small().color(ACCENT));
+                        widgets::name_label(ui, RichText::new(&name).color(TEXT));
+                        widgets::name_label(ui, RichText::new(build_hint(&setup)).small().color(TEXT_DIM));
+                        if let Some(extra) = &extra {
+                            widgets::name_label(ui, RichText::new(extra).small().color(ACCENT));
                         }
-                    });
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        ui.label(
-                            RichText::new(format!("{} MW", fmt_num(power)))
-                                .small()
-                                .color(TEXT_DIM),
-                        );
-                        s.ui_icon(ui, UiIcon::Power, 14.0, TEXT_DIM);
                     });
                 });
             }

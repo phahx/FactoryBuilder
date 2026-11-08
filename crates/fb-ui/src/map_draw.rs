@@ -55,6 +55,13 @@ pub fn corners(view: &View, s: &Sprite, x: f32, y: f32, yaw: f32) -> [Pos2; 4] {
     })
 }
 
+/// Whether `p` is inside a convex quad (corners in order).
+pub fn contains(c: &[Pos2; 4], p: Pos2) -> bool {
+    let side = |a: Pos2, b: Pos2| (b.x - a.x) * (p.y - a.y) - (b.y - a.y) * (p.x - a.x);
+    let s: Vec<f32> = (0..4).map(|i| side(c[i], c[(i + 1) % 4])).collect();
+    s.iter().all(|v| *v >= 0.0) || s.iter().all(|v| *v <= 0.0)
+}
+
 /// Quads batched per texture: one mesh per image, however many buildings.
 #[derive(Default)]
 pub struct Batch {
