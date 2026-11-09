@@ -137,6 +137,8 @@ pub fn solve(data: &GameData, req: &SolveRequest) -> SolveOutcome {
         Objective::Resources => resources + 1e-6 * power + 1e-5 * machines + 1e-6 * surplus,
         Objective::Power => power + 1e-3 * resources + 1e-6 * surplus,
         Objective::Buildings => machines + 1e-3 * resources + 1e-6 * power + 1e-6 * surplus,
+        // Nothing preferred; a hair against machines keeps pointless loops out.
+        Objective::None => surplus + 1e-6 * machines,
     };
 
     // ---- balance constraints
@@ -455,6 +457,24 @@ mod tests {
             .unwrap();
         let fed: Vec<&str> = plan.edges.iter().filter(|e| e.to == gen_node).map(|e| e.item.as_str()).collect();
         assert!(fed.contains(&"Desc_Coal_C") && fed.contains(&"Desc_Water_C"), "{fed:?}");
+    }
+
+    #[test]
+    fn no_preference_still_makes_the_outputs() {
+        let Some(data) = game() else { return };
+        let req = SolveRequest {
+            targets: vec![Target { item: "Desc_IronPlate_C".into(), rate: 60.0 }],
+            enabled_recipes: data.recipes.keys().cloned().collect(),
+            objective: Objective::None,
+            ..Default::default()
+        };
+        let SolveOutcome::Solved(plan) = solve(&data, &req) else { panic!("infeasible") };
+        let out = rate_of(&plan, |k| match k {
+            PlanNodeKind::Output { item, rate } if item == "Desc_IronPlate_C" => Some(*rate),
+            _ => None,
+        });
+        assert_eq!(out, 60.0);
+        assert!(!plan.nodes.iter().any(|n| matches!(n.kind, PlanNodeKind::Surplus { .. })), "makes no more than it needs");
     }
 
     #[test]

@@ -211,7 +211,7 @@ pub fn planner(app: &mut FactoryApp, ui: &mut Ui) {
 
             widgets::divider(ui);
             widgets::section(ui, "Optimize for", None);
-            widgets::caption(ui, "What the plan should use as little of as possible.");
+            widgets::caption(ui, "What the plan should use as little of as possible, if anything.");
             changed |= widgets::tabs(
                 ui,
                 &mut planner.objective,
@@ -227,6 +227,7 @@ pub fn planner(app: &mut FactoryApp, ui: &mut Ui) {
                         "Buildings",
                         "Use the fewest machines.",
                     ),
+                    (Objective::None, "None", "No preference: any plan that makes the outputs from the recipes you allow, without making more than it needs."),
                 ],
             );
             changed |= crate::power_ui::power_section(ui, assets, &game, &mut planner.power);

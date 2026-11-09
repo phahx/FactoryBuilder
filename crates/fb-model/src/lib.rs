@@ -380,6 +380,9 @@ pub enum Objective {
     Resources,
     Power,
     Buildings,
+    /// No preference: any plan that makes the outputs (without making more
+    /// than it needs).
+    None,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
