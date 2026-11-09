@@ -650,7 +650,7 @@ impl FactoryApp {
                 | Msg::DevDone(_)) => self.on_setup_msg(ctx, m),
                 m @ (Msg::Saves(_) | Msg::PickedSaveGame(_) | Msg::SaveUnlocks(_)) => self.on_progress_msg(ctx, m),
                 m @ (Msg::MapInfo(_) | Msg::WorldSessions(_) | Msg::WorldLoaded { .. } | Msg::WorldLatest(_) | Msg::SelftestSave(_) | Msg::MapSprites(_)) => self.on_map_msg(m),
-                m @ (Msg::LiveSaved { .. } | Msg::LiveCheck(_) | Msg::LiveTrusted(_) | Msg::LiveToken(_) | Msg::LivePlayers(_) | Msg::LiveServerSave(_)) => self.on_live_msg(m),
+                m @ (Msg::LiveSaved { .. } | Msg::LiveCheck(_) | Msg::LiveTrusted(_) | Msg::LiveToken(_) | Msg::LivePlayers(_) | Msg::LiveBuildings(_) | Msg::LiveServerSave(_)) => self.on_live_msg(m),
                 Msg::Solved(r) => {
                     self.solving = false;
                     match r {
@@ -1405,6 +1405,26 @@ impl FactoryApp {
                         _ => None,
                     };
                     self.map.selftest_zoomed = false;
+                }
+                // Live map add-on (turned on here only, not saved): the
+                // save's player, close up; then its dialog with a server
+                // whose certificate isn't trusted yet.
+                "live_map" => {
+                    self.dialog = Dialog::None;
+                    self.view = crate::map::View::Map;
+                    if let Some(s) = self.status.as_mut() {
+                        s.settings.live.enabled = true;
+                    }
+                    if let Some(p) = self.map.world.as_ref().and_then(|w| w.players.first()).cloned() {
+                        self.map.look_at(p.x as f64, p.y as f64, 0.02);
+                    }
+                }
+                "live_dialog" => {
+                    let mut draft = self.live_settings();
+                    draft.server_host = "192.168.1.20".into();
+                    draft.frm = true;
+                    self.live.check = Some(fb_model::ServerCheck { reachable: true, untrusted_cert: Some("3F:A0:91:5C:7E:22:D4:08:B1:6E:0C:93:47:AA:F2:15:68:9D:30:E7:5B:C1:84:2F:06:DD:79:4A:E3:12:BF:58".into()), token_set: true, ..Default::default() });
+                    self.dialog = Dialog::Live { draft };
                 }
                 // Import the zoomed-in selection and show the result.
                 "map_import" => {

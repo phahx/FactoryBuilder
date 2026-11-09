@@ -12,8 +12,9 @@ use crate::map_draw::View;
 use crate::theme::*;
 use crate::widgets;
 use egui::{pos2, vec2, Color32, Pos2, RichText, Stroke};
-use fb_model::world::PlayerSpot;
-use fb_model::{LiveSettings, ServerCheck};
+use fb_model::world::{Carrier, Machine, PlayerSpot, World};
+use fb_model::{GameData, LiveBuildings, LiveMachine, LiveSettings, ServerCheck};
+use std::collections::{BTreeMap, HashMap};
 use serde_json::json;
 
 /// Marker radius, screen pixels.
@@ -27,6 +28,11 @@ const PLAYERS_STALE: f64 = 10.0;
 pub const SERVER_SECONDS: f64 = 30.0;
 /// The Map tab's session list entry for the dedicated server.
 pub const SERVER_SESSION: &str = "Dedicated server";
+/// How often to ask the mod what's built (its docs warn that big requests
+/// such as getFactory can make a server hitch).
+const BUILDINGS_SECONDS: f64 = 15.0;
+/// A live building of the same class this close (cm) is the save's.
+const SAME_CM: f32 = 100.0;
 
 #[derive(Default)]
 pub struct LiveState {
@@ -45,6 +51,17 @@ pub struct LiveState {
     /// Following the dedicated server.
     pub server_busy: bool,
     pub next_server: f64,
+    /// Live buildings: the save they're laid over, what the mod reported,
+    /// and per machine of the map's world (by id), what it's doing now.
+    pub base: Option<World>,
+    pub buildings: Option<LiveBuildings>,
+    pub buildings_busy: bool,
+    next_buildings: f64,
+    pub status: Vec<Option<LiveMachine>>,
+    /// Machines from this index on were built since the save.
+    pub new_from: usize,
+    /// Built and taken down since the save.
+    pub changes: (usize, usize),
 }
 
 impl FactoryApp {
@@ -79,9 +96,25 @@ impl FactoryApp {
     /// Map tab: asks the mod where players are, about once a second.
     pub(crate) fn live_poll(&mut self, ctx: &egui::Context) {
         if !self.live_on() || !self.live_settings().frm {
+            // Back to the save as it is.
+            if let Some(base) = self.live.base.take() {
+                self.live.status.clear();
+                self.live.buildings = None;
+                self.live.changes = (0, 0);
+                self.map.selected.clear();
+                self.map.set_world(base);
+            }
             return;
         }
         let now = ctx.input(|i| i.time);
+        if !self.live.buildings_busy && now >= self.live.next_buildings && (self.live.base.is_some() || self.map.world.is_some()) {
+            if self.live.base.is_none() {
+                self.live.base = self.map.world.clone();
+            }
+            self.live.buildings_busy = true;
+            self.live.next_buildings = now + BUILDINGS_SECONDS;
+            self.backend.call("live_buildings", json!({}), Msg::LiveBuildings);
+        }
         if !self.live.players_busy && now >= self.live.next_players {
             self.live.players_busy = true;
             self.live.next_players = now + PLAYERS_SECONDS;
@@ -161,6 +194,17 @@ impl FactoryApp {
                     Err(e) => self.live.players_error = Some(e),
                 }
             }
+            Msg::LiveBuildings(r) => {
+                self.live.buildings_busy = false;
+                match r {
+                    Ok(b) => {
+                        self.live.players_error = b.errors.first().cloned();
+                        self.live.buildings = Some(b);
+                        self.live_apply();
+                    }
+                    Err(e) => self.live.players_error = Some(e),
+                }
+            }
             Msg::LiveServerSave(r) => {
                 self.live.server_busy = false;
                 if self.map.session.as_deref() != Some(SERVER_SESSION) {
@@ -179,6 +223,173 @@ impl FactoryApp {
             }
             _ => {}
         }
+    }
+}
+
+impl FactoryApp {
+    /// A save was read for the Map tab: with live buildings on, they're
+    /// laid over it.
+    pub(crate) fn live_world_loaded(&mut self, w: World) {
+        if self.live_on() && self.live_settings().frm {
+            self.live.base = Some(w);
+            if self.live.buildings.is_some() {
+                self.live_apply();
+                return;
+            }
+            let w = self.live.base.clone().unwrap_or_default();
+            self.map.set_world(w);
+        } else {
+            self.map.set_world(w);
+        }
+    }
+
+    /// The map's world: the save with what the mod says is built now.
+    fn live_apply(&mut self) {
+        let (Some(base), Some(b)) = (&self.live.base, &self.live.buildings) else { return };
+        let game = self.user.game.clone();
+        let m = merge(base, b, &game);
+        let before = self.map.world.as_ref().map(|w| w.machines.len());
+        if before != Some(m.world.machines.len()) || self.live.changes != (m.added, m.removed) {
+            self.map.selected.clear();
+        }
+        self.live.status = m.status;
+        self.live.new_from = m.new_from;
+        self.live.changes = (m.added, m.removed);
+        self.map.set_world(m.world);
+    }
+}
+
+/// The save with live buildings laid over it.
+pub struct Merged {
+    pub world: World,
+    /// Per machine (by id): what it's doing now.
+    pub status: Vec<Option<LiveMachine>>,
+    /// Machines from this id on weren't in the save.
+    pub new_from: usize,
+    pub added: usize,
+    pub removed: usize,
+}
+
+/// Cells of `SAME_CM`, for finding what's near.
+fn cell(x: f32, y: f32) -> (i64, i64) {
+    ((x / SAME_CM).floor() as i64, (y / SAME_CM).floor() as i64)
+}
+
+fn near(a: [f32; 2], b: [f32; 2]) -> bool {
+    (a[0] - b[0]).hypot(a[1] - b[1]) <= SAME_CM
+}
+
+/// Lays what's built now over the save: a machine of the same class within
+/// a metre is the save's (kept, with its links, and its recipe as it is
+/// now); the save's with none was taken down; the rest are new. Belts and
+/// pipes the same, by their ends. A part the mod didn't report is left as
+/// the save has it.
+pub fn merge(base: &World, live: &LiveBuildings, game: &GameData) -> Merged {
+    let mut w = base.clone();
+    let mut out = Merged { world: World::default(), status: vec![None; base.machines.len()], new_from: base.machines.len(), added: 0, removed: 0 };
+    if let Some(lm) = &live.machines {
+        let mut grid: HashMap<(&str, (i64, i64)), Vec<usize>> = HashMap::new();
+        for (j, m) in lm.iter().enumerate() {
+            grid.entry((m.class.as_str(), cell(m.x, m.y))).or_default().push(j);
+        }
+        let mut used = vec![false; lm.len()];
+        let mut new_id: Vec<Option<u32>> = vec![None; base.machines.len()];
+        let mut machines: Vec<Machine> = Vec::new();
+        let mut status = Vec::new();
+        let recipe = |r: &Option<String>| r.clone().filter(|r| game.recipes.contains_key(r));
+        for m in &base.machines {
+            let (cx, cy) = cell(m.x, m.y);
+            let found = (-1..=1)
+                .flat_map(|dx| (-1..=1).map(move |dy| (cx + dx, cy + dy)))
+                .flat_map(|c| grid.get(&(m.class.as_str(), c)).into_iter().flatten().copied())
+                .find(|j| !used[*j] && near([lm[*j].x, lm[*j].y], [m.x, m.y]));
+            let Some(j) = found else { continue };
+            used[j] = true;
+            let mut kept = m.clone();
+            kept.id = machines.len() as u32;
+            if let Some(r) = recipe(&lm[j].recipe) {
+                kept.recipe = Some(r);
+            }
+            if let Some(c) = lm[j].clock.filter(|c| *c > 0.0) {
+                kept.clock = c;
+            }
+            new_id[m.id as usize] = Some(kept.id);
+            machines.push(kept);
+            status.push(Some(lm[j].clone()));
+        }
+        out.removed = base.machines.len() - machines.len();
+        out.new_from = machines.len();
+        for (j, l) in lm.iter().enumerate().filter(|(j, _)| !used[*j]) {
+            let _ = j;
+            machines.push(Machine { id: machines.len() as u32, class: l.class.clone(), recipe: recipe(&l.recipe), clock: l.clock.filter(|c| *c > 0.0).unwrap_or(1.0), boost: 1.0, x: l.x, y: l.y, z: l.z, yaw: l.yaw, node: None });
+            status.push(Some(l.clone()));
+        }
+        out.added = machines.len() - out.new_from;
+        let remap = |id: u32| new_id.get(id as usize).copied().flatten();
+        w.links = base.links.iter().filter_map(|l| Some(fb_model::world::Link { from: remap(l.from)?, to: remap(l.to)?, item: l.item.clone() })).collect();
+        w.machine_circuit = base.machine_circuit.iter().filter_map(|(k, v)| Some((remap(*k)?, *v))).collect::<BTreeMap<_, _>>();
+        w.machine_power = base.machine_power.iter().filter_map(|(k, v)| Some((remap(*k)?, *v))).collect::<BTreeMap<_, _>>();
+        w.machines = machines;
+        out.status = status;
+    }
+    if let Some(lc) = &live.carriers {
+        let mergeable = |c: &Carrier| if c.fluid { true } else { c.class.starts_with("Build_ConveyorBelt") };
+        let ends = |p: &[[f32; 2]]| (p[0], p[p.len() - 1]);
+        let mut grid: HashMap<(i64, i64), Vec<usize>> = HashMap::new();
+        for (j, c) in lc.iter().enumerate() {
+            let (a, _) = ends(&c.points);
+            grid.entry(cell(a[0], a[1])).or_default().push(j);
+        }
+        let mut used = vec![false; lc.len()];
+        let mut carriers = Vec::new();
+        for c in &base.carriers {
+            if !mergeable(c) || c.points.len() < 2 {
+                carriers.push(c.clone());
+                continue;
+            }
+            let (a, b) = ends(&c.points);
+            let mut found = None;
+            for (start, end) in [(a, b), (b, a)] {
+                let (cx, cy) = cell(start[0], start[1]);
+                found = (-1..=1)
+                    .flat_map(|dx| (-1..=1).map(move |dy| (cx + dx, cy + dy)))
+                    .flat_map(|k| grid.get(&k).into_iter().flatten().copied())
+                    .find(|j| !used[*j] && lc[*j].class == c.class && near(lc[*j].points[0], start) && near(*lc[*j].points.last().unwrap(), end));
+                if found.is_some() {
+                    break;
+                }
+            }
+            if let Some(j) = found {
+                used[j] = true;
+                carriers.push(c.clone());
+            }
+        }
+        for (j, c) in lc.iter().enumerate() {
+            if !used[j] {
+                carriers.push(Carrier { class: c.class.clone(), fluid: c.fluid, points: c.points.clone(), yaw: 0.0 });
+            }
+        }
+        w.carriers = carriers;
+    }
+    out.world = w;
+    out
+}
+
+/// A machine's tooltip lines from the mod: what it's doing now.
+pub fn machine_lines(ui: &mut egui::Ui, status: Option<&LiveMachine>, new: bool) {
+    let Some(s) = status else { return };
+    let now = match (s.paused, s.producing, s.productivity) {
+        (Some(true), _, _) => "Now: paused".to_string(),
+        (_, Some(true), Some(p)) => format!("Now: producing, {}% productivity", crate::fmt::fmt_num(p as f64)),
+        (_, Some(true), None) => "Now: producing".to_string(),
+        (_, Some(false), _) => "Now: idle".to_string(),
+        (_, None, Some(p)) => format!("Now: {}% productivity", crate::fmt::fmt_num(p as f64)),
+        _ => return,
+    };
+    ui.add_space(4.0);
+    widgets::tip_line(ui, RichText::new(now).color(ACCENT));
+    if new {
+        widgets::tip_line(ui, RichText::new("Built since the save (Ficsit Remote Monitoring).").small().color(TEXT_DIM));
     }
 }
 

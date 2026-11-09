@@ -802,18 +802,58 @@ async fn live_server_sync(state: State<'_, AppState>) -> CmdResult<Option<fb_mod
     Ok(saves::summary_of(&path))
 }
 
-/// Players now, from the Ficsit Remote Monitoring mod.
-#[tauri::command]
-async fn live_players(state: State<'_, AppState>) -> CmdResult<Vec<fb_model::world::PlayerSpot>> {
-    let l = live_settings(&state)?;
+/// One read endpoint of the Ficsit Remote Monitoring mod: through the
+/// dedicated server when there is one, otherwise its own web server.
+async fn frm_get(state: &AppState, endpoint: &str) -> CmdResult<serde_json::Value> {
+    let l = live_settings(state)?;
     if !l.frm {
         return Err("Ficsit Remote Monitoring isn't turned on in Live map.".into());
     }
-    let v = match (l.server_host.trim(), l.server_cert.as_deref()) {
-        (h, Some(pin)) if !h.is_empty() => live::frm_via_server(h, l.server_port, pin, "getPlayer").await.map_err(live_error)?,
-        _ => live::frm_direct(l.frm_host.trim(), l.frm_port, "getPlayer").await?,
-    };
-    Ok(live::players(&v))
+    match (l.server_host.trim(), l.server_cert.as_deref()) {
+        (h, Some(pin)) if !h.is_empty() => live::frm_via_server(h, l.server_port, pin, endpoint).await.map_err(live_error),
+        _ => live::frm_direct(l.frm_host.trim(), l.frm_port, endpoint).await,
+    }
+}
+
+/// Players now, from the Ficsit Remote Monitoring mod.
+#[tauri::command]
+async fn live_players(state: State<'_, AppState>) -> CmdResult<Vec<fb_model::world::PlayerSpot>> {
+    Ok(live::players(&frm_get(&state, "getPlayer").await?))
+}
+
+/// What's built now, from the Ficsit Remote Monitoring mod: machines,
+/// extractors and generators; belts and pipes.
+#[tauri::command]
+async fn live_buildings(state: State<'_, AppState>) -> CmdResult<fb_model::LiveBuildings> {
+    state.log("live_buildings");
+    let mut out = fb_model::LiveBuildings::default();
+    let mut machines = Vec::new();
+    let mut ok = true;
+    for ep in ["getFactory", "getExtractor", "getGenerators"] {
+        match frm_get(&state, ep).await {
+            Ok(v) => machines.extend(live::machines(&v)),
+            Err(e) => {
+                ok = false;
+                out.errors.push(e);
+                break;
+            }
+        }
+    }
+    out.machines = ok.then_some(machines);
+    let mut carriers = Vec::new();
+    let mut ok = true;
+    for (ep, fluid) in [("getBelts", false), ("getPipes", true)] {
+        match frm_get(&state, ep).await {
+            Ok(v) => carriers.extend(live::carriers(&v, fluid)),
+            Err(e) => {
+                ok = false;
+                out.errors.push(e);
+                break;
+            }
+        }
+    }
+    out.carriers = ok.then_some(carriers);
+    Ok(out)
 }
 
 // --------------------------------------------------------------------- rooms
@@ -944,6 +984,7 @@ fn main() {
             live_server_token,
             live_server_sync,
             live_players,
+            live_buildings,
             load_game,
             icon,
             ui_asset,

@@ -114,6 +114,24 @@ someone under In this room to follow their view; Esc, or panning, zooming or cli
 yourself, stops. Nodes someone else has selected get an outline and a name chip in their
 colour.
 
+## Live map (add-on)
+
+Off until you turn it on in File › Settings › Add-ons. Then the Map tab shows players where the
+save left them (saves don't keep names), and its Live map button sets up two optional sources:
+
+- **A dedicated server.** The Map tab follows the newest save of the session it's running,
+  through the game's own server API (`https://<server>:7777/api/v1`), and downloads a save only
+  when there's a newer one. Make an API token with `server.GenerateAPIToken` in the server
+  console. The token is kept encrypted for your Windows account and only ever sent to that
+  server. Its certificate is usually self-signed, so, as the game does, you confirm its
+  fingerprint once; a different certificate is refused until you confirm it again.
+- **The [Ficsit Remote Monitoring](https://ficsit.app/mod/FicsitRemoteMonitoring) mod**, on
+  the game host. Players move live (about once a second, named), and every 15 seconds what's
+  built now is laid over the save: new machines, belts and pipes appear, ones taken down go, and
+  hovering a machine shows whether it's producing. On a dedicated server it's reached through
+  the server's own port; otherwise start its web server with `/frm http start` in the game's
+  chat (port 8080 by default).
+
 ## Layout
 
 - `crates/fb-engine`: Docs parser, LP planner (good_lp/microlp), layout and flow simulation (petgraph)

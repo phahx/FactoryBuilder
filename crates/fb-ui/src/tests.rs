@@ -3529,6 +3529,7 @@ fn live_map_follows_a_dedicated_server_after_its_certificate_is_trusted() {
             }
             "live_server_sync" => Some(Ok(serde_json::to_value(&save).unwrap())),
             "live_players" => Some(Ok(json!([{ "name": "Ada", "x": 0.0, "y": 0.0, "z": 0.0, "yaw": 0.0, "online": true }]))),
+            "live_buildings" => Some(Ok(json!({ "machines": [{ "class": "Build_ConstructorMk1_C", "recipe": "Recipe_IronPlate_C", "x": 9.9e6, "y": 9.9e6, "z": 0.0, "yaw": 0.0, "clock": 1.0, "productivity": 50.0, "producing": true, "paused": false }], "carriers": null, "errors": [] }))),
             _ => None,
         }
     });
@@ -3568,4 +3569,64 @@ fn live_map_follows_a_dedicated_server_after_its_certificate_is_trusted() {
     }
     frames(&ctx, &mut app, 3);
     assert!(drawn_texts(&ctx, &mut app).iter().any(|t| t == "Ada"));
+    // And what's built now, over the server's save: the one machine the
+    // mod reports is new; the save's are taken down.
+    assert!(calls.borrow().iter().any(|(c, _)| c == "live_buildings"));
+    let saved = app.live.base.as_ref().map(|w| w.machines.len()).unwrap();
+    assert_eq!(app.live.changes, (1, saved));
+    assert_eq!(app.map.world.as_ref().unwrap().machines.len(), 1);
+    // Turned off: the save as it is.
+    if let Some(s) = app.status.as_mut() {
+        s.settings.live.frm = false;
+    }
+    frames(&ctx, &mut app, 2);
+    assert_eq!(app.map.world.as_ref().unwrap().machines.len(), saved);
+}
+
+#[test]
+fn live_buildings_are_laid_over_the_save() {
+    use fb_model::world::{Carrier, Link, Machine, PowerUse, World};
+    use fb_model::{LiveBuildings, LiveCarrier, LiveMachine};
+    let Some((_, app, _)) = harness() else { return };
+    let game = fb_engine::docs::load_game_data(std::path::Path::new(&game_dir())).unwrap();
+    let _ = app;
+    let m = |id: u32, x: f32, recipe: &str| Machine { id, class: "Build_ConstructorMk1_C".into(), recipe: Some(recipe.into()), clock: 1.0, boost: 1.0, x, y: 0.0, z: 0.0, yaw: 0.0, node: None };
+    let belt = |class: &str, a: [f32; 2], b: [f32; 2]| Carrier { class: class.into(), fluid: false, points: vec![a, b], yaw: 0.0 };
+    let mut base = World::default();
+    base.machines = vec![m(0, 0.0, "Recipe_IronPlate_C"), m(1, 1000.0, "Recipe_IronRod_C"), m(2, 2000.0, "Recipe_Screw_C")];
+    base.links = vec![Link { from: 0, to: 1, item: None }, Link { from: 0, to: 2, item: None }];
+    base.machine_power.insert(2, PowerUse { now: 4.0, max: 4.0, makes: 0.0 });
+    base.carriers = vec![
+        belt("Build_ConveyorBeltMk1_C", [0.0, 0.0], [500.0, 0.0]),
+        belt("Build_ConveyorBeltMk1_C", [0.0, 900.0], [500.0, 900.0]),
+        belt("Build_ConveyorLiftMk1_C", [9000.0, 0.0], [9000.0, 10.0]),
+    ];
+    let lm = |x: f32, recipe: &str| LiveMachine { class: "Build_ConstructorMk1_C".into(), recipe: Some(recipe.into()), x, y: 40.0, producing: Some(true), productivity: Some(80.0), ..Default::default() };
+    let live = LiveBuildings {
+        // The first moved a little and makes rods now; the second is gone;
+        // the third is there; one more is new.
+        machines: Some(vec![lm(2000.0, "Recipe_Screw_C"), lm(30.0, "Recipe_IronRod_C"), lm(5000.0, "Recipe_Wire_C")]),
+        // The first belt, reported the other way round; a new one.
+        carriers: Some(vec![
+            LiveCarrier { class: "Build_ConveyorBeltMk1_C".into(), fluid: false, points: vec![[480.0, 20.0], [10.0, 0.0]] },
+            LiveCarrier { class: "Build_ConveyorBeltMk2_C".into(), fluid: false, points: vec![[0.0, 5000.0], [800.0, 5000.0]] },
+        ]),
+        errors: vec![],
+    };
+    let out = crate::live::merge(&base, &live, &game);
+    let w = &out.world;
+    let ids: Vec<u32> = w.machines.iter().map(|m| m.id).collect();
+    assert_eq!(ids, vec![0, 1, 2], "ids stay indexes");
+    assert_eq!(w.machines[0].recipe.as_deref(), Some("Recipe_IronRod_C"), "its recipe as it is now");
+    assert_eq!(w.machines[1].x, 2000.0);
+    assert_eq!(w.machines[2].recipe.as_deref(), Some("Recipe_Wire_C"));
+    assert_eq!((out.added, out.removed, out.new_from), (1, 1, 2));
+    assert_eq!(w.links, vec![Link { from: 0, to: 1, item: None }], "the link to the one taken down goes; the other follows its machine");
+    assert!(w.machine_power.contains_key(&1) && w.machine_power.len() == 1);
+    assert_eq!(out.status[0].as_ref().unwrap().productivity, Some(80.0));
+    let classes: Vec<&str> = w.carriers.iter().map(|c| c.class.as_str()).collect();
+    assert_eq!(classes, vec!["Build_ConveyorBeltMk1_C", "Build_ConveyorLiftMk1_C", "Build_ConveyorBeltMk2_C"], "matched either way round; lifts stay; the gone one goes");
+    // Without the mod's machines, the save's stay as they are.
+    let partial = LiveBuildings { machines: None, carriers: None, errors: vec!["no answer".into()] };
+    assert_eq!(crate::live::merge(&base, &partial, &game).world.machines.len(), 3);
 }

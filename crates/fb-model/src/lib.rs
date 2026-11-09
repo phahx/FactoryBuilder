@@ -583,6 +583,41 @@ pub struct LiveSettings {
     pub frm_port: u16,
 }
 
+/// What's built right now, from the Ficsit Remote Monitoring mod. A part
+/// is None when the mod didn't answer for it (so nothing is taken away).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct LiveBuildings {
+    pub machines: Option<Vec<LiveMachine>>,
+    pub carriers: Option<Vec<LiveCarrier>>,
+    pub errors: Vec<String>,
+}
+
+/// A machine, extractor or generator now.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct LiveMachine {
+    pub class: String,
+    pub recipe: Option<String>,
+    pub x: f32,
+    pub y: f32,
+    pub z: f32,
+    /// The game's yaw, degrees (as `world::Machine::yaw`).
+    pub yaw: f32,
+    /// Clock speed, 1.0 = 100%.
+    pub clock: Option<f32>,
+    /// How much of its rate it's making, percent.
+    pub productivity: Option<f32>,
+    pub producing: Option<bool>,
+    pub paused: Option<bool>,
+}
+
+/// A belt or pipe now: its line on the map.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct LiveCarrier {
+    pub class: String,
+    pub fluid: bool,
+    pub points: Vec<[f32; 2]>,
+}
+
 /// What checking the dedicated server found.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct ServerCheck {

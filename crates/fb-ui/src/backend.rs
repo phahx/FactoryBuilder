@@ -96,6 +96,7 @@ pub enum Msg {
     LiveTrusted(Result<Status, String>),
     LiveToken(Result<(), String>),
     LivePlayers(Result<Vec<fb_model::world::PlayerSpot>, String>),
+    LiveBuildings(Result<fb_model::LiveBuildings, String>),
     LiveServerSave(Result<Option<fb_model::saves::SaveSummary>, String>),
 }
 

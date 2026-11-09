@@ -70,7 +70,14 @@ impl MapState {
         let c = rect.center();
         (self.center.0 + (p.x - c.x) as f64 / self.scale, self.center.1 + (p.y - c.y) as f64 / self.scale)
     }
-    fn set_world(&mut self, w: World) {
+    /// Centres the view on world (x, y) at `scale` px per cm.
+    pub(crate) fn look_at(&mut self, x: f64, y: f64, scale: f64) {
+        self.center = (x, y);
+        self.scale = scale;
+        self.fitted = true;
+    }
+
+    pub(crate) fn set_world(&mut self, w: World) {
         self.carrier_boxes = w
             .carriers
             .iter()
@@ -147,7 +154,7 @@ impl FactoryApp {
                     self.map.loading = None;
                 }
                 match result {
-                    Ok(w) => self.map.set_world(w),
+                    Ok(w) => self.live_world_loaded(w),
                     Err(e) => self.map.world_error = Some(e),
                 }
             }
@@ -279,7 +286,12 @@ pub fn map_ui(app: &mut FactoryApp, ui: &mut egui::Ui) {
             e.clone()
         } else if let Some(w) = &app.map.world {
             let follows = if app.map.session.as_deref() == Some(crate::live::SERVER_SESSION) { "follows the dedicated server" } else { "follows the newest save" };
-            format!("{} · saved {} · {follows}", w.save.name, date(w.save.saved_unix))
+            let mut s = format!("{} · saved {} · {follows}", w.save.name, date(w.save.saved_unix));
+            if app.live.buildings.is_some() && app.live.base.is_some() {
+                let (added, removed) = app.live.changes;
+                s += &format!(" · live: {added} built, {removed} taken down since");
+            }
+            s
         } else if app.map.sessions.as_ref().is_some_and(|l| l.is_empty()) {
             "No saves found in the game's save folder.".to_string()
         } else {
@@ -675,6 +687,7 @@ pub fn map_ui(app: &mut FactoryApp, ui: &mut egui::Ui) {
     if resp.clicked() && !ui.input(|i| i.modifiers.shift) {
         state.selected.clear();
     }
+    let (live_status, live_new_from) = (&app.live.status, app.live.new_from);
     if let Some(i) = player_hover {
         let saved = app.map.world.as_ref().map(|w| date(w.save.saved_unix)).unwrap_or_default();
         egui::show_tooltip_at_pointer(&ctx, ui.layer_id(), egui::Id::new("map_player"), |ui| crate::live::player_tip(ui, &players, i, live_players, &format!("saved {saved}")));
@@ -708,6 +721,7 @@ pub fn map_ui(app: &mut FactoryApp, ui: &mut egui::Ui) {
         if let Some(m) = w.machines.iter().rev().find(|m| under(&m.class, m.x, m.y, m.yaw)) {
             egui::show_tooltip_at_pointer(&ctx, ui.layer_id(), egui::Id::new("map_machine"), |ui| {
                 machine_tip(ui, assets, &game, &info, w, m);
+                crate::live::machine_lines(ui, live_status.get(m.id as usize).and_then(|s| s.as_ref()), m.id as usize >= live_new_from && !live_status.is_empty());
             });
         } else if let Some((title, circuit, line)) = power_hover {
             egui::show_tooltip_at_pointer(&ctx, ui.layer_id(), egui::Id::new("map_power"), |ui| {

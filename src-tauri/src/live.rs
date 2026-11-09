@@ -263,6 +263,71 @@ pub fn players(v: &Value) -> Vec<fb_model::world::PlayerSpot> {
         .collect()
 }
 
+/// Machines (getFactory, getExtractor, getGenerators) as FRM 1.5.5 writes
+/// them: ClassName, location {x, y, z, rotation}, RecipeClassName,
+/// ManuSpeed (%), Productivity (%, factories) or production[].ProdPercent
+/// (extractors), IsProducing, IsPaused.
+pub fn machines(v: &Value) -> Vec<fb_model::LiveMachine> {
+    let num = |o: &Value, k: &str| o.get(k).and_then(Value::as_f64).filter(|f| f.is_finite());
+    let text = |o: &Value, k: &str| o.get(k).and_then(Value::as_str).filter(|s| !s.is_empty() && s.len() <= 200 && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')).map(str::to_string);
+    v.as_array()
+        .into_iter()
+        .flatten()
+        .take(200_000)
+        .filter_map(|m| {
+            let class = text(m, "ClassName")?;
+            let loc = m.get("location")?;
+            let (x, y) = (num(loc, "x")?, num(loc, "y")?);
+            if x.abs() > 1e8 || y.abs() > 1e8 {
+                return None;
+            }
+            let productivity = num(m, "Productivity").or_else(|| m.get("production")?.as_array()?.first().and_then(|p| num(p, "ProdPercent")));
+            Some(fb_model::LiveMachine {
+                class,
+                recipe: text(m, "RecipeClassName"),
+                x: x as f32,
+                y: y as f32,
+                z: num(loc, "z").unwrap_or(0.0) as f32,
+                yaw: num(loc, "rotation").map(|r| (r - 90.0).rem_euclid(360.0)).unwrap_or(0.0) as f32,
+                clock: num(m, "ManuSpeed").map(|s| (s / 100.0) as f32),
+                productivity: productivity.map(|p| p.clamp(0.0, 1000.0) as f32),
+                producing: m.get("IsProducing").and_then(Value::as_bool),
+                paused: m.get("IsPaused").and_then(Value::as_bool),
+            })
+        })
+        .collect()
+}
+
+/// Belts (getBelts) or pipes (getPipes): ClassName, SplineData (points
+/// every 75 cm by default) and location1 (the true far end), thinned to a
+/// point every 2 m for the map.
+pub fn carriers(v: &Value, fluid: bool) -> Vec<fb_model::LiveCarrier> {
+    let xy = |p: &Value| Some([p.get("x")?.as_f64().filter(|f| f.is_finite() && f.abs() < 1e8)? as f32, p.get("y")?.as_f64().filter(|f| f.is_finite() && f.abs() < 1e8)? as f32]);
+    v.as_array()
+        .into_iter()
+        .flatten()
+        .take(200_000)
+        .filter_map(|c| {
+            let class = c.get("ClassName")?.as_str().filter(|s| s.len() <= 200)?.to_string();
+            let mut pts: Vec<[f32; 2]> = Vec::new();
+            for p in c.get("SplineData").and_then(Value::as_array).into_iter().flatten().take(20_000).filter_map(xy) {
+                if pts.last().is_none_or(|q| (q[0] - p[0]).hypot(q[1] - p[1]) >= 200.0) {
+                    pts.push(p);
+                }
+            }
+            if pts.is_empty() {
+                pts.extend(c.get("location0").and_then(xy));
+            }
+            if let Some(end) = c.get("location1").and_then(xy) {
+                if pts.last() != Some(&end) {
+                    pts.push(end);
+                }
+            }
+            (pts.len() >= 2).then_some(fb_model::LiveCarrier { class, fluid, points: pts })
+        })
+        .collect()
+}
+
 pub async fn download(host: &str, port: u16, pin: &str, token: &str, save: &str) -> Result<Bytes, Fail> {
     let req = api_request(host, port, Some(token), "DownloadSaveGame", json!({ "SaveName": save }))?;
     let r = https(host, port, Some(pin), req, SAVE_LIMIT, FILE_TIMEOUT).await?;
@@ -382,6 +447,22 @@ mod tests {
         assert_eq!(p.len(), 2);
         assert_eq!((p[0].name.as_deref(), p[0].x, p[0].yaw, p[0].online), (Some("Ada"), 1000.5, 0.0, Some(true)), "facing east is the game's yaw 0");
         assert_eq!((p[1].name.as_deref(), p[1].yaw, p[1].online), (None, 270.0, Some(false)), "north is the game's -90");
+    }
+
+    #[test]
+    fn frm_buildings_are_read_as_its_source_writes_them() {
+        let v = json!([
+            { "ClassName": "Build_ConstructorMk1_C", "RecipeClassName": "Recipe_IronPlate_C", "location": { "x": 100.0, "y": 200.0, "z": 0.0, "rotation": 180.0 }, "ManuSpeed": 150.0, "Productivity": 87.5, "IsProducing": true, "IsPaused": false },
+            { "ClassName": "Build_MinerMk1_C", "location": { "x": 1.0, "y": 2.0, "z": 3.0, "rotation": 90.0 }, "production": [{ "ProdPercent": 50.0 }], "IsProducing": true },
+            { "ClassName": "../evil", "location": { "x": 0.0, "y": 0.0 } }
+        ]);
+        let m = machines(&v);
+        assert_eq!(m.len(), 2, "names are only class names");
+        assert_eq!((m[0].recipe.as_deref(), m[0].yaw, m[0].clock, m[0].productivity), (Some("Recipe_IronPlate_C"), 90.0, Some(1.5), Some(87.5)));
+        assert_eq!((m[1].productivity, m[1].yaw), (Some(50.0), 0.0));
+        let b = json!([{ "ClassName": "Build_ConveyorBeltMk1_C", "SplineData": [{ "x": 0.0, "y": 0.0 }, { "x": 75.0, "y": 0.0 }, { "x": 150.0, "y": 0.0 }, { "x": 225.0, "y": 0.0 }, { "x": 300.0, "y": 0.0 }], "location0": { "x": 0.0, "y": 0.0 }, "location1": { "x": 320.0, "y": 0.0 } }]);
+        let c = carriers(&b, false);
+        assert_eq!(c[0].points, vec![[0.0, 0.0], [225.0, 0.0], [320.0, 0.0]], "a point every 2 m, and the true end");
     }
 
     #[test]
