@@ -1409,11 +1409,22 @@ where
                 None => Shape::Noop,
             };
             let node_rect = titlebar_rect.union(body_rect).union(bottom_body_rect);
+            let warning = self.graph[self.node_id].user_data.warning_outline(self.node_id, self.graph, user_state);
             let outline = if self.selected {
                 Shape::Rect(RectShape {
                     rect: node_rect.expand(2.0 * pan_zoom.zoom),
                     rounding,
                     fill: self.style.selection,
+                    stroke: Stroke::NONE,
+                    blur_width: 0.0,
+                    fill_texture_id: Default::default(),
+                    uv: Rect::ZERO,
+                })
+            } else if let Some(c) = warning {
+                Shape::Rect(RectShape {
+                    rect: node_rect.expand(2.0 * pan_zoom.zoom),
+                    rounding,
+                    fill: c,
                     stroke: Stroke::NONE,
                     blur_width: 0.0,
                     fill_texture_id: Default::default(),

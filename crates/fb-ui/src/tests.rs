@@ -144,7 +144,8 @@ fn plan_builds_a_balanced_graph() {
     let game = app.user.game.clone();
     let ore = app.summary.resources["Desc_OreIron_C"];
     let miner = crate::extractors::find(&game, "Build_MinerMk1_C").unwrap();
-    let setup = fb_model::MachineSetup::new(ore / miner.per_min(fb_model::Purity::Normal, 1.0), 1.0, 0);
+    // Whole miners at 100%, as Plan factory builds them.
+    let setup = fb_model::MachineSetup::new((ore / miner.per_min(fb_model::Purity::Normal, 1.0) - 1e-6).ceil(), 1.0, 0);
     let miners = crate::extractors::power(miner, setup.count, setup.clock);
     assert!(miners > 0.0);
     assert!((app.power() - (24.0 + miners)).abs() < 1e-3, "power {} = 24 + {miners}", app.power());
@@ -2051,6 +2052,20 @@ fn master_graph_links_factories_and_flags_shortfalls() {
     assert!((t.from_outside["Desc_IronIngot_C"] - 60.0).abs() < 1e-6);
     assert!(app.summary.issues.is_empty(), "{:?}", app.summary.issues);
 
+    // In the rod factory, its Input isn't brought in from anywhere yet.
+    let input_warned = |app: &mut FactoryApp| {
+        use egui_node_graph2::NodeDataTrait;
+        let g = &app.state.graph;
+        let n = g.iter_nodes().find(|n| matches!(g[*n].user_data.kind, crate::graph::NodeKind::Input { .. })).unwrap();
+        let data = g[n].user_data.clone();
+        data.warning_outline(n, &app.state.graph, &mut app.user).is_some()
+    };
+    app.activate(rods);
+    frames(&ctx, &mut app, 2);
+    assert!(input_warned(&mut app), "nothing brings the ingots in");
+    app.activate(MASTER);
+    frames(&ctx, &mut app, 2);
+
     // One smelter sends 30 ingots; the rod factory needs 60.
     link(&mut app, smelting, rods, "Desc_IronIngot_C");
     frames(&ctx, &mut app, 2);
@@ -2061,6 +2076,11 @@ fn master_graph_links_factories_and_flags_shortfalls() {
     let t = app.project_totals();
     assert!(!t.from_outside.contains_key("Desc_IronIngot_C"));
     assert!((t.products["Desc_IronRod_C"] - 30.0).abs() < 1e-6, "{:?}", t.products);
+    app.activate(rods);
+    frames(&ctx, &mut app, 2);
+    assert!(input_warned(&mut app), "linked, but only half its ingots arrive");
+    app.activate(MASTER);
+    frames(&ctx, &mut app, 2);
     assert!((t.resources["Desc_OreIron_C"] - 30.0).abs() < 1e-6);
 
     // Two smelters cover it; edits in the factory flow back to its block.
@@ -2080,6 +2100,11 @@ fn master_graph_links_factories_and_flags_shortfalls() {
     frames(&ctx, &mut app, 2);
     assert!(app.summary.issues.is_empty(), "{:?}", app.summary.issues);
     assert!((app.project_totals().products["Desc_IronRod_C"] - 60.0).abs() < 1e-6);
+    app.activate(rods);
+    frames(&ctx, &mut app, 2);
+    assert!(!input_warned(&mut app), "all 60 arrive: no warning");
+    app.activate(MASTER);
+    frames(&ctx, &mut app, 2);
 
     // Saved as a project (there's more than one factory) and opened again.
     let path = "C:/Factories/Base.fbproject";
@@ -2177,6 +2202,15 @@ fn power_poles_show_which_factories_power_which() {
     assert!(power_port(&app, plant, false) && !power_port(&app, plant, true));
     assert!(power_port(&app, smelting, true) && !power_port(&app, smelting, false));
     assert!(power_wires(&app).is_empty(), "nothing wired yet");
+    // Not getting power: outlined red.
+    let outline = |app: &mut FactoryApp, f: u32| {
+        use egui_node_graph2::NodeDataTrait;
+        let b = crate::project::block_of(&app.state.graph, f).unwrap();
+        let data = app.state.graph[b].user_data.clone();
+        data.warning_outline(b, &app.state.graph, &mut app.user)
+    };
+    assert_eq!(outline(&mut app, smelting), Some(crate::theme::DANGER));
+    assert_eq!(outline(&mut app, plant), None, "the plant needs none");
 
     // A pole from the canvas menu; the plant and the smelters wired to it.
     app.new_pole_at(egui::pos2(0.0, -400.0));
@@ -2196,6 +2230,7 @@ fn power_poles_show_which_factories_power_which() {
     let sb = crate::project::block_of(&app.state.graph, smelting).unwrap();
     let s = stat(&app, sb, PORT);
     assert!(s.connected && (s.have - s.want).abs() < 1e-9, "fully powered: {s:?}");
+    assert_eq!(outline(&mut app, smelting), None, "powered: no warning");
     assert!(app.summary.issues.is_empty(), "{:?}", app.summary.issues);
     // Item flows don't see power wires.
     assert!(app.project_totals().from_outside.contains_key("Desc_IronIngot_C"));
@@ -2602,6 +2637,77 @@ fn extractors_extract_by_themselves_and_their_resource_shows_it() {
     assert!((got - 60.0).abs() < 1e-6, "one Miner Mk.1 makes its 60, whatever the resource said: {got}");
     assert!((app.summary.resources[item] - 60.0).abs() < 1e-6, "Raw resources counts what's extracted");
     assert!(matches!(app.graph()[miner].user_data.kind, NodeKind::Extractor { .. }));
+}
+
+#[test]
+fn a_small_plan_builds_whole_machines_and_shows_what_its_miner_could_do() {
+    use crate::graph::{input_number, NodeKind, CLOCK, MACHINES};
+    let Some((ctx, mut app, _)) = harness() else { return };
+    frames(&ctx, &mut app, 2);
+    app.planner_mut().targets = vec![Target { item: "Desc_IronIngot_C".into(), rate: 5.0 }];
+    app.press_plan();
+    frames(&ctx, &mut app, 4);
+    let g = app.graph();
+    let find = |f: fn(&NodeKind) -> bool| g.iter_nodes().find(|n| f(&g[*n].user_data.kind)).unwrap();
+    let smelter = find(|k| matches!(k, NodeKind::Recipe { .. }));
+    let miner = find(|k| matches!(k, NodeKind::Extractor { .. }));
+    let ore = find(|k| matches!(k, NodeKind::Resource { .. }));
+    // 5 ingots: a sixth of a Smelter's 30, built as 1 Smelter at 16.67%.
+    assert_eq!(input_number(g, smelter, MACHINES), 1.0);
+    assert!((input_number(g, smelter, CLOCK) - 100.0 / 6.0).abs() < 1e-4, "{}", input_number(g, smelter, CLOCK));
+    // One whole Miner Mk.1 at 100%, as the extractor settings say.
+    assert_eq!((input_number(g, miner, MACHINES), input_number(g, miner, CLOCK)), (1.0, 100.0));
+    let texts = drawn_texts(&ctx, &mut app);
+    assert!(texts.iter().any(|t| t == "5 of 60"), "Extracted: 5 taken of the 60 it can");
+    for (p, can) in [("Pure", "5 of 120"), ("Impure", "5 of 30")] {
+        let _ = ore;
+        app.request_frame_all();
+        frames(&ctx, &mut app, 2);
+        press(&ctx, &mut app, p);
+        frames(&ctx, &mut app, 2);
+        let texts = drawn_texts(&ctx, &mut app);
+        assert!(texts.iter().any(|t| t == can), "{p}: {can}; {:?}", texts.iter().filter(|t| t.contains(" of ")).collect::<Vec<_>>());
+    }
+    // The Overview's raw resources are just what's extracted.
+    assert!(!texts.iter().any(|t| t.contains("Miner Mk.1 on Normal nodes")), "no extractor plan in the Overview any more");
+}
+
+#[test]
+fn water_extractors_have_no_purity() {
+    use crate::graph::{Template, CLOCK, MACHINES};
+    use egui_node_graph2::{AnyParameterId as P, NodeDataTrait};
+    let Some((ctx, mut app, _)) = harness() else { return };
+    frames(&ctx, &mut app, 2);
+    let game = app.user.game.clone();
+    // From the game's Docs: 120 m³/min at 100% on any water, 300 at 250%, 20 MW.
+    let w = crate::extractors::find(&game, "Build_WaterPump_C").expect("the Water Extractor");
+    for p in fb_model::Purity::ALL {
+        assert_eq!(w.per_min(p, 1.0), 120.0, "{p:?}");
+    }
+    assert_eq!(w.per_min(fb_model::Purity::Normal, 2.5), 300.0);
+    assert_eq!(crate::extractors::power(w, 1, 1.0), 20.0);
+    assert!(!crate::extractors::has_purity(&game, "Build_WaterPump_C"));
+    // On the graph: water's resource node has no purity switch with a Water
+    // Extractor on it, and the extractor puts out one pipe.
+    let water = "Desc_Water_C";
+    let p = app.screen_to_graph(egui::pos2(450.0, 300.0));
+    let res = app.add_test_node(Template::Resource(water.into()), p);
+    let p = app.screen_to_graph(egui::pos2(850.0, 300.0));
+    let x = app.add_test_node(Template::Extractor { item: water.into(), class: "Build_WaterPump_C".into(), purity: fb_model::Purity::Pure }, p);
+    let p = app.screen_to_graph(egui::pos2(1150.0, 300.0));
+    let sink = app.add_test_node(Template::Sink(water.into()), p);
+    for (n, v) in [(MACHINES, 1.0), (CLOCK, 250.0)] {
+        let i = app.state.graph[x].get_input(n).unwrap();
+        app.state.graph[i].value.set_number(v);
+    }
+    connect(&mut app, res, x, water);
+    let pipe = connect(&mut app, x, sink, water);
+    frames(&ctx, &mut app, 3);
+    assert!((app.wire_flow[&pipe] - 300.0).abs() < 1e-6, "300 m³/min at 250%, purity or not");
+    assert!(!crate::widgets::TEST_BUTTONS.with(|b| b.borrow().iter().any(|x| x.0 == "Impure")), "no purity on water");
+    let out = app.state.graph[x].outputs[0].1;
+    let data = app.state.graph[x].user_data.clone();
+    assert!(!data.accepts_wire(x, P::Output(out), &app.state.graph, &mut app.user), "one pipe out");
 }
 
 #[test]

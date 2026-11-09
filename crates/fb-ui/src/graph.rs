@@ -240,15 +240,21 @@ pub struct UserState {
     /// Power pole tiers (pole id -> 1 to 3), from the master graph's plan.
     #[serde(skip)]
     pub pole_tiers: HashMap<u32, u8>,
-    /// Resource nodes with extractors on them: what those extract.
+    /// Resource nodes with extractors on them: what those extract, and what
+    /// they could.
     #[serde(skip)]
     pub ground: HashMap<NodeId, f64>,
+    #[serde(skip)]
+    pub ground_cap: HashMap<NodeId, f64>,
     /// Resource nodes wired straight into machines (no extractor).
     #[serde(skip)]
     pub direct_resources: std::collections::HashSet<NodeId>,
     /// Output nodes: what arrives.
     #[serde(skip)]
     pub delivered: HashMap<NodeId, f64>,
+    /// Input nodes no other factory (enough of) brings in.
+    #[serde(skip)]
+    pub unsupplied: std::collections::HashSet<NodeId>,
 }
 
 impl UserState {
@@ -552,12 +558,12 @@ impl WidgetValueTrait for PortValue {
             let shown = match &d.kind {
                 NodeKind::Resource { .. } if name == RATE && !s.direct_resources.contains(&node_id) => Some((
                     "Extracted",
-                    s.ground.get(&node_id).copied().unwrap_or(0.0),
-                    "What the extractors on this resource take: their building, clock speed and this node's purity decide it.",
+                    format!("{} of {}", fmt_num(s.ground.get(&node_id).copied().unwrap_or(0.0)), fmt_num(s.ground_cap.get(&node_id).copied().unwrap_or(0.0))),
+                    "What's taken of what the extractors on it can extract: their building, number and clock speed, and this node's purity, decide that. The rest backs up.",
                 )),
                 NodeKind::Output { .. } if name == RATE => Some((
                     "Delivered",
-                    s.delivered.get(&node_id).copied().unwrap_or(0.0),
+                    fmt_num(s.delivered.get(&node_id).copied().unwrap_or(0.0)),
                     "What arrives here from the machines before it.",
                 )),
                 _ => None,
@@ -568,7 +574,7 @@ impl WidgetValueTrait for PortValue {
                     ui.label(RichText::new(label).color(TEXT_DIM));
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         ui.label(RichText::new(suffix).color(TEXT_DIM));
-                        ui.label(RichText::new(fmt_num(v)).color(TEXT));
+                        ui.label(RichText::new(v).color(TEXT));
                     });
                 })
                 .response
@@ -796,8 +802,8 @@ impl NodeDataTrait for NodeData {
                 NodeKind::Pole { .. } | NodeKind::Merger { .. } | NodeKind::Splitter { .. } | NodeKind::Pump { .. } => None,
                 NodeKind::Extractor { .. } => {
                     let eff = s.nodes.get(&node_id).map(|n| n.efficiency).unwrap_or(1.0);
-                    ui.label(RichText::new(format!("{:.0}%", eff * 100.0)).small().color(supply_color(eff, 1.0)))
-                        .on_hover_text("Running speed: how much of its full rate this extractor group can run at.");
+                    ui.label(RichText::new(format!("{:.0}%", eff * 100.0)).small().color(TEXT_DIM))
+                        .on_hover_text("How much of what it can extract is taken; the rest backs up, as in game.");
                     None
                 }
             };
@@ -821,6 +827,21 @@ impl NodeDataTrait for NodeData {
         _s: &mut UserState,
     ) -> Option<Color32> {
         Some(HEADER)
+    }
+
+    /// A factory block that needs power and gets none (or not enough); an
+    /// Input no other factory (enough of) brings in.
+    fn warning_outline(&self, node_id: NodeId, _graph: &FactoryGraph, s: &mut UserState) -> Option<Color32> {
+        if matches!(self.kind, NodeKind::Input { .. }) {
+            return s.unsupplied.contains(&node_id).then_some(DANGER);
+        }
+        if !matches!(self.kind, NodeKind::Factory { .. }) {
+            return None;
+        }
+        let p = s.ports.get(&(node_id, crate::power_net::PORT.to_string()))?;
+        // Only its Power input (an output has have == want).
+        let input = p.want > 1e-9 && (!p.connected || p.have < p.want - 1e-6);
+        (input && p.have < p.want - 1e-6).then_some(DANGER)
     }
 
     fn titlebar_strip(
@@ -897,7 +918,9 @@ impl NodeDataTrait for NodeData {
                     ui.vertical(|ui| {
                         ui.spacing_mut().item_spacing.y = 0.0;
                         widgets::name_label(ui, RichText::new(&name).color(TEXT));
-                        widgets::name_label(ui, RichText::new(build_hint(&setup)).small().color(TEXT_DIM));
+                        if let Some(line) = build_line(graph, node_id, &setup) {
+                            widgets::name_label(ui, RichText::new(line).small().color(TEXT_DIM));
+                        }
                         if let Some(extra) = &extra {
                             widgets::name_label(ui, RichText::new(extra).small().color(ACCENT));
                         }
@@ -939,6 +962,13 @@ impl NodeDataTrait for NodeData {
         }
         vec![]
     }
+}
+
+/// What to build, when a node's Machines isn't a whole number (older
+/// plans): "Build 4 at 81.25% clock speed".
+pub fn build_line(graph: &FactoryGraph, node: NodeId, m: &fb_model::MachineSetup) -> Option<String> {
+    let machines = input_number(graph, node, MACHINES);
+    ((machines - m.count as f64).abs() > 1e-6).then(|| build_hint(m))
 }
 
 /// "Build 3 at 100% clock speed" / "Build 4 at 81.25% clock speed".

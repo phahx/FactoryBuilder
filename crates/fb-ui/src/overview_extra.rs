@@ -8,7 +8,7 @@
 //! see `fb_model::Purity`.
 
 use crate::assets::Assets;
-use crate::fmt::{fmt_num, fmt_rate_unit};
+use crate::fmt::fmt_num;
 use crate::theme::*;
 use crate::widgets;
 use egui::{Id, RichText, Ui};
@@ -195,22 +195,14 @@ fn short_tier(name: &str) -> &str {
     name.strip_prefix("Miner ").unwrap_or(name)
 }
 
-/// "Raw resources" as extractors, with the settings that drive them.
-/// Returns true when a setting changed.
-pub fn extraction(
-    ui: &mut Ui,
-    assets: &mut Assets,
-    game: &GameData,
-    resources: &BTreeMap<String, f64>,
-    extracted: &BTreeMap<String, Vec<String>>,
-    settings: &mut ExtractionSettings,
-) -> bool {
+/// The planner's extractor section: what Plan factory builds its
+/// extractors as (miner tier, node purity, clock speed). Returns true when a
+/// setting changed.
+pub fn extraction_settings(ui: &mut Ui, assets: &mut Assets, game: &GameData, settings: &mut ExtractionSettings) -> bool {
     let mut changed = false;
-    if resources.is_empty() {
-        return false;
-    }
     widgets::divider(ui);
-    widgets::section(ui, "Raw resources", None);
+    widgets::section(ui, "Extraction", None);
+    widgets::caption(ui, "What Plan factory builds its extractors as. Change any of them in the graph afterwards.");
     let miners: Vec<&Extractor> = game
         .extraction
         .extractors
@@ -224,7 +216,7 @@ pub fn extraction(
         let current = miners.iter().find(|m| m.class == settings.miner).map(|m| m.name.as_str()).unwrap_or("");
         let summary = format!("{current}, {}, {}%", settings.purity.label(), fmt_num(settings.clock_pct));
         widgets::collapsible(ui, assets, "extractor-settings", "Extractors", &summary, |ui, _| {
-            widgets::caption(ui, "What Plan factory mines with. Purity applies to every resource except Water.");
+            widgets::caption(ui, "Purity applies to every resource except Water.");
             ui.add_space(4.0);
             ui.label(RichText::new("Miner").color(TEXT));
             let mut idx = miners.iter().position(|m| m.class == settings.miner).unwrap_or(0);
@@ -276,66 +268,6 @@ pub fn extraction(
             );
         });
     }
-    let plans: BTreeMap<String, ExtractPlan> =
-        plan_all(game, &not_extracted(resources, extracted), settings).into_iter().map(|p| (p.item.clone(), p)).collect();
-    for (item, rate) in resources {
-        let rate_text = RichText::new(fmt_rate_unit(*rate, game.item_form(item))).color(TEXT);
-        widgets::info_row(ui, assets, item, game.item_name(item), rate_text);
-        // Extractor nodes in the graph say what extracts it.
-        if let Some(lines) = extracted.get(item) {
-            ui.horizontal(|ui| {
-                ui.add_space(30.0);
-                ui.vertical(|ui| {
-                    for l in lines {
-                        ui.add(egui::Label::new(RichText::new(l).small().color(TEXT)).wrap());
-                    }
-                });
-            });
-            ui.add_space(4.0);
-            continue;
-        }
-        let Some(p) = plans.get(item) else { continue };
-        let solid = game.item_form(item) == Form::Solid;
-        ui.horizontal(|ui| {
-            ui.add_space(30.0);
-            ui.vertical(|ui| {
-                let mut tip = format!(
-                    "One {} makes {}.",
-                    p.name,
-                    fmt_rate_unit(p.per_each, game.item_form(item))
-                );
-                match &p.belt {
-                    BeltNote::Fits(b) => tip.push_str(&format!(" That fits a {b}.")),
-                    BeltNote::TooFast { belt, belt_per_min } => tip.push_str(&format!(
-                        " That is more than a {belt} carries ({} per min).",
-                        fmt_num(*belt_per_min)
-                    )),
-                    BeltNote::None => {}
-                }
-                ui.add(egui::Label::new(RichText::new(plan_text(p, solid)).small().color(TEXT)).wrap())
-                    .on_hover_text(tip);
-                if let BeltNote::TooFast { belt, .. } = &p.belt {
-                    ui.add(
-                        egui::Label::new(
-                            RichText::new(format!("One extractor outputs more than a {belt} carries."))
-                                .small()
-                                .color(ACCENT),
-                        )
-                        .wrap(),
-                    );
-                }
-                if p.tiers.len() > 1 {
-                    let list: Vec<String> =
-                        p.tiers.iter().map(|(n, c)| format!("{} {}", fmt_num(*c as f64), short_tier(n))).collect();
-                    ui.add(
-                        egui::Label::new(RichText::new(format!("Or {}", list.join(" · "))).small().color(TEXT_DIM))
-                            .wrap(),
-                    );
-                }
-            });
-        });
-        ui.add_space(4.0);
-    }
     changed
 }
 
@@ -356,6 +288,8 @@ pub fn build_cost(
     extracted: &BTreeMap<String, Vec<String>>,
     settings: &ExtractionSettings,
 ) {
+    // The graph's extractors are its buildings; only resources with none
+    // (taken straight from a resource node) are planned from the settings.
     let plans = plan_all(game, &not_extracted(resources, extracted), settings);
     let mut all = buildings.clone();
     all.extend(extractors.iter().map(|(k, v)| (k.clone(), *v)));
@@ -372,7 +306,7 @@ pub fn build_cost(
     widgets::collapsible(ui, assets, "build-cost", "Build cost", &summary, |ui, assets| {
         widgets::caption(
             ui,
-            "Every machine in the graph, rounded up to whole machines, plus the extractors under Raw resources. Belts, pipes, power poles, foundations and Resource Well Pressurizers are not included.",
+            "Every machine and extractor in the graph. Belts, pipes, power poles, foundations and Resource Well Pressurizers are not included.",
         );
         for (item, amount) in rows {
             widgets::info_row(ui, assets, item, game.item_name(item), RichText::new(fmt_num(*amount)).color(TEXT));

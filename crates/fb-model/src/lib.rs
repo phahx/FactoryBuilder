@@ -407,6 +407,10 @@ pub struct SolveRequest {
     /// (from the extractor settings): the plan counts their power too.
     #[serde(default)]
     pub extraction_mw: BTreeMap<ClassName, f64>,
+    /// Generate mode: MW more to make than the plan's own estimate (what the
+    /// built factory was found to use beyond it).
+    #[serde(default)]
+    pub extra_mw: f64,
 }
 
 /// Where the factory's power comes from.

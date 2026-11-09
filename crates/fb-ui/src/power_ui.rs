@@ -7,7 +7,7 @@
 
 use crate::assets::{Assets, UiIcon};
 use crate::fmt::{fmt_num, fmt_rate_unit};
-use crate::graph::{build_hint, input_number, FactoryGraph, NodeKind, UserState, CLOCK, MACHINES};
+use crate::graph::{input_number, FactoryGraph, NodeKind, UserState, CLOCK, MACHINES};
 use crate::theme::{self, *};
 use crate::widgets;
 use egui::{vec2, RichText, Ui};
@@ -144,7 +144,9 @@ pub fn generator_footer(ui: &mut Ui, s: &mut UserState, graph: &FactoryGraph, no
         ui.vertical(|ui| {
             ui.spacing_mut().item_spacing.y = 0.0;
             widgets::name_label(ui, RichText::new(b.map(|b| b.name.as_str()).unwrap_or(&r.building)).color(TEXT));
-            widgets::name_label(ui, RichText::new(build_hint(&setup)).small().color(TEXT_DIM));
+            if let Some(line) = crate::graph::build_line(graph, node_id, &setup) {
+                widgets::name_label(ui, RichText::new(line).small().color(TEXT_DIM));
+            }
             if let Some(extra) = &extra {
                 widgets::name_label(ui, RichText::new(extra).small().color(ACCENT));
             }

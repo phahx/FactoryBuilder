@@ -231,6 +231,7 @@ pub fn planner(app: &mut FactoryApp, ui: &mut Ui) {
                 ],
             );
             changed |= crate::power_ui::power_section(ui, assets, &game, &mut planner.power);
+            changed |= crate::overview_extra::extraction_settings(ui, assets, &game, &mut planner.extraction);
             ui.add_space(6.0);
             let label = if *solving {
                 "Planning…"
@@ -447,7 +448,6 @@ pub fn overview(app: &mut FactoryApp, ui: &mut Ui) {
     let empty = app.state.graph.nodes.is_empty();
     let mut focus = None;
     let mut follow = None;
-    let mut extraction_changed = false;
     {
         let FactoryApp { summary: s, user, room, planner, .. } = app;
         let assets = user.assets.as_mut().expect("assets");
@@ -535,8 +535,7 @@ pub fn overview(app: &mut FactoryApp, ui: &mut Ui) {
                     );
                 }
             };
-            extraction_changed |=
-                crate::overview_extra::extraction(ui, assets, &game, &s.resources, &s.extracted, &mut planner.extraction);
+            flows(ui, assets, "Raw resources", &s.resources);
             crate::overview_extra::build_cost(ui, assets, &game, &s.buildings, &s.extractors, &s.resources, &s.extracted, &planner.extraction);
             flows(ui, assets, "Inputs", &s.inputs);
             flows(ui, assets, "Byproducts", &s.sunk);
@@ -576,9 +575,6 @@ pub fn overview(app: &mut FactoryApp, ui: &mut Ui) {
                 }
             }
         });
-    }
-    if extraction_changed {
-        app.changed();
     }
     if focus.is_some() {
         app.focus_node = focus;

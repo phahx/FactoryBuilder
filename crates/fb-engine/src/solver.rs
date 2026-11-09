@@ -153,7 +153,8 @@ pub fn solve(data: &GameData, req: &SolveRequest) -> SolveOutcome {
     }
     let mut problem = vars.minimise(objective.clone()).using(microlp);
     if generate {
-        problem.add_constraint(net_power.leq(0.0));
+        let extra = if req.extra_mw.is_finite() { req.extra_mw.max(0.0) } else { 0.0 };
+        problem.add_constraint((net_power + extra).leq(0.0));
     }
     for (&item, expr) in &balance {
         let mut e = expr.clone();

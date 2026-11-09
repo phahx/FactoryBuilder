@@ -176,6 +176,11 @@ pub struct FactoryApp {
     pub(crate) power_links: bool,
     /// View › Flow direction: arrows moving along wires.
     pub(crate) flow_arrows: bool,
+    /// What each factory's inputs got on the master graph, last worked out.
+    pub(crate) master_inputs: std::collections::HashMap<(u32, String), PortStat>,
+    /// Generate mode: re-plans so far, and the MW added to cover the build.
+    pub(crate) plan_tries: u8,
+    pub(crate) plan_extra_mw: f64,
     /// The master graph's right-click menu on empty canvas: where it opened
     /// (screen) and where a factory added from it goes (unzoomed graph).
     pub(crate) master_menu: Option<(egui::Pos2, egui::Pos2)>,
@@ -298,6 +303,9 @@ impl FactoryApp {
             minimap: true,
             power_links: true,
             flow_arrows: true,
+            plan_tries: 0,
+            plan_extra_mw: 0.0,
+            master_inputs: Default::default(),
             master_menu: None,
             belt_menu: None,
             block_spot: None,
@@ -641,17 +649,22 @@ impl FactoryApp {
                             crate::extractors::add_to_plan(&mut self.state, &mut self.user, &self.planner.extraction);
                             // Shared belts and pipes through mergers and splitters.
                             crate::routers::tidy(&mut self.state, &mut self.user);
+                            self.evaluate_now();
+                            // Generating its own power, the plan must cover what
+                            // the built factory uses (whole machines, extractors):
+                            // plan again with the difference, a few times at most.
+                            let short = self.summary.power_mw - self.summary.generation.unwrap_or(0.0);
+                            if self.planner.power.mode == PowerMode::Generate && short > 1e-3 && self.plan_tries < 3 {
+                                self.plan_tries += 1;
+                                self.plan_extra_mw += short;
+                                self.send_plan();
+                                continue;
+                            }
                             self.changed();
                             self.relayout = true;
-                            self.say(
-                                ctx,
-                                format!(
-                                    "Planned {} machines and nodes using {} MW.",
-                                    plan.nodes.len(),
-                                    crate::fmt::fmt_num(plan.power_mw)
-                                ),
-                                false,
-                            );
+                            // The built factory's own figures, as the Overview shows them.
+                            let buildings: f64 = self.summary.buildings.values().chain(self.summary.extractors.values()).map(|b| b.0).sum();
+                            self.say(ctx, format!("Planned {} buildings using {} MW.", crate::fmt::fmt_num(buildings), crate::fmt::fmt_num(self.summary.power_mw)), false);
                         }
                         Ok(SolveOutcome::Infeasible(why)) => self.solve_notes = why,
                         Err(e) => self.solve_notes = vec![e],
@@ -828,6 +841,12 @@ impl FactoryApp {
     }
 
     pub(crate) fn request_plan(&mut self) {
+        self.plan_tries = 0;
+        self.plan_extra_mw = 0.0;
+        self.send_plan();
+    }
+
+    fn send_plan(&mut self) {
         self.solving = true;
         let req = SolveRequest {
             targets: self.planner.targets.clone(),
@@ -837,6 +856,7 @@ impl FactoryApp {
             objective: self.planner.objective,
             power: self.planner.power.clone(),
             extraction_mw: crate::extractors::mw_per_unit(&self.user.game, &self.planner.extraction),
+            extra_mw: self.plan_extra_mw,
         };
         self.backend
             .call("solve", json!({ "request": req }), Msg::Solved);
@@ -860,10 +880,7 @@ impl FactoryApp {
         let mut ids = Vec::with_capacity(plan.nodes.len());
         for node in &plan.nodes {
             let (template, number) = match &node.kind {
-                PlanNodeKind::Recipe { recipe, machines } => (
-                    Template::Recipe(recipe.clone()),
-                    Some((MACHINES, *machines)),
-                ),
+                PlanNodeKind::Recipe { recipe, machines } => (Template::Recipe(recipe.clone()), Some((MACHINES, *machines))),
                 PlanNodeKind::Resource { item, rate } => {
                     (Template::Resource(item.clone()), Some((RATE, *rate)))
                 }
@@ -876,8 +893,16 @@ impl FactoryApp {
                 PlanNodeKind::Surplus { item, .. } => (Template::Sink(item.clone()), None),
             };
             let id = self.add_node(template, egui::pos2(node.pos[0], node.pos[1]));
-            if let Some((name, v)) = number {
-                self.set_number(id, name, v);
+            match number {
+                // The solver's machines' worth of work, built as whole
+                // machines at one clock speed, as in game.
+                Some((MACHINES, m)) => {
+                    let setup = fb_model::MachineSetup::new(m, 1.0, 0);
+                    self.set_number(id, MACHINES, setup.count as f64);
+                    self.set_number(id, CLOCK, (setup.clock * 100.0 * 1e6).round() / 1e6);
+                }
+                Some((name, v)) => self.set_number(id, name, v),
+                None => {}
             }
             ids.push(id);
         }
@@ -1115,9 +1140,46 @@ impl FactoryApp {
         self.user.ports = e.ports;
         self.user.nodes = e.nodes;
         self.user.ground = e.ground;
+        self.user.ground_cap = e.ground_cap;
+        self.check_inputs();
         self.user.direct_resources = e.direct_resources;
         self.user.delivered = e.delivered;
         self.summary = e.summary;
+    }
+
+    /// The master graph: what each factory block's inputs got last time it
+    /// was worked out. In a factory: its Input nodes that no other factory
+    /// brings (enough of) in, for their warning outline.
+    fn check_inputs(&mut self) {
+        let master = crate::project::MASTER;
+        if self.active == master {
+            let g = &self.state.graph;
+            for n in g.iter_nodes() {
+                let Some(f) = crate::project::factory_of(g, n) else { continue };
+                for (name, i) in &g[n].inputs {
+                    if let Some(s) = self.user.ports.get(&(n, name.clone())) {
+                        self.master_inputs.insert((f, g[*i].typ.0.clone()), *s);
+                    }
+                }
+            }
+            self.user.unsupplied.clear();
+            return;
+        }
+        let Some(mg) = self.doc(master).and_then(|d| d.body.as_ref()).map(|b| &b.state.graph) else { return };
+        let block = crate::project::block_of(mg, self.active);
+        let linked = |item: &str| {
+            block.is_some_and(|b| mg[b].inputs.iter().any(|(_, i)| mg[*i].typ.0 == item && !mg.connections(*i).is_empty()))
+        };
+        let g = &self.state.graph;
+        let mut out = std::collections::HashSet::new();
+        for n in g.iter_nodes() {
+            let NodeKind::Input { item } = &g[n].user_data.kind else { continue };
+            let enough = self.master_inputs.get(&(self.active, item.clone())).is_none_or(|s| s.have >= s.want * 0.995);
+            if !(linked(item) && enough) {
+                out.insert(n);
+            }
+        }
+        self.user.unsupplied = out;
     }
 
     // ------------------------------------------------------------------ UI
@@ -2606,10 +2668,12 @@ impl FactoryApp {
     }
     #[cfg(test)]
     pub(crate) fn min_efficiency(&self) -> f64 {
+        // Extractors run below full when what they feed takes less (normal).
         self.user
             .nodes
-            .values()
-            .map(|n| n.efficiency)
+            .iter()
+            .filter(|(n, _)| !matches!(self.state.graph.nodes.get(**n).map(|x| &x.user_data.kind), Some(NodeKind::Extractor { .. })))
+            .map(|(_, n)| n.efficiency)
             .fold(1.0, f64::min)
     }
     #[cfg(test)]
@@ -2738,8 +2802,10 @@ pub(crate) struct Evaluation {
     pub ports: std::collections::HashMap<(NodeId, String), PortStat>,
     pub nodes: std::collections::HashMap<NodeId, NodeStat>,
     pub wire_flow: std::collections::HashMap<(egui_node_graph2::InputId, egui_node_graph2::OutputId), f64>,
-    /// Resource nodes with extractors on them: what those extract, per minute.
+    /// Resource nodes with extractors on them: what those extract, per minute,
+    /// and what they could.
     pub ground: std::collections::HashMap<NodeId, f64>,
+    pub ground_cap: std::collections::HashMap<NodeId, f64>,
     /// Resource nodes wired straight into machines.
     pub direct_resources: std::collections::HashSet<NodeId>,
     /// Output nodes: what arrives.
@@ -2953,9 +3019,8 @@ pub(crate) fn evaluate_graph(game: &GameData, g: &FactoryGraph, cache: &mut SimC
                     let purity = crate::extractors::purity_of(g, id);
                     sum.extracted.entry(item.clone()).or_default().push(crate::extractors::line(game, class, purity, &setup));
                     *sum.resources.entry(item.clone()).or_default() += result.shipped[i].iter().sum::<f64>();
-                    if eff < 0.995 {
-                        sum.issues.push((id, format!("{} runs at {:.0}%", ex.name, eff * 100.0)));
-                    }
+                    // An extractor taking less than it could isn't a fault:
+                    // its belt backs up, as in game.
                 }
             }
             NodeKind::Factory { .. } => {
@@ -2982,8 +3047,16 @@ pub(crate) fn evaluate_graph(game: &GameData, g: &FactoryGraph, cache: &mut SimC
         }
         let (r, x) = (g[output].node, g[input].node);
         let got: f64 = result.shipped[index[&x]].iter().sum();
+        let can: f64 = rates[index[&x]].1.iter().map(|o| o.1).sum();
         e.wire_flow.insert((input, output), got);
         *e.ground.entry(r).or_default() += got;
+        *e.ground_cap.entry(r).or_default() += can;
+        // What it puts out is all that's taken: not short of anything.
+        for (name, _) in &g[x].outputs {
+            if let Some(s) = e.ports.get_mut(&(x, name.clone())) {
+                s.want = s.have;
+            }
+        }
         if let Some((name, _)) = g[x].inputs.iter().find(|(_, i)| *i == input) {
             e.ports.insert((x, name.clone()), PortStat { have: got, want: got, connected: true });
         }

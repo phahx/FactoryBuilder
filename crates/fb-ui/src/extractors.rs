@@ -121,7 +121,9 @@ pub fn footer(ui: &mut Ui, s: &mut UserState, graph: &FactoryGraph, node_id: Nod
         ui.vertical(|ui| {
             ui.spacing_mut().item_spacing.y = 0.0;
             crate::widgets::name_label(ui, RichText::new(&e.name).color(TEXT));
-            crate::widgets::name_label(ui, RichText::new(build_hint(&setup)).small().color(TEXT_DIM));
+            if let Some(line) = build_line(graph, node_id, &setup) {
+                crate::widgets::name_label(ui, RichText::new(line).small().color(TEXT_DIM));
+            }
             crate::widgets::name_label(ui, RichText::new(node).small().color(TEXT_DIM));
             if let Some(extra) = &extra {
                 crate::widgets::name_label(ui, RichText::new(extra).small().color(ACCENT));
@@ -155,9 +157,11 @@ pub fn mw_per_unit(game: &GameData, settings: &ExtractionSettings) -> std::colle
 
 /// Resource nodes wired straight into machines (Plan factory's, and older
 /// projects') get an extractor between, chosen by the Overview's extractor
-/// settings (miner tier, purity, clock speed) and sized to the rate the
-/// resource gave: the resource goes into it and what it extracts goes on to
-/// the machines. Returns true if anything changed.
+/// settings (miner tier, purity, clock speed): as many whole extractors as
+/// the rate the resource gave needs, at that clock speed, as they'd be
+/// built in game (any they extract beyond what's taken backs up). The
+/// resource goes into it and what it extracts goes on to the machines.
+/// Returns true if anything changed.
 pub fn add_to_plan(state: &mut EditorState, user: &mut UserState, settings: &ExtractionSettings) -> bool {
     let game = user.game.clone();
     let z = state.pan_zoom.zoom;
@@ -179,15 +183,13 @@ pub fn add_to_plan(state: &mut EditorState, user: &mut UserState, settings: &Ext
             *rp = purity;
         }
         let per = per_machine(&game, &p.class, purity) * p.clock;
-        if per <= 0.0 {
+        if per <= 0.0 || p.count == 0 {
             continue;
         }
         let at = state.node_positions.get(r).copied().unwrap_or_default() + vec2(360.0 * z, 0.0);
         let x = crate::project::add_node_to(state, user, Template::Extractor { item: item.clone(), class: p.class.clone(), purity }, at);
         let g = &mut state.graph;
-        // To a millionth like the solver's machine counts (rounded up, so
-        // it never falls short), which files keep exactly.
-        let machines = ((rate / per) * 1e6).ceil() / 1e6;
+        let machines = p.count as f64;
         for (name, v) in [(MACHINES, machines), (CLOCK, p.clock * 100.0)] {
             if let Ok(i) = g[x].get_input(name) {
                 g[i].value.set_number(v);
