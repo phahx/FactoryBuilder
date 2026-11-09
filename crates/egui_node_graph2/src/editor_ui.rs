@@ -566,18 +566,26 @@ where
             }
         }
 
-        // FactoryBuilder: no wire to (or from) a port that's full.
-        delayed_responses.retain(|r| match r {
-            NodeResponse::ConnectEventEnded { output, input, .. } => {
-                if self.graph.connections(*input).contains(output) {
-                    return true;
+        // FactoryBuilder: no wire to (or from) a port that's full, checked
+        // one wire at a time as they're made (one drop can make several).
+        let mut made: Vec<NodeResponse<UserResponse, NodeData>> = Vec::new();
+        for r in std::mem::take(&mut delayed_responses) {
+            if let NodeResponse::ConnectEventEnded { output, input, input_hook, output_hook } = r {
+                let (a, b) = (self.graph[output].node, self.graph[input].node);
+                let again = self.graph.connections(input).contains(&output);
+                let fits = again
+                    || (self.graph[a].user_data.accepts_wire(a, AnyParameterId::Output(output), &self.graph, user_state)
+                        && self.graph[b].user_data.accepts_wire(b, AnyParameterId::Input(input), &self.graph, user_state));
+                if fits {
+                    self.graph.add_connection(output, input, input_hook);
+                    self.graph.move_output_wire(output, input, output_hook);
+                    made.push(r);
                 }
-                let (a, b) = (self.graph[*output].node, self.graph[*input].node);
-                self.graph[a].user_data.accepts_wire(a, AnyParameterId::Output(*output), &self.graph, user_state)
-                    && self.graph[b].user_data.accepts_wire(b, AnyParameterId::Input(*input), &self.graph, user_state)
+                continue;
             }
-            _ => true,
-        });
+            made.push(r);
+        }
+        delayed_responses = made;
 
         for response in delayed_responses.iter() {
             match response {
@@ -596,15 +604,8 @@ where
                         }
                     }
                 }
-                NodeResponse::ConnectEventEnded {
-                    output,
-                    input,
-                    input_hook,
-                    output_hook,
-                } => {
-                    self.graph.add_connection(*output, *input, *input_hook);
-                    self.graph.move_output_wire(*output, *input, *output_hook);
-                }
+                // Made above, where the limits are checked.
+                NodeResponse::ConnectEventEnded { .. } => {}
                 NodeResponse::CreatedNode(_) => {
                     //Convenience NodeResponse for users
                 }
@@ -1019,11 +1020,13 @@ where
 
                     let height_intermediate = ui.min_rect().bottom();
 
-                    let max_connections = self.graph[param_id]
-                        .max_connections
-                        .map(NonZeroU32::get)
-                        .unwrap_or(std::u32::MAX)
-                        as usize;
+                    let n = self.graph.connections(param_id).len();
+                    let full = !self.graph[self.node_id].user_data.accepts_wire(self.node_id, AnyParameterId::Input(param_id), self.graph, user_state);
+                    let max_connections = if full {
+                        n.max(1)
+                    } else {
+                        self.graph[param_id].max_connections.map(NonZeroU32::get).unwrap_or(std::u32::MAX) as usize
+                    };
                     let port_height = port_height(
                         max_connections != 1 && !self.graph[self.node_id].user_data.shared_hooks(),
                         self.graph.connections(param_id).len(),
@@ -1073,7 +1076,8 @@ where
                 // FactoryBuilder: outputs show a bubble per wire too; make room.
                 let out_conns = self.graph.iter_connections().filter(|(_, o)| *o == param_id).count();
                 let wide = !self.graph[self.node_id].user_data.shared_hooks();
-                let needed = (port_height(wide, out_conns, usize::MAX, self.style.port_radius) + 5.0) * pan_zoom.zoom;
+                let full = !self.graph[self.node_id].user_data.accepts_wire(self.node_id, AnyParameterId::Output(param_id), self.graph, user_state);
+                let needed = (port_height(wide, out_conns, if full { out_conns.max(1) } else { usize::MAX }, self.style.port_radius) + 5.0) * pan_zoom.zoom;
                 let missing = needed - (ui.min_rect().bottom() - height_before);
                 if missing > 0.0 {
                     ui.add_space(missing);
@@ -1286,10 +1290,13 @@ where
 
             if should_draw {
                 let pos_left = pos2(port_left, port_height);
-                let max_connections = self.graph[*param]
-                    .max_connections
-                    .map(NonZeroU32::get)
-                    .unwrap_or(std::u32::MAX) as usize;
+                let n = self.graph.connections(*param).len();
+                let full = !self.graph[self.node_id].user_data.accepts_wire(self.node_id, AnyParameterId::Input(*param), self.graph, user_state);
+                let max_connections = if full {
+                    n.max(1)
+                } else {
+                    self.graph[*param].max_connections.map(NonZeroU32::get).unwrap_or(std::u32::MAX) as usize
+                };
                 draw_port(
                     pan_zoom,
                     ui,
@@ -1318,6 +1325,8 @@ where
             .zip(output_port_heights.into_iter())
         {
             let pos_right = pos2(port_right, port_height);
+            let n = self.graph.iter_connections().filter(|(_, o)| o == param).count();
+            let full = !self.graph[self.node_id].user_data.accepts_wire(self.node_id, AnyParameterId::Output(*param), self.graph, user_state);
             draw_port(
                 pan_zoom,
                 ui,
@@ -1331,8 +1340,8 @@ where
                 self.conn_locations,
                 self.ongoing_drag,
                 true,
-                self.graph.iter_connections().filter(|(_, o)| o == param).count(),
-                usize::MAX,
+                n,
+                if full { n.max(1) } else { usize::MAX },
                 self.style.port_radius,
                 self.style.node_fill,
             );

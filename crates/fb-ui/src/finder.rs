@@ -162,6 +162,39 @@ impl Catalog {
                 });
             }
         }
+        // Extractors, for each raw resource they take; Pipeline Pumps for
+        // each fluid.
+        for x in &game.extraction.extractors {
+            for (class, item) in game.items.iter().filter(|(c, i)| i.raw && x.can_extract(c, i.form)) {
+                entries.push(Entry {
+                    template: Template::Extractor { item: class.clone(), class: x.class.clone(), purity: fb_model::Purity::Normal },
+                    title: x.name.clone(),
+                    subtitle: format!("Extracts {}", item.name),
+                    group: "Extractors".into(),
+                    icon: x.icon.clone(),
+                    alternate: false,
+                    search: String::new(),
+                    takes: vec![class.clone()],
+                    makes: vec![class.clone()],
+                });
+            }
+        }
+        for (class, item) in game.items.iter().filter(|(_, i)| i.form.is_fluid()) {
+            for (pump, name, lift) in crate::routers::PUMPS {
+                let template = Template::Pump { item: class.clone(), class: pump.into() };
+                entries.push(Entry {
+                    icon: crate::routers::icon(game, &template.kind()).into(),
+                    template,
+                    title: item.name.clone(),
+                    subtitle: format!("{name} · Head Lift up to {lift} m"),
+                    group: "Pipeline Pumps".into(),
+                    alternate: false,
+                    search: String::new(),
+                    takes: vec![class.clone()],
+                    makes: vec![class.clone()],
+                });
+            }
+        }
         for e in &mut entries {
             e.search = format!("{} {}", e.title, e.subtitle).to_lowercase();
         }
@@ -190,7 +223,13 @@ impl Catalog {
                 entries: vec![],
             });
         }
-        for (name, icon) in [("Mergers", "Desc_ConveyorAttachmentMerger_C"), ("Splitters", "Desc_ConveyorAttachmentSplitter_C"), ("Pipeline Junctions", "Desc_PipelineJunction_Cross_C")] {
+        for (name, icon) in [
+            ("Extractors", "Desc_MinerMk1_C"),
+            ("Mergers", "Desc_ConveyorAttachmentMerger_C"),
+            ("Splitters", "Desc_ConveyorAttachmentSplitter_C"),
+            ("Pipeline Junctions", "Desc_PipelineJunction_Cross_C"),
+            ("Pipeline Pumps", "Desc_PipelinePump_C"),
+        ] {
             groups.push(Group { name: name.into(), icon: GroupIcon::Item(icon.into()), entries: vec![] });
         }
         for (i, e) in entries.iter().enumerate() {

@@ -149,8 +149,8 @@ pub fn planner(app: &mut FactoryApp, ui: &mut Ui) {
 
             if let Some(r) = widgets::section(
                 ui,
-                "What to make",
-                Some((assets, UiIcon::Add, "Add another item to make")),
+                "Outputs",
+                Some((assets, UiIcon::Add, "Add another output")),
             ) {
                 if r.clicked() {
                     let item = producible
@@ -165,7 +165,7 @@ pub fn planner(app: &mut FactoryApp, ui: &mut Ui) {
             }
             widgets::caption(
                 ui,
-                "The items this factory should produce, and how many per minute.",
+                "What this factory delivers, per minute. Each is an Output node in the graph.",
             );
             changed |= target_rows(
                 ui,
@@ -174,7 +174,7 @@ pub fn planner(app: &mut FactoryApp, ui: &mut Ui) {
                 "targets",
                 &mut planner.targets,
                 &producible,
-                "Add an item to make",
+                "Add an output",
                 "Desc_IronPlate_C",
                 10.0,
             );
@@ -182,8 +182,8 @@ pub fn planner(app: &mut FactoryApp, ui: &mut Ui) {
             widgets::divider(ui);
             if let Some(r) = widgets::section(
                 ui,
-                "Already available",
-                Some((assets, UiIcon::Add, "Add another item you already have")),
+                "Inputs",
+                Some((assets, UiIcon::Add, "Add another input")),
             ) {
                 if r.clicked() {
                     let item = all
@@ -196,7 +196,7 @@ pub fn planner(app: &mut FactoryApp, ui: &mut Ui) {
                     changed = true;
                 }
             }
-            widgets::caption(ui, "Items you already bring in from another factory. The plan uses these before mining more. Optional.");
+            widgets::caption(ui, "What this factory gets from other factories, per minute. Each is an Input node; the plan uses them before mining more. Optional.");
             changed |= target_rows(
                 ui,
                 assets,
@@ -204,7 +204,7 @@ pub fn planner(app: &mut FactoryApp, ui: &mut Ui) {
                 "inputs",
                 &mut planner.inputs,
                 &all,
-                "Add an item you already have",
+                "Add an input",
                 "Desc_IronIngot_C",
                 30.0,
             );
@@ -488,9 +488,19 @@ pub fn overview(app: &mut FactoryApp, ui: &mut Ui) {
                     widgets::info_row(ui, assets, item, game.item_name(item), text);
                 }
             }
-            if !s.buildings.is_empty() {
+            if !s.buildings.is_empty() || !s.extractors.is_empty() {
                 widgets::divider(ui);
                 widgets::section(ui, "Buildings", None);
+                for (b, (whole, machines)) in &s.extractors {
+                    if let Some(e) = crate::extractors::find(&game, b) {
+                        widgets::split_row(ui, 26.0, |ui| {
+                            ui.label(RichText::new(format!("{whole}")).color(TEXT)).on_hover_text(format!("{} machines' worth of work at 100% clock speed", fmt_num(*machines)));
+                        }, |ui| {
+                            assets.item(ui, &e.icon, 24.0);
+                            widgets::name_label(ui, RichText::new(&e.name).color(TEXT));
+                        });
+                    }
+                }
                 for (b, (whole, machines)) in &s.buildings {
                     if let Some(bd) = game.buildings.get(b) {
                         widgets::split_row(ui, 26.0, |ui| {
@@ -525,8 +535,8 @@ pub fn overview(app: &mut FactoryApp, ui: &mut Ui) {
                 }
             };
             extraction_changed |=
-                crate::overview_extra::extraction(ui, assets, &game, &s.resources, &mut planner.extraction);
-            crate::overview_extra::build_cost(ui, assets, &game, &s.buildings, &s.resources, &planner.extraction);
+                crate::overview_extra::extraction(ui, assets, &game, &s.resources, &s.extracted, &mut planner.extraction);
+            crate::overview_extra::build_cost(ui, assets, &game, &s.buildings, &s.extractors, &s.resources, &s.extracted, &planner.extraction);
             flows(ui, assets, "Inputs", &s.inputs);
             flows(ui, assets, "Byproducts", &s.sunk);
             if s.sink_points > 0.0 {

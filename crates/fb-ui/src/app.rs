@@ -74,6 +74,10 @@ pub(crate) struct Summary {
     pub issues: Vec<(NodeId, String)>,
     pub power_shards: u32,
     pub somersloops: u32,
+    /// Extractor building class -> (whole machines, machines at 100%).
+    pub extractors: BTreeMap<String, (f64, f64)>,
+    /// Raw item -> its extractor nodes, as "3 Miner Mk.1 on Normal nodes at 100%".
+    pub extracted: BTreeMap<String, Vec<String>>,
 }
 
 pub struct FactoryApp {
@@ -624,6 +628,8 @@ impl FactoryApp {
                         Ok(SolveOutcome::Solved(plan)) => {
                             self.solve_notes.clear();
                             self.apply_plan(&plan);
+                            // Each resource through its extractor.
+                            crate::extractors::add_to_plan(&mut self.state, &mut self.user, &self.planner.extraction);
                             // Shared belts and pipes through mergers and splitters.
                             crate::routers::tidy(&mut self.state, &mut self.user);
                             self.changed();
@@ -818,6 +824,7 @@ impl FactoryApp {
             resource_limits: self.planner.limits.clone(),
             objective: self.planner.objective,
             power: self.planner.power.clone(),
+            extraction_mw: crate::extractors::mw_per_unit(&self.user.game, &self.planner.extraction),
         };
         self.backend
             .call("solve", json!({ "request": req }), Msg::Solved);
@@ -2002,6 +2009,7 @@ impl FactoryApp {
         let (mut do_duplicate, mut do_delete, mut do_move, mut do_frame) = (false, false, false, false);
         let (mut do_open, mut do_rename) = (false, false);
         let mut set_tier = None;
+        let mut set_extractor: Option<(String, fb_model::Purity)> = None;
         let g = &self.state.graph;
         let title = if self.context_targets.len() > 1 { format!("{} nodes", self.context_targets.len()) } else { g[node].label.clone() };
         let factory = crate::project::factory_of(g, node);
@@ -2026,6 +2034,29 @@ impl FactoryApp {
             }
             if !only_poles {
                 do_duplicate = item(ui, "Duplicate", "Ctrl+D", true).clicked();
+            }
+            // An extractor's building and node purity.
+            if let [one] = &self.context_targets[..] {
+                if let NodeKind::Extractor { item, class, purity } = &g[*one].user_data.kind {
+                    let game = self.user.game.clone();
+                    let form = game.item_form(item);
+                    crate::menus::caption(ui, "Extractor");
+                    for x in game.extraction.extractors.iter().filter(|x| x.can_extract(item, form)) {
+                        let each = crate::fmt::fmt_rate_unit(x.per_min(*purity, 1.0), form);
+                        if crate::menus::choice(ui, &x.name, &each, x.class == *class, true).clicked() {
+                            set_extractor = Some((x.class.clone(), *purity));
+                        }
+                    }
+                    if crate::extractors::has_purity(&game, class) {
+                        crate::menus::caption(ui, "Node purity");
+                        for p in fb_model::Purity::ALL {
+                            if crate::menus::choice(ui, p.label(), "", p == *purity, true).clicked() {
+                                set_extractor = Some((class.clone(), p));
+                            }
+                        }
+                    }
+                    separator(ui);
+                }
             }
             // A pole's tier: how many wires it takes, as in game.
             if let (true, [one]) = (only_poles, &self.context_targets[..]) {
@@ -2072,13 +2103,19 @@ impl FactoryApp {
             }
             self.changed();
         }
+        if let (Some((c, p)), [one]) = (set_extractor.clone(), &self.context_targets[..]) {
+            if let NodeKind::Extractor { class, purity, .. } = &mut self.state.graph[*one].user_data.kind {
+                (*class, *purity) = (c, p);
+                self.changed();
+            }
+        }
         if let Some((pole, t)) = set_tier {
             if let Some(p) = self.planner.power_net.poles.iter_mut().find(|p| p.id == pole) {
                 p.tier = t;
                 self.changed();
             }
         }
-        let chose = do_duplicate || do_delete || do_move || do_frame || do_open || do_rename || set_tier.is_some();
+        let chose = do_duplicate || do_delete || do_move || do_frame || do_open || do_rename || set_tier.is_some() || set_extractor.is_some();
         if chose || crate::menus::dismissed(ctx, &menu) {
             self.context_menu = None;
         }
@@ -2200,7 +2237,10 @@ impl FactoryApp {
         match w.port {
             P::Output(output) => {
                 let input = g[new].inputs.iter().map(|(_, id)| *id).find(|id| same(&g[*id].typ));
-                if let Some(input) = input {
+                let origin = self.state.graph[w.node].user_data.clone();
+                let takes = origin.accepts_wire(w.node, P::Output(output), &self.state.graph, &mut self.user);
+                let g = &mut self.state.graph;
+                if let (Some(input), true) = (input, takes) {
                     let at = g.connections(input).len();
                     g.add_connection(output, input, at);
                     // The other selected nodes' wires, as far as it takes them.
@@ -2216,7 +2256,10 @@ impl FactoryApp {
             }
             P::Input(input) => {
                 let output = g[new].outputs.iter().map(|(_, id)| *id).find(|id| same(&g[*id].typ));
-                if let Some(output) = output {
+                let origin = self.state.graph[w.node].user_data.clone();
+                let takes = origin.accepts_wire(w.node, P::Input(input), &self.state.graph, &mut self.user);
+                let g = &mut self.state.graph;
+                if let (Some(output), true) = (output, takes) {
                     let at = g.connections(input).len();
                     g.add_connection(output, input, at);
                 }
@@ -2733,7 +2776,7 @@ pub(crate) fn evaluate_graph(game: &GameData, g: &FactoryGraph, cache: &mut SimC
             // project, so they never hold it up.
             inputs: ins.iter().enumerate().map(|(p, x)| if factory && !connected_in.contains(&(i, p)) { 0.0 } else { x.1 }).collect(),
             outputs: outs.iter().map(|x| x.1).collect(),
-            throttles: matches!(g[id].user_data.kind, NodeKind::Recipe { .. }),
+            throttles: matches!(g[id].user_data.kind, NodeKind::Recipe { .. } | NodeKind::Extractor { .. }),
             sink: matches!(g[id].user_data.kind, NodeKind::Sink { .. }),
         });
         rates.push((ins, outs));
@@ -2826,6 +2869,21 @@ pub(crate) fn evaluate_graph(game: &GameData, g: &FactoryGraph, cache: &mut SimC
                 sum.sink_points += got * game.items.get(item).map(|it| it.sink_points).unwrap_or(0) as f64;
             }
             NodeKind::Pole { .. } | NodeKind::Merger { .. } | NodeKind::Splitter { .. } => {}
+            NodeKind::Pump { class, .. } => power = game.buildable_power.get(class).copied().unwrap_or(0.0),
+            NodeKind::Extractor { item, class, purity } => {
+                if let Some(ex) = crate::extractors::find(game, class) {
+                    let setup = crate::graph::machine_setup(game, g, id);
+                    power = crate::extractors::power(ex, setup.count, setup.clock);
+                    let e = sum.extractors.entry(class.clone()).or_default();
+                    e.0 += setup.count as f64;
+                    e.1 += input_number(g, id, MACHINES);
+                    sum.power_shards += setup.shards();
+                    sum.extracted.entry(item.clone()).or_default().push(crate::extractors::line(game, class, *purity, &setup));
+                    if eff < 0.995 {
+                        sum.issues.push((id, format!("{} runs at {:.0}%", ex.name, eff * 100.0)));
+                    }
+                }
+            }
             NodeKind::Factory { .. } => {
                 let name = &g[id].label;
                 for (p, (port, want)) in ins.iter().enumerate() {

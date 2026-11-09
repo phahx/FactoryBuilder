@@ -202,6 +202,7 @@ pub fn extraction(
     assets: &mut Assets,
     game: &GameData,
     resources: &BTreeMap<String, f64>,
+    extracted: &BTreeMap<String, Vec<String>>,
     settings: &mut ExtractionSettings,
 ) -> bool {
     let mut changed = false;
@@ -223,7 +224,7 @@ pub fn extraction(
         let current = miners.iter().find(|m| m.class == settings.miner).map(|m| m.name.as_str()).unwrap_or("");
         let summary = format!("{current}, {}, {}%", settings.purity.label(), fmt_num(settings.clock_pct));
         widgets::collapsible(ui, assets, "extractor-settings", "Extractors", &summary, |ui, _| {
-            widgets::caption(ui, "What you mine with. Purity applies to every resource except Water.");
+            widgets::caption(ui, "What Plan factory mines with. Purity applies to every resource except Water.");
             ui.add_space(4.0);
             ui.label(RichText::new("Miner").color(TEXT));
             let mut idx = miners.iter().position(|m| m.class == settings.miner).unwrap_or(0);
@@ -276,10 +277,23 @@ pub fn extraction(
         });
     }
     let plans: BTreeMap<String, ExtractPlan> =
-        plan_all(game, resources, settings).into_iter().map(|p| (p.item.clone(), p)).collect();
+        plan_all(game, &not_extracted(resources, extracted), settings).into_iter().map(|p| (p.item.clone(), p)).collect();
     for (item, rate) in resources {
         let rate_text = RichText::new(fmt_rate_unit(*rate, game.item_form(item))).color(TEXT);
         widgets::info_row(ui, assets, item, game.item_name(item), rate_text);
+        // Extractor nodes in the graph say what extracts it.
+        if let Some(lines) = extracted.get(item) {
+            ui.horizontal(|ui| {
+                ui.add_space(30.0);
+                ui.vertical(|ui| {
+                    for l in lines {
+                        ui.add(egui::Label::new(RichText::new(l).small().color(TEXT)).wrap());
+                    }
+                });
+            });
+            ui.add_space(4.0);
+            continue;
+        }
         let Some(p) = plans.get(item) else { continue };
         let solid = game.item_form(item) == Form::Solid;
         ui.horizontal(|ui| {
@@ -325,16 +339,27 @@ pub fn extraction(
     changed
 }
 
+/// Resources the graph has no extractor nodes for.
+fn not_extracted(resources: &BTreeMap<String, f64>, extracted: &BTreeMap<String, Vec<String>>) -> BTreeMap<String, f64> {
+    resources.iter().filter(|(i, _)| !extracted.contains_key(*i)).map(|(i, r)| (i.clone(), *r)).collect()
+}
+
 /// Total materials to place every machine, as a collapsible Overview section.
+#[allow(clippy::too_many_arguments)]
 pub fn build_cost(
     ui: &mut Ui,
     assets: &mut Assets,
     game: &GameData,
     buildings: &BTreeMap<String, (f64, f64)>,
+    extractors: &BTreeMap<String, (f64, f64)>,
     resources: &BTreeMap<String, f64>,
+    extracted: &BTreeMap<String, Vec<String>>,
     settings: &ExtractionSettings,
 ) {
-    let plans = plan_all(game, resources, settings);
+    let plans = plan_all(game, &not_extracted(resources, extracted), settings);
+    let mut all = buildings.clone();
+    all.extend(extractors.iter().map(|(k, v)| (k.clone(), *v)));
+    let buildings = &all;
     let totals = build_cost_totals(game, buildings, &plans);
     if totals.is_empty() {
         return;

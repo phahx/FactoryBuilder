@@ -59,6 +59,11 @@ impl FactoryApp {
             NodeKind::Sink { .. } => parts.push("Sink".into()),
             NodeKind::Factory { .. } => parts.push("Factory".into()),
             NodeKind::Pole { .. } => parts.push("Power pole".into()),
+            NodeKind::Extractor { item, class, .. } => {
+                parts.push(crate::extractors::find(game, class).map(|e| e.name.clone()).unwrap_or_default());
+                parts.push(game.item_name(item).to_string());
+            }
+            k @ NodeKind::Pump { .. } => parts.push(crate::routers::name(game, k).into()),
             k @ (NodeKind::Merger { .. } | NodeKind::Splitter { .. }) => parts.push(crate::routers::name(game, k).into()),
         }
         for (_, i) in &n.inputs {

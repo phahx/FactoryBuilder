@@ -33,6 +33,8 @@ pub fn accepts(game: &fb_model::GameData, kind: &NodeKind, g: &FactoryGraph, nod
         P::Output(o) => g.output_connections(o).len(),
     };
     match kind {
+        // A pump sits in one pipe.
+        NodeKind::Pump { .. } => on(port) < 1,
         NodeKind::Merger { item } | NodeKind::Splitter { item } if fluid(game, item) => crate::power_net::wire_count(g, node) < JUNCTION_PIPES,
         NodeKind::Merger { .. } => on(port) < if matches!(port, P::Input(_)) { MERGER_INPUTS } else { 1 },
         NodeKind::Splitter { .. } => on(port) < if matches!(port, P::Input(_)) { 1 } else { SPLITTER_OUTPUTS },
@@ -41,8 +43,12 @@ pub fn accepts(game: &fb_model::GameData, kind: &NodeKind, g: &FactoryGraph, nod
 }
 
 pub fn is_router(kind: &NodeKind) -> bool {
-    matches!(kind, NodeKind::Merger { .. } | NodeKind::Splitter { .. })
+    matches!(kind, NodeKind::Merger { .. } | NodeKind::Splitter { .. } | NodeKind::Pump { .. })
 }
+
+/// Pipeline Pumps, from the game's Docs: class, name, and the Head Lift its
+/// description gives (power is the Docs' mPowerConsumption, in GameData).
+pub const PUMPS: [(&str, &str, u32); 2] = [("Build_PipelinePump_C", "Pipeline Pump Mk.1", 20), ("Build_PipelinePumpMk2_C", "Pipeline Pump Mk.2", 50)];
 
 fn fluid(game: &fb_model::GameData, item: &str) -> bool {
     game.item_form(item).is_fluid()
@@ -51,6 +57,7 @@ fn fluid(game: &fb_model::GameData, item: &str) -> bool {
 /// The game's name for it: pipes have one junction for both jobs.
 pub fn name(game: &fb_model::GameData, kind: &NodeKind) -> &'static str {
     match kind {
+        NodeKind::Pump { class, .. } => PUMPS.iter().find(|p| p.0 == class).map_or("Pipeline Pump", |p| p.1),
         NodeKind::Merger { item } | NodeKind::Splitter { item } if fluid(game, item) => "Pipeline Junction",
         NodeKind::Merger { .. } => "Merger",
         _ => "Splitter",
@@ -60,6 +67,8 @@ pub fn name(game: &fb_model::GameData, kind: &NodeKind) -> &'static str {
 /// The game's icon for it (icon class).
 pub fn icon(game: &fb_model::GameData, kind: &NodeKind) -> &'static str {
     match kind {
+        NodeKind::Pump { class, .. } if class == PUMPS[1].0 => "Desc_PipelinePumpMk2_C",
+        NodeKind::Pump { .. } => "Desc_PipelinePump_C",
         NodeKind::Merger { item } | NodeKind::Splitter { item } if fluid(game, item) => "Desc_PipelineJunction_Cross_C",
         NodeKind::Merger { .. } => "Desc_ConveyorAttachmentMerger_C",
         _ => "Desc_ConveyorAttachmentSplitter_C",
@@ -258,7 +267,7 @@ pub fn tidy(state: &mut EditorState, user: &mut UserState) {
 /// A router: its icon, and what goes through it on hover.
 pub fn router_ui(ui: &mut Ui, rect: egui::Rect, node_id: NodeId, kind: &NodeKind, s: &mut UserState) {
     let game = s.game.clone();
-    let (NodeKind::Merger { item } | NodeKind::Splitter { item }) = kind else { return };
+    let (NodeKind::Merger { item } | NodeKind::Splitter { item } | NodeKind::Pump { item, .. }) = kind else { return };
     match s.assets.as_mut().and_then(|a| a.item_uri(icon(&game, kind))) {
         Some(uri) => {
             egui::Image::new(uri).paint_at(ui, rect);
@@ -272,10 +281,17 @@ pub fn router_ui(ui: &mut Ui, rect: egui::Rect, node_id: NodeId, kind: &NodeKind
         egui::show_tooltip_at_pointer(ui.ctx(), ui.layer_id(), egui::Id::new(("router_tip", node_id)), |ui| {
             crate::widgets::tooltip_title(ui, name(&game, kind));
             crate::widgets::tip_item(ui, s.assets.as_mut().expect("assets are set in the app"), item, game.item_name(item), &fmt_rate_unit(through, game.item_form(item)));
-            let what = match name(&game, kind) {
-                "Merger" => "Joins belts into one.",
-                "Splitter" => "Shares a belt out over several.",
-                _ => "Joins and shares out pipes.",
+            let what = match kind {
+                NodeKind::Pump { class, .. } => {
+                    let lift = PUMPS.iter().find(|p| p.0 == class).map_or(0, |p| p.2);
+                    let mw = game.buildable_power.get(class).copied().unwrap_or(0.0);
+                    format!("Head Lift up to {lift} m, {} MW.", crate::fmt::fmt_num(mw))
+                }
+                _ => match name(&game, kind) {
+                    "Merger" => "Joins belts into one.".to_string(),
+                    "Splitter" => "Shares a belt out over several.".to_string(),
+                    _ => "Joins and shares out pipes.".to_string(),
+                },
             };
             ui.label(RichText::new(what).small().color(TEXT_DIM));
         });

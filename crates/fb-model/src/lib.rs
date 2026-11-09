@@ -399,7 +399,11 @@ pub struct SolveRequest {
     pub resource_limits: BTreeMap<ClassName, f64>,
     pub objective: Objective,
     #[serde(default)]
-    pub power: PowerSettings,
+    pub power: PowerSettings,
+    /// MW the extractors draw per unit per minute of each raw resource
+    /// (from the extractor settings): the plan counts their power too.
+    #[serde(default)]
+    pub extraction_mw: BTreeMap<ClassName, f64>,
 }
 
 /// Where the factory's power comes from.

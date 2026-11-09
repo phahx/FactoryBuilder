@@ -151,9 +151,16 @@ impl FactoryApp {
                 NodeKind::Sink { item } => (portable::Kind::Sink, item.clone()),
                 NodeKind::Merger { item } => (portable::Kind::Merger, item.clone()),
                 NodeKind::Splitter { item } => (portable::Kind::Splitter, item.clone()),
+                NodeKind::Extractor { class, .. } => (portable::Kind::Extractor, class.clone()),
+                NodeKind::Pump { class, .. } => (portable::Kind::Pump, class.clone()),
                 NodeKind::Factory { .. } | NodeKind::Pole { .. } => continue, // only on the master graph
             };
-            let is_recipe = kind == portable::Kind::Recipe;
+            let is_recipe = matches!(kind, portable::Kind::Recipe | portable::Kind::Extractor);
+            let (item, purity) = match &n.user_data.kind {
+                NodeKind::Extractor { item, purity, .. } => (Some(item.clone()), Some(*purity)),
+                NodeKind::Pump { item, .. } => (Some(item.clone()), None),
+                _ => (None, None),
+            };
             let has_rate = matches!(kind, portable::Kind::Resource | portable::Kind::Input | portable::Kind::Output);
             f.nodes.push(portable::Node {
                 kind,
@@ -164,6 +171,8 @@ impl FactoryApp {
                 rate: has_rate.then(|| input_number(g, id, RATE)),
                 name: Some(n.label.clone()).filter(|l| *l != default_label(game, &n.user_data.kind)),
                 color: n.user_data.color.map(portable::color_to_hex),
+                item,
+                purity,
                 x: (pos.x * 10.0).round() / 10.0,
                 y: (pos.y * 10.0).round() / 10.0,
             });
@@ -254,6 +263,12 @@ impl FactoryApp {
                 portable::Kind::Sink if known_item => Template::Sink(n.class.clone()),
                 portable::Kind::Merger if known_item => Template::Merger(n.class.clone()),
                 portable::Kind::Splitter if known_item => Template::Splitter(n.class.clone()),
+                portable::Kind::Extractor if crate::extractors::find(&game, &n.class).is_some() && n.item.as_ref().is_some_and(|i| game.items.contains_key(i)) => {
+                    Template::Extractor { item: n.item.clone().unwrap_or_default(), class: n.class.clone(), purity: n.purity.unwrap_or_default() }
+                }
+                portable::Kind::Pump if crate::routers::PUMPS.iter().any(|p| p.0 == n.class) && n.item.as_ref().is_some_and(|i| game.items.contains_key(i)) => {
+                    Template::Pump { item: n.item.clone().unwrap_or_default(), class: n.class.clone() }
+                }
                 _ => {
                     skipped += 1;
                     continue;

@@ -1,0 +1,135 @@
+//! Extractor nodes: the building that takes a raw resource out of the
+//! ground (or water) and puts it on a belt or pipe. A Resource node is the
+//! deposit; an Extractor node after it is the Miner, Water Extractor, Oil
+//! Extractor or Resource Well Extractor, with how many, at what clock speed,
+//! on what purity of node. Their rates and power come from the game's Docs
+//! (fb-engine/src/extraction.rs); purity multipliers from `fb_model::Purity`.
+
+use crate::fmt::{fmt_num, fmt_rate_unit};
+use crate::graph::*;
+use crate::overview_extra::{plan_resource, ExtractionSettings};
+use crate::theme::*;
+use egui::{vec2, RichText, Ui};
+use egui_node_graph2::NodeId;
+use fb_model::{Extractor, ExtractorKind, GameData, Purity};
+
+pub fn find<'a>(game: &'a GameData, class: &str) -> Option<&'a Extractor> {
+    game.extraction.extractors.iter().find(|e| e.class == class)
+}
+
+/// Per minute one machine makes on a node of `purity` at 100%.
+pub fn per_machine(game: &GameData, class: &str, purity: Purity) -> f64 {
+    find(game, class).map_or(0.0, |e| e.per_min(purity, 1.0))
+}
+
+/// Whether purity matters for it (everything but Water Extractors).
+pub fn has_purity(game: &GameData, class: &str) -> bool {
+    find(game, class).is_some_and(|e| e.kind != ExtractorKind::Water)
+}
+
+/// MW of `count` machines each at `clock` (1.0 = 100%).
+pub fn power(e: &Extractor, count: u32, clock: f64) -> f64 {
+    count as f64 * e.power_mw * clock.max(0.0).powf(e.power_exponent)
+}
+
+/// "3 Miner Mk.1 on Normal nodes at 93.75%"
+pub fn line(game: &GameData, class: &str, purity: Purity, setup: &fb_model::MachineSetup) -> String {
+    let name = find(game, class).map_or(class, |e| e.name.as_str());
+    let mut t = format!("{} {name}", setup.count);
+    if has_purity(game, class) {
+        t.push_str(&format!(" on {} nodes", purity.label()));
+    }
+    t.push_str(&format!(" at {}%", fmt_num(setup.clock * 100.0)));
+    t
+}
+
+/// Under an extractor's ports: its building, how many to build, the node
+/// purity, and its power.
+pub fn footer(ui: &mut Ui, s: &mut UserState, graph: &FactoryGraph, node_id: NodeId, item: &str, class: &str, purity: Purity) {
+    let game = s.game.clone();
+    let Some(e) = find(&game, class) else {
+        ui.colored_label(DANGER, "This extractor is not in the game data.");
+        return;
+    };
+    let setup = machine_setup(&game, graph, node_id);
+    let mw = power(e, setup.count, setup.clock);
+    let (r_div, _) = ui.allocate_exact_size(vec2(ui.available_width(), 1.0), egui::Sense::hover());
+    ui.painter().rect_filled(r_div, 0.0, DIVIDER);
+    let each = fmt_rate_unit(e.per_min(purity, 1.0), game.item_form(item));
+    let node = if has_purity(&game, class) { format!("{} node · {each} each at 100%", purity.label()) } else { format!("{each} each at 100%") };
+    let extra = extras_hint(&setup);
+    crate::widgets::split_row_with(ui, if extra.is_some() { 60.0 } else { 48.0 }, s, |ui, s| {
+        ui.label(RichText::new(format!("{} MW", fmt_num(mw))).small().color(TEXT_DIM));
+        s.ui_icon(ui, crate::assets::UiIcon::Power, 14.0, TEXT_DIM);
+    }, |ui, s| {
+        s.item_icon(ui, &e.icon, 32.0);
+        ui.vertical(|ui| {
+            ui.spacing_mut().item_spacing.y = 0.0;
+            crate::widgets::name_label(ui, RichText::new(&e.name).color(TEXT));
+            crate::widgets::name_label(ui, RichText::new(build_hint(&setup)).small().color(TEXT_DIM));
+            crate::widgets::name_label(ui, RichText::new(node).small().color(TEXT_DIM));
+            if let Some(extra) = &extra {
+                crate::widgets::name_label(ui, RichText::new(extra).small().color(ACCENT));
+            }
+        });
+    });
+}
+
+/// MW per unit per minute of each raw resource, extracted as the settings
+/// say: what the solver counts for extractors' power.
+pub fn mw_per_unit(game: &GameData, settings: &ExtractionSettings) -> std::collections::BTreeMap<String, f64> {
+    game.items
+        .iter()
+        .filter(|(_, i)| i.raw)
+        .filter_map(|(c, _)| {
+            let p = plan_resource(game, c, 60.0, settings)?;
+            let e = find(game, &p.class)?;
+            let per = e.per_min(p.purity.unwrap_or_default(), p.clock);
+            (per > 0.0).then(|| (c.clone(), power(e, 1, p.clock) / per))
+        })
+        .collect()
+}
+
+/// Plan factory's Resource nodes get an extractor after them, chosen by the
+/// Overview's extractor settings (miner tier, purity, clock speed): the
+/// resource goes into it and what it extracts goes on to the machines.
+pub fn add_to_plan(state: &mut EditorState, user: &mut UserState, settings: &ExtractionSettings) {
+    let game = user.game.clone();
+    let z = state.pan_zoom.zoom;
+    let resources: Vec<(NodeId, String, f64)> = state
+        .graph
+        .iter_nodes()
+        .filter_map(|n| match &state.graph[n].user_data.kind {
+            NodeKind::Resource { item } => Some((n, item.clone(), input_number(&state.graph, n, RATE))),
+            _ => None,
+        })
+        .collect();
+    for (r, item, rate) in resources {
+        let Some(p) = plan_resource(&game, &item, rate, settings) else { continue };
+        let purity = p.purity.unwrap_or_default();
+        let per = per_machine(&game, &p.class, purity) * p.clock;
+        if per <= 0.0 {
+            continue;
+        }
+        let at = state.node_positions.get(r).copied().unwrap_or_default() + vec2(360.0 * z, 0.0);
+        let x = crate::project::add_node_to(state, user, Template::Extractor { item: item.clone(), class: p.class.clone(), purity }, at);
+        let g = &mut state.graph;
+        // To a millionth like the solver's machine counts (rounded up, so
+        // it never falls short), which files keep exactly.
+        let machines = ((rate / per) * 1e6).ceil() / 1e6;
+        for (name, v) in [(MACHINES, machines), (CLOCK, p.clock * 100.0)] {
+            if let Ok(i) = g[x].get_input(name) {
+                g[i].value.set_number(v);
+            }
+        }
+        // What the resource fed now comes from the extractor.
+        let Some(out) = g[r].outputs.first().map(|(_, o)| *o) else { continue };
+        let (Some(x_in), Some(x_out)) = (g[x].inputs.iter().map(|(_, i)| *i).find(|i| g[*i].typ.0 == item), g[x].outputs.first().map(|(_, o)| *o)) else { continue };
+        for i in g.output_connections(out) {
+            let pos = g.connections(i).iter().position(|o| *o == out).unwrap_or(0);
+            g.remove_connection(i, out);
+            g.add_connection(x_out, i, pos);
+        }
+        g.add_connection(out, x_in, 0);
+    }
+}

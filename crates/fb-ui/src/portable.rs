@@ -125,6 +125,10 @@ pub enum Kind {
     /// A merger (or, for fluids, a pipeline junction) of `class`.
     Merger,
     Splitter,
+    /// An extractor building (`class`) on `item`, of `purity`.
+    Extractor,
+    /// A Pipeline Pump (`class`) on a pipe of `item`.
+    Pump,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -149,6 +153,12 @@ pub struct Node {
     /// Header colour label, "#RRGGBB".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color: Option<String>,
+    /// Extractors and pumps: the item (their `class` is the building).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub item: Option<String>,
+    /// Extractors: the resource node's purity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub purity: Option<fb_model::Purity>,
     pub x: f32,
     pub y: f32,
 }
@@ -400,8 +410,8 @@ mod tests {
     fn sample() -> FactoryFile {
         let mut f = FactoryFile::new(Some("Steel".into()));
         f.plan.products.push(Target { item: "Desc_SteelPlate_C".into(), rate: 20.0 });
-        f.nodes.push(Node { kind: Kind::Resource, class: "Desc_OreIron_C".into(), machines: None, clock: None, sloops: None, rate: Some(60.0), name: None, color: None, x: 0.0, y: 0.0 });
-        f.nodes.push(Node { kind: Kind::Recipe, class: "Recipe_IngotIron_C".into(), machines: Some(2.0), clock: Some(100.0), sloops: Some(1), rate: None, name: None, color: Some("#FA9549".into()), x: 380.0, y: 0.0 });
+        f.nodes.push(Node { kind: Kind::Resource, class: "Desc_OreIron_C".into(), machines: None, clock: None, sloops: None, rate: Some(60.0), name: None, color: None, item: None, purity: None, x: 0.0, y: 0.0 });
+        f.nodes.push(Node { kind: Kind::Recipe, class: "Recipe_IngotIron_C".into(), machines: Some(2.0), clock: Some(100.0), sloops: Some(1), rate: None, name: None, color: Some("#FA9549".into()), item: None, purity: None, x: 380.0, y: 0.0 });
         f.wires.push(Wire { from: 0, output: 0, to: 1, input: 0, slot: 0 });
         f
     }

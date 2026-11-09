@@ -348,6 +348,8 @@ pub(crate) struct ProjectTotals {
     pub power_shards: u32,
     pub somersloops: u32,
     pub buildings: BTreeMap<String, (f64, f64)>,
+    pub extractors: BTreeMap<String, (f64, f64)>,
+    pub extracted: BTreeMap<String, Vec<String>>,
     pub resources: BTreeMap<String, f64>,
     /// What leaves the project: factory outputs no other factory takes.
     pub products: BTreeMap<String, f64>,
@@ -375,6 +377,14 @@ impl FactoryApp {
             }
             for (item, r) in &f.resources {
                 *t.resources.entry(item.clone()).or_default() += r;
+            }
+            for (b, (whole, m)) in &f.extractors {
+                let e = t.extractors.entry(b.clone()).or_default();
+                e.0 += whole;
+                e.1 += m;
+            }
+            for (item, lines) in &f.extracted {
+                t.extracted.entry(item.clone()).or_default().extend(lines.iter().cloned());
             }
         }
         if self.on_master() {
@@ -488,7 +498,7 @@ pub fn project_overview(app: &mut FactoryApp, ui: &mut Ui) {
             }
         }
         flows(ui, assets, "Raw resources", "Mined across all the factories.", &t.resources);
-        crate::overview_extra::build_cost(ui, assets, &game, &t.buildings, &t.resources, &extraction);
+        crate::overview_extra::build_cost(ui, assets, &game, &t.buildings, &t.extractors, &t.resources, &t.extracted, &extraction);
         if !issues.is_empty() {
             widgets::divider(ui);
             ui.horizontal(|ui| {

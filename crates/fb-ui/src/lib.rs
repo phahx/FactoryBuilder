@@ -6,6 +6,7 @@ pub mod app_files;
 pub mod assets;
 pub mod backend;
 pub mod dialogs;
+pub mod extractors;
 pub mod finder;
 pub mod frames;
 pub mod navigate;

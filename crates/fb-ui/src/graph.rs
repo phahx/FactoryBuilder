@@ -107,6 +107,19 @@ pub enum NodeKind {
     Splitter {
         item: String,
     },
+    /// An extractor building on a resource (extractors.rs): Miner, Water
+    /// Extractor, Oil Extractor or Resource Well Extractor.
+    Extractor {
+        item: String,
+        class: String,
+        #[serde(default)]
+        purity: fb_model::Purity,
+    },
+    /// A Pipeline Pump on a pipe (routers.rs).
+    Pump {
+        item: String,
+        class: String,
+    },
 }
 
 impl NodeKind {
@@ -121,6 +134,8 @@ impl NodeKind {
             NodeKind::Pole { id } => Template::Pole(id),
             NodeKind::Merger { item } => Template::Merger(item),
             NodeKind::Splitter { item } => Template::Splitter(item),
+            NodeKind::Extractor { item, class, purity } => Template::Extractor { item, class, purity },
+            NodeKind::Pump { item, class } => Template::Pump { item, class },
         }
     }
 
@@ -134,7 +149,9 @@ impl NodeKind {
             | NodeKind::Sink { item } => Some(item),
             // A factory shows its first product.
             NodeKind::Factory { outs, .. } => outs.first().map(|(item, _)| item.as_str()),
-            NodeKind::Pole { .. } | NodeKind::Merger { .. } | NodeKind::Splitter { .. } => None,
+            NodeKind::Pole { .. } | NodeKind::Merger { .. } | NodeKind::Splitter { .. } | NodeKind::Pump { .. } => None,
+            // The building's icon.
+            NodeKind::Extractor { class, .. } => crate::extractors::find(game, class).map(|e| e.icon.as_str()),
         }
     }
 }
@@ -160,6 +177,15 @@ pub enum Template {
     Pole(u32),
     Merger(String),
     Splitter(String),
+    Extractor {
+        item: String,
+        class: String,
+        purity: fb_model::Purity,
+    },
+    Pump {
+        item: String,
+        class: String,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -304,6 +330,8 @@ impl Template {
             Template::Pole(id) => NodeKind::Pole { id },
             Template::Merger(item) => NodeKind::Merger { item },
             Template::Splitter(item) => NodeKind::Splitter { item },
+            Template::Extractor { item, class, purity } => NodeKind::Extractor { item, class, purity },
+            Template::Pump { item, class } => NodeKind::Pump { item, class },
         }
     }
 }
@@ -334,7 +362,8 @@ impl NodeTemplateTrait for Template {
             Template::Sink(_) => "Sinks".into(),
             Template::Factory(_) => "Factories".into(),
             Template::Pole(_) => "Power".into(),
-            Template::Merger(_) | Template::Splitter(_) => "Logistics".into(),
+            Template::Merger(_) | Template::Splitter(_) | Template::Pump { .. } => "Logistics".into(),
+            Template::Extractor { .. } => "Extractors".into(),
         }]
     }
 
@@ -352,7 +381,8 @@ impl NodeTemplateTrait for Template {
             | Template::Sink(i) => s.game.item_name(i).to_string(),
             Template::Factory(id) => s.factories.get(id).map(|f| f.name.clone()).unwrap_or_else(|| "Factory".into()),
             Template::Pole(_) => "Power pole".into(),
-            Template::Merger(_) | Template::Splitter(_) => crate::routers::name(&s.game, &self.kind()).into(),
+            Template::Merger(_) | Template::Splitter(_) | Template::Pump { .. } => crate::routers::name(&s.game, &self.kind()).into(),
+            Template::Extractor { class, .. } => crate::extractors::find(&s.game, class).map(|e| e.name.clone()).unwrap_or_else(|| class.clone()),
         }
     }
 
@@ -431,6 +461,16 @@ impl NodeTemplateTrait for Template {
             Template::Merger(i) => {
                 item_in(graph, i);
                 item_out(graph, i);
+            }
+            Template::Extractor { item, .. } => {
+                constant(graph, MACHINES, number(1.0, 0.0, 10_000.0, ""));
+                constant(graph, CLOCK, number(100.0, 1.0, 250.0, "%"));
+                item_in(graph, item);
+                item_out(graph, item);
+            }
+            Template::Pump { item, .. } => {
+                item_in(graph, item);
+                item_out(graph, item);
             }
             Template::Splitter(i) => {
                 // One wire in.
@@ -617,7 +657,7 @@ impl NodeDataTrait for NodeData {
     fn knot_size(&self) -> Option<egui::Vec2> {
         match self.kind {
             NodeKind::Pole { .. } => Some(crate::power_net::POLE_SIZE),
-            NodeKind::Merger { .. } | NodeKind::Splitter { .. } => Some(crate::routers::SIZE),
+            NodeKind::Merger { .. } | NodeKind::Splitter { .. } | NodeKind::Pump { .. } => Some(crate::routers::SIZE),
             _ => None,
         }
     }
@@ -632,8 +672,17 @@ impl NodeDataTrait for NodeData {
     /// Like the buildings in game: a pole takes as many wires as its tier,
     /// mergers and splitters three belts, a pipeline junction four pipes.
     fn accepts_wire(&self, node_id: NodeId, port: AnyParameterId, graph: &FactoryGraph, s: &mut UserState) -> bool {
+        let wires = match port {
+            AnyParameterId::Input(i) => graph.connections(i).len(),
+            AnyParameterId::Output(o) => graph.output_connections(o).len(),
+        };
         match &self.kind {
             NodeKind::Pole { id } => crate::power_net::wire_count(graph, node_id) < crate::power_net::max_wires(s.pole_tiers.get(id).copied().unwrap_or(1)),
+            // A whole factory's block takes any number of links.
+            NodeKind::Factory { .. } => true,
+            // A building's belt or pipe port takes one, as in game: more
+            // goes through a merger or splitter.
+            NodeKind::Recipe { .. } | NodeKind::Resource { .. } | NodeKind::Input { .. } | NodeKind::Output { .. } | NodeKind::Sink { .. } | NodeKind::Extractor { .. } => wires < 1,
             k => crate::routers::accepts(&s.game, k, graph, node_id, port),
         }
     }
@@ -697,7 +746,13 @@ impl NodeDataTrait for NodeData {
                 NodeKind::Input { .. } => Some("Input"),
                 NodeKind::Output { .. } => Some("Output"),
                 NodeKind::Sink { .. } => Some("Sink"),
-                NodeKind::Pole { .. } | NodeKind::Merger { .. } | NodeKind::Splitter { .. } => None,
+                NodeKind::Pole { .. } | NodeKind::Merger { .. } | NodeKind::Splitter { .. } | NodeKind::Pump { .. } => None,
+                NodeKind::Extractor { .. } => {
+                    let eff = s.nodes.get(&node_id).map(|n| n.efficiency).unwrap_or(1.0);
+                    ui.label(RichText::new(format!("{:.0}%", eff * 100.0)).small().color(supply_color(eff, 1.0)))
+                        .on_hover_text("Running speed: how much of its full rate this extractor group can run at.");
+                    None
+                }
             };
             if let Some(c) = caption {
                 ui.label(RichText::new(c).small().color(TEXT_DIM));
@@ -802,6 +857,7 @@ impl NodeDataTrait for NodeData {
                     });
                 });
             }
+            NodeKind::Extractor { item, class, purity } => crate::extractors::footer(ui, s, graph, node_id, item, class, *purity),
             NodeKind::Factory { id, .. } => {
                 let Some(f) = s.factories.get(id).cloned() else { return vec![] };
                 let (r_div, _) = ui.allocate_exact_size(vec2(ui.available_width(), 1.0), egui::Sense::hover());
@@ -960,6 +1016,11 @@ pub fn node_rates(
             )
         }
         // Not in the simulation: their wires are joined up (routers.rs).
-        NodeKind::Pole { .. } | NodeKind::Merger { .. } | NodeKind::Splitter { .. } => (vec![], vec![]),
+        NodeKind::Pole { .. } | NodeKind::Merger { .. } | NodeKind::Splitter { .. } | NodeKind::Pump { .. } => (vec![], vec![]),
+        // What it takes from the deposit is what it puts out.
+        NodeKind::Extractor { class, purity, .. } => {
+            let rate = crate::extractors::per_machine(game, class, *purity) * input_number(graph, node, MACHINES) * input_number(graph, node, CLOCK) / 100.0;
+            (item_inputs.map(|(name, _)| (name.clone(), rate)).collect(), n.outputs.iter().map(|(name, _)| (name.clone(), rate)).collect())
+        }
     }
 }

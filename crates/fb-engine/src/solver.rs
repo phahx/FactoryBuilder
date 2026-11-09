@@ -114,6 +114,13 @@ pub fn solve(data: &GameData, req: &SolveRequest) -> SolveOutcome {
             generated.add_mul(r.generates_mw, v);
         }
     }
+    // The extractors' power, per unit of each resource taken.
+    for (&item, &v) in &e_vars {
+        if let Some(&mw) = req.extraction_mw.get(item).filter(|mw| mw.is_finite() && **mw > 0.0) {
+            power.add_mul(mw, v);
+            net_power.add_mul(mw, v);
+        }
+    }
     // Generating its own power, the plan always covers what it uses, so
     // "least power" means the least generating capacity to build (and so the
     // least fuel); resources break ties between generators.
@@ -203,6 +210,7 @@ pub fn solve(data: &GameData, req: &SolveRequest) -> SolveOutcome {
                 let r = &data.recipes[recipe];
                 (data.recipe_power_mw(r) * machines, r.generates_mw * machines)
             }
+            PlanNodeKind::Resource { item, rate } => (req.extraction_mw.get(item).copied().filter(|m| m.is_finite()).unwrap_or(0.0) * rate, 0.0),
             _ => (0.0, 0.0),
         })
         .fold((0.0, 0.0), |a, b| (a.0 + b.0, a.1 + b.1));
@@ -447,6 +455,28 @@ mod tests {
             .unwrap();
         let fed: Vec<&str> = plan.edges.iter().filter(|e| e.to == gen_node).map(|e| e.item.as_str()).collect();
         assert!(fed.contains(&"Desc_Coal_C") && fed.contains(&"Desc_Water_C"), "{fed:?}");
+    }
+
+    #[test]
+    fn generating_plans_cover_their_extractors_too() {
+        let Some(data) = game() else { return };
+        // 5 MW per 60 ore (a Miner Mk.1 at 100% on a Normal node).
+        let req = SolveRequest {
+            targets: vec![Target { item: "Desc_IronPlate_C".into(), rate: 60.0 }],
+            enabled_recipes: standard(&data),
+            power: generate(&[COAL_GEN]),
+            extraction_mw: [("Desc_OreIron_C".to_string(), 5.0 / 60.0)].into_iter().collect(),
+            ..Default::default()
+        };
+        let SolveOutcome::Solved(plan) = solve(&data, &req) else { panic!("infeasible") };
+        let ore = rate_of(&plan, |k| match k {
+            PlanNodeKind::Resource { item, rate } if item == "Desc_OreIron_C" => Some(*rate),
+            _ => None,
+        });
+        // The coal for the generators is mined too, at no cost here.
+        let machines = 24.0;
+        assert!((plan.power_mw - (machines + ore * 5.0 / 60.0)).abs() < 1e-6, "power {}", plan.power_mw);
+        assert!(plan.generated_mw >= plan.power_mw - 1e-6, "generated {} for {}", plan.generated_mw, plan.power_mw);
     }
 
     #[test]
