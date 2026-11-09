@@ -1409,7 +1409,7 @@ where
                 None => Shape::Noop,
             };
             let node_rect = titlebar_rect.union(body_rect).union(bottom_body_rect);
-            let warning = self.graph[self.node_id].user_data.warning_outline(self.node_id, self.graph, user_state);
+            let warning = self.graph[self.node_id].user_data.warning(self.node_id, self.graph, user_state);
             let outline = if self.selected {
                 Shape::Rect(RectShape {
                     rect: node_rect.expand(2.0 * pan_zoom.zoom),
@@ -1420,7 +1420,8 @@ where
                     fill_texture_id: Default::default(),
                     uv: Rect::ZERO,
                 })
-            } else if let Some(c) = warning {
+            } else if let Some((c, _)) = &warning {
+                let c = *c;
                 Shape::Rect(RectShape {
                     rect: node_rect.expand(2.0 * pan_zoom.zoom),
                     rounding,
@@ -1436,6 +1437,15 @@ where
 
             // Take note of the node rect, so the editor can use it later to compute intersections.
             self.node_rects.insert(self.node_id, node_rect);
+            // FactoryBuilder: what's wrong, over the node itself (its ports
+            // and fields have their own tips).
+            if let Some((_, text)) = &warning {
+                if window_response.hovered() {
+                    egui::show_tooltip_at_pointer(ui.ctx(), ui.layer_id(), Id::new((self.node_id, "warning")), |ui| {
+                        ui.label(text.as_str());
+                    });
+                }
+            }
 
             (Shape::Vec(vec![titlebar, body, bottom_body, strip]), outline)
         };

@@ -252,9 +252,10 @@ pub struct UserState {
     /// Output nodes: what arrives.
     #[serde(skip)]
     pub delivered: HashMap<NodeId, f64>,
-    /// Input nodes no other factory (enough of) brings in.
+    /// Input nodes no other factory (enough of) brings in: what arrives of
+    /// what's wanted, when it's linked at all.
     #[serde(skip)]
-    pub unsupplied: std::collections::HashSet<NodeId>,
+    pub unsupplied: HashMap<NodeId, Option<(f64, f64)>>,
 }
 
 impl UserState {
@@ -831,17 +832,32 @@ impl NodeDataTrait for NodeData {
 
     /// A factory block that needs power and gets none (or not enough); an
     /// Input no other factory (enough of) brings in.
-    fn warning_outline(&self, node_id: NodeId, _graph: &FactoryGraph, s: &mut UserState) -> Option<Color32> {
-        if matches!(self.kind, NodeKind::Input { .. }) {
-            return s.unsupplied.contains(&node_id).then_some(DANGER);
+    fn warning(&self, node_id: NodeId, _graph: &FactoryGraph, s: &mut UserState) -> Option<(Color32, String)> {
+        match &self.kind {
+            NodeKind::Input { item } => {
+                let name = s.game.item_name(item).to_string();
+                let unit = if s.game.item_form(item).is_fluid() { "m³/min" } else { "per min" };
+                let text = match s.unsupplied.get(&node_id)? {
+                    None => format!("Nothing brings this in: on the master graph, link {name} into this factory from another one."),
+                    Some((got, want)) => format!("Not enough comes in: {} of {} {unit} arrives from other factories.", fmt_num(*got), fmt_num(*want)),
+                };
+                Some((DANGER, text))
+            }
+            NodeKind::Factory { .. } => {
+                let p = s.ports.get(&(node_id, crate::power_net::PORT.to_string()))?;
+                // Its Power input only (an output has have == want).
+                if !(p.want > 1e-9 && p.have < p.want - 1e-6) {
+                    return None;
+                }
+                let text = if p.connected {
+                    format!("Short of power: gets {} of {} MW.", fmt_num(p.have), fmt_num(p.want))
+                } else {
+                    "Not getting power: its Power input isn't wired to a pole or a power plant.".to_string()
+                };
+                Some((DANGER, text))
+            }
+            _ => None,
         }
-        if !matches!(self.kind, NodeKind::Factory { .. }) {
-            return None;
-        }
-        let p = s.ports.get(&(node_id, crate::power_net::PORT.to_string()))?;
-        // Only its Power input (an output has have == want).
-        let input = p.want > 1e-9 && (!p.connected || p.have < p.want - 1e-6);
-        (input && p.have < p.want - 1e-6).then_some(DANGER)
     }
 
     fn titlebar_strip(

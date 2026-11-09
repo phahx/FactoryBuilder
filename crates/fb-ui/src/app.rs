@@ -1171,12 +1171,14 @@ impl FactoryApp {
             block.is_some_and(|b| mg[b].inputs.iter().any(|(_, i)| mg[*i].typ.0 == item && !mg.connections(*i).is_empty()))
         };
         let g = &self.state.graph;
-        let mut out = std::collections::HashSet::new();
+        let mut out = std::collections::HashMap::new();
         for n in g.iter_nodes() {
             let NodeKind::Input { item } = &g[n].user_data.kind else { continue };
-            let enough = self.master_inputs.get(&(self.active, item.clone())).is_none_or(|s| s.have >= s.want * 0.995);
-            if !(linked(item) && enough) {
-                out.insert(n);
+            let stat = self.master_inputs.get(&(self.active, item.clone()));
+            if !linked(item) {
+                out.insert(n, None);
+            } else if let Some(s) = stat.filter(|s| s.have < s.want * 0.995) {
+                out.insert(n, Some((s.have, s.want)));
             }
         }
         self.user.unsupplied = out;

@@ -2053,16 +2053,17 @@ fn master_graph_links_factories_and_flags_shortfalls() {
     assert!(app.summary.issues.is_empty(), "{:?}", app.summary.issues);
 
     // In the rod factory, its Input isn't brought in from anywhere yet.
-    let input_warned = |app: &mut FactoryApp| {
+    let warning = |app: &mut FactoryApp| {
         use egui_node_graph2::NodeDataTrait;
         let g = &app.state.graph;
         let n = g.iter_nodes().find(|n| matches!(g[*n].user_data.kind, crate::graph::NodeKind::Input { .. })).unwrap();
         let data = g[n].user_data.clone();
-        data.warning_outline(n, &app.state.graph, &mut app.user).is_some()
+        data.warning(n, &app.state.graph, &mut app.user).map(|w| w.1)
     };
+    let input_warned = |app: &mut FactoryApp| warning(app).is_some();
     app.activate(rods);
     frames(&ctx, &mut app, 2);
-    assert!(input_warned(&mut app), "nothing brings the ingots in");
+    assert_eq!(warning(&mut app).as_deref(), Some("Nothing brings this in: on the master graph, link Iron Ingot into this factory from another one."));
     app.activate(MASTER);
     frames(&ctx, &mut app, 2);
 
@@ -2078,7 +2079,7 @@ fn master_graph_links_factories_and_flags_shortfalls() {
     assert!((t.products["Desc_IronRod_C"] - 30.0).abs() < 1e-6, "{:?}", t.products);
     app.activate(rods);
     frames(&ctx, &mut app, 2);
-    assert!(input_warned(&mut app), "linked, but only half its ingots arrive");
+    assert_eq!(warning(&mut app).as_deref(), Some("Not enough comes in: 30 of 60 per min arrives from other factories."), "linked, but only half its ingots arrive");
     app.activate(MASTER);
     frames(&ctx, &mut app, 2);
     assert!((t.resources["Desc_OreIron_C"] - 30.0).abs() < 1e-6);
@@ -2207,9 +2208,23 @@ fn power_poles_show_which_factories_power_which() {
         use egui_node_graph2::NodeDataTrait;
         let b = crate::project::block_of(&app.state.graph, f).unwrap();
         let data = app.state.graph[b].user_data.clone();
-        data.warning_outline(b, &app.state.graph, &mut app.user)
+        data.warning(b, &app.state.graph, &mut app.user).map(|w| w.0)
     };
     assert_eq!(outline(&mut app, smelting), Some(crate::theme::DANGER));
+    {
+        use egui_node_graph2::NodeDataTrait;
+        let b = crate::project::block_of(&app.state.graph, smelting).unwrap();
+        let data = app.state.graph[b].user_data.clone();
+        let text = data.warning(b, &app.state.graph, &mut app.user).unwrap().1;
+        assert_eq!(text, "Not getting power: its Power input isn't wired to a pole or a power plant.");
+        // Hovering the block shows it.
+        app.request_frame_all();
+        frames(&ctx, &mut app, 2);
+        let r = app.node_rects[&b];
+        frame_with(&ctx, &mut app, vec![egui::Event::PointerMoved(r.center())]);
+        let texts = drawn_texts(&ctx, &mut app);
+        assert!(texts.iter().any(|t| *t == text), "the tip shows on hover");
+    }
     assert_eq!(outline(&mut app, plant), None, "the plant needs none");
 
     // A pole from the canvas menu; the plant and the smelters wired to it.
@@ -2277,6 +2292,13 @@ fn power_poles_show_which_factories_power_which() {
     let short = crate::fmt::fmt_num(smelting_mw + rods_mw - small);
     let issues: Vec<String> = app.summary.issues.iter().map(|i| i.1.clone()).collect();
     assert!(issues.iter().any(|i| *i == format!("Power for Rods and 1 more is {short} MW short")), "{issues:?}");
+    let rods_tip = {
+        use egui_node_graph2::NodeDataTrait;
+        let b = crate::project::block_of(&app.state.graph, rods).unwrap();
+        let data = app.state.graph[b].user_data.clone();
+        data.warning(b, &app.state.graph, &mut app.user).map(|w| w.1)
+    };
+    assert!(rods_tip.as_deref().is_some_and(|t| t.starts_with("Short of power: gets ")), "{rods_tip:?}");
     let rb = crate::project::block_of(&app.state.graph, rods).unwrap();
     let s = stat(&app, rb, PORT);
     assert!((s.have - rods_mw * small / (smelting_mw + rods_mw)).abs() < 1e-6, "its share of what's made: {s:?}");

@@ -140,8 +140,9 @@ where
         true
     }
 
-    /// FactoryBuilder: an outline drawn around the node to flag a problem.
-    fn warning_outline(&self, _node_id: NodeId, _graph: &Graph<Self, Self::DataType, Self::ValueType>, _user_state: &mut Self::UserState) -> Option<egui::Color32> {
+    /// FactoryBuilder: a problem with the node: the colour of the outline
+    /// drawn around it, and what's wrong (shown when it's hovered).
+    fn warning(&self, _node_id: NodeId, _graph: &Graph<Self, Self::DataType, Self::ValueType>, _user_state: &mut Self::UserState) -> Option<(egui::Color32, String)> {
         None
     }
 
