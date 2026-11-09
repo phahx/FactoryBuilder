@@ -100,6 +100,8 @@ pub struct GraphResponse<UserResponse: UserResponseTrait, NodeData: NodeDataTrai
     /// FactoryBuilder: a wire being dragged from this port was let go on
     /// empty canvas, at this screen position.
     pub wire_dropped: Option<(NodeId, AnyParameterId, Pos2)>,
+    /// FactoryBuilder: the other outputs pulled along with that wire.
+    pub wire_dropped_extras: Vec<OutputId>,
 }
 impl<UserResponse: UserResponseTrait, NodeData: NodeDataTrait> Default
     for GraphResponse<UserResponse, NodeData>
@@ -114,6 +116,7 @@ impl<UserResponse: UserResponseTrait, NodeData: NodeDataTrait> Default
             port_locations: Default::default(),
             wires: Vec::new(),
             wire_dropped: None,
+            wire_dropped_extras: Vec::new(),
         }
     }
 }
@@ -463,6 +466,11 @@ where
                 connection_color,
                 self.style.wire_width,
             );
+            for x in &self.connection_extras {
+                if let Some(start) = port_locations.get(&AnyParameterId::Output(*x)).and_then(|h| h.last()) {
+                    draw_connection(&self.pan_zoom, ui.painter(), *start, dst_pos, connection_color, self.style.wire_width);
+                }
+            }
         }
 
         // draw existing connections
@@ -533,6 +541,31 @@ where
             }
         }
 
+        // FactoryBuilder: the outputs pulled along make the same connection.
+        if !self.connection_extras.is_empty() {
+            let ended: Vec<(OutputId, InputId)> = delayed_responses
+                .iter()
+                .filter_map(|r| match r {
+                    NodeResponse::ConnectEventEnded { output, input, .. } => Some((*output, *input)),
+                    _ => None,
+                })
+                .collect();
+            let origin = match self.connection_in_progress {
+                Some((_, AnyParameterId::Output(o))) => Some(o),
+                _ => None,
+            };
+            for (output, input) in ended {
+                if Some(output) != origin {
+                    continue;
+                }
+                for (k, x) in self.connection_extras.iter().enumerate() {
+                    let input_hook = self.graph.connections(input).len() + 1 + k;
+                    let output_hook = self.graph.output_connections(*x).len();
+                    delayed_responses.push(NodeResponse::ConnectEventEnded { output: *x, input, input_hook, output_hook });
+                }
+            }
+        }
+
         // FactoryBuilder: no wire to (or from) a port that's full.
         delayed_responses.retain(|r| match r {
             NodeResponse::ConnectEventEnded { output, input, .. } => {
@@ -550,6 +583,18 @@ where
             match response {
                 NodeResponse::ConnectEventStarted(node_id, port) => {
                     self.connection_in_progress = Some((*node_id, *port));
+                    // FactoryBuilder: dragging an output of a selected node
+                    // pulls the same item's output of every other selected
+                    // node along.
+                    self.connection_extras.clear();
+                    if let (AnyParameterId::Output(o), true) = (port, self.selected_nodes.contains(node_id)) {
+                        let typ = &self.graph[*o].typ;
+                        for n in self.selected_nodes.iter().filter(|n| *n != node_id && self.graph.nodes.contains_key(**n)) {
+                            if let Some(x) = self.graph[*n].outputs.iter().map(|(_, x)| *x).find(|x| self.graph[*x].typ == *typ) {
+                                self.connection_extras.push(x);
+                            }
+                        }
+                    }
                 }
                 NodeResponse::ConnectEventEnded {
                     output,
@@ -666,13 +711,16 @@ where
 
         // FactoryBuilder: let go on empty canvas (not on a port, not on a node).
         let mut wire_dropped = None;
+        let mut wire_dropped_extras = Vec::new();
         if mouse.any_released() && self.connection_in_progress.is_some() {
             let ended = delayed_responses.iter().any(|r| matches!(r, NodeResponse::ConnectEventEnded { .. }));
             let on_node = node_rects_for_menu.values().any(|r| r.contains(cursor_pos));
             if !ended && !on_node && cursor_in_editor && !cursor_in_finder {
                 wire_dropped = self.connection_in_progress.map(|(n, p)| (n, p, cursor_pos));
+                wire_dropped_extras = std::mem::take(&mut self.connection_extras);
             }
             self.connection_in_progress = None;
+            self.connection_extras.clear();
         }
 
         // FactoryBuilder: right-click on a node asks for its context menu;
@@ -734,6 +782,7 @@ where
             port_locations: port_locations.clone(),
             wires,
             wire_dropped,
+            wire_dropped_extras,
         }
     }
 }

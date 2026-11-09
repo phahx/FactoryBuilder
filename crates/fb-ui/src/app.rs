@@ -1860,6 +1860,9 @@ impl FactoryApp {
         // A wire let go on empty canvas: Add node, showing only what fits it.
         if let Some((node, port, at)) = resp.wire_dropped.filter(|_| !self.on_master()) {
             self.open_finder_for_wire(node, port, at);
+            if let Some(w) = self.finder.as_mut().and_then(|f| f.wire.as_mut()) {
+                w.extras = resp.wire_dropped_extras.clone();
+            }
         }
         if let Some(menu) = resp.node_context_menu {
             self.context_menu = Some(menu);
@@ -2180,7 +2183,7 @@ impl FactoryApp {
         let item_name = self.user.game.item_name(&item).to_string();
         let from_output = matches!(port, egui_node_graph2::AnyParameterId::Output(_));
         let mut f = crate::finder::FinderState::new(at);
-        f.wire = Some(crate::finder::WireDrop { node, port, item, item_name, from_output });
+        f.wire = Some(crate::finder::WireDrop { node, port, item, item_name, from_output, extras: Vec::new() });
         self.finder = Some(f);
         self.context_menu = None;
     }
@@ -2200,6 +2203,15 @@ impl FactoryApp {
                 if let Some(input) = input {
                     let at = g.connections(input).len();
                     g.add_connection(output, input, at);
+                    // The other selected nodes' wires, as far as it takes them.
+                    let live: Vec<_> = w.extras.iter().copied().filter(|x| self.state.graph.try_get_output(*x).is_some()).collect();
+                    for x in &live {
+                        let data = self.state.graph[new].user_data.clone();
+                        if data.accepts_wire(new, P::Input(input), &self.state.graph, &mut self.user) {
+                            let at = self.state.graph.connections(input).len();
+                            self.state.graph.add_connection(*x, input, at);
+                        }
+                    }
                 }
             }
             P::Input(input) => {

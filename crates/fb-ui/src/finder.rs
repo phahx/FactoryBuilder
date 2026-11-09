@@ -245,6 +245,8 @@ pub struct WireDrop {
     pub item: String,
     pub item_name: String,
     pub from_output: bool,
+    /// Outputs of other selected nodes pulled along with it.
+    pub extras: Vec<egui_node_graph2::OutputId>,
 }
 
 impl WireDrop {

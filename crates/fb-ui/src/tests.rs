@@ -2423,6 +2423,52 @@ fn plans_share_belts_and_pipes_through_mergers_splitters_and_junctions() {
 }
 
 #[test]
+fn dragging_from_one_selected_node_pulls_wires_from_all_of_them() {
+    use crate::graph::Template;
+    use egui_node_graph2::AnyParameterId;
+    let Some((ctx, mut app, _)) = harness() else { return };
+    frames(&ctx, &mut app, 2);
+    app.minimap = false;
+    let at = |app: &FactoryApp, x: f32, y: f32| app.screen_to_graph(egui::pos2(x, y));
+    let p = at(&app, 420.0, 100.0);
+    let a = app.add_test_node(Template::Recipe("Recipe_IngotIron_C".into()), p);
+    let p = at(&app, 420.0, 420.0);
+    let b = app.add_test_node(Template::Recipe("Recipe_IngotIron_C".into()), p);
+    let p = at(&app, 950.0, 300.0);
+    let out = app.add_test_node(Template::Output("Desc_IronIngot_C".into()), p);
+    frames(&ctx, &mut app, 3);
+    app.state.selected_nodes = vec![a, b];
+    let ingots = |app: &FactoryApp, n: egui_node_graph2::NodeId| app.graph()[n].outputs[0].1;
+    let ring = *app.port_hooks[&AnyParameterId::Output(ingots(&app, a))].last().unwrap();
+    // Onto the Output node: both smelters' ingots go to it.
+    let body = app.node_rects[&out].center();
+    drag(&ctx, &mut app, ring, body);
+    let g = app.graph();
+    let input = g[out].inputs.iter().map(|(_, i)| *i).find(|i| g[*i].typ.0 == "Desc_IronIngot_C").unwrap();
+    let mut got = g.connections(input);
+    got.sort();
+    let mut want = vec![ingots(&app, a), ingots(&app, b)];
+    want.sort();
+    assert_eq!(got, want, "a wire from each selected smelter");
+
+    // Onto empty canvas: Add node, and the new node gets both wires.
+    app.state.selected_nodes = vec![a, b];
+    frames(&ctx, &mut app, 1);
+    let ring = *app.port_hooks[&AnyParameterId::Output(ingots(&app, a))].last().unwrap();
+    drag(&ctx, &mut app, ring, egui::pos2(ring.x + 60.0, 900.0));
+    let wire = app.finder.as_ref().and_then(|f| f.wire.clone()).expect("Add node opened");
+    assert_eq!(wire.extras, vec![ingots(&app, b)]);
+    app.finder.as_mut().unwrap().query = "Iron Ingot leftovers".into();
+    frames(&ctx, &mut app, 1);
+    press_key(&ctx, &mut app, egui::Key::Enter);
+    frames(&ctx, &mut app, 2);
+    let g = app.graph();
+    let new = *app.selected().first().expect("the new node is selected");
+    assert!(matches!(g[new].user_data.kind, crate::graph::NodeKind::Sink { .. }), "{:?}", g[new].user_data.kind);
+    assert_eq!(g.connections(g[new].inputs[0].1).len(), 2, "both smelters wired to it");
+}
+
+#[test]
 fn a_wire_dropped_on_a_node_connects_to_the_port_that_fits() {
     use crate::graph::Template;
     use egui_node_graph2::AnyParameterId;

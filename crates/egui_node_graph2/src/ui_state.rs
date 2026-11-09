@@ -20,6 +20,10 @@ pub struct GraphEditorState<NodeData, DataType, ValueType, NodeTemplate, UserSta
     /// An ongoing connection interaction: The mouse has dragged away from a
     /// port and the user is holding the click
     pub connection_in_progress: Option<(NodeId, AnyParameterId)>,
+    /// FactoryBuilder: outputs of the other selected nodes pulled along
+    /// with an output wire being dragged (each makes the same connection).
+    #[cfg_attr(feature = "persistence", serde(skip, default))]
+    pub connection_extras: Vec<OutputId>,
     /// The currently selected node. Some interface actions depend on the
     /// currently selected node.
     pub selected_nodes: Vec<NodeId>,
@@ -89,6 +93,7 @@ impl<NodeData, DataType, ValueType, NodeKind, UserState> Default
             graph: Default::default(),
             node_order: Default::default(),
             connection_in_progress: Default::default(),
+            connection_extras: Default::default(),
             selected_nodes: Default::default(),
             ongoing_box_selection: Default::default(),
             node_positions: Default::default(),
