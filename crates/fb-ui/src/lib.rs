@@ -25,6 +25,7 @@ pub mod project_ui;
 pub mod power_net;
 pub mod power_ui;
 pub mod room;
+pub mod routers;
 pub mod room_extras;
 pub mod setup;
 pub mod theme;

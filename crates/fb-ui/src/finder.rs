@@ -136,6 +136,32 @@ impl Catalog {
                 });
             }
         }
+        // Mergers and splitters for every item (one junction for fluids,
+        // as in game), named for the item, with the game's icons.
+        for (class, item) in &game.items {
+            let kinds: &[(Template, &str, &str)] = if item.form.is_fluid() {
+                &[(Template::Merger(class.clone()), "Pipeline Junctions", "Pipeline Junction · joins and shares out pipes")]
+            } else {
+                &[
+                    (Template::Merger(class.clone()), "Mergers", "Merger · joins belts into one"),
+                    (Template::Splitter(class.clone()), "Splitters", "Splitter · shares a belt out over several"),
+                ]
+            };
+            for (template, group, subtitle) in kinds {
+                let icon = crate::routers::icon(game, &template.kind()).to_string();
+                entries.push(Entry {
+                    template: template.clone(),
+                    title: item.name.clone(),
+                    subtitle: (*subtitle).into(),
+                    group: (*group).into(),
+                    icon,
+                    alternate: false,
+                    search: String::new(),
+                    takes: vec![class.clone()],
+                    makes: vec![class.clone()],
+                });
+            }
+        }
         for e in &mut entries {
             e.search = format!("{} {}", e.title, e.subtitle).to_lowercase();
         }
@@ -163,6 +189,9 @@ impl Catalog {
                 icon: GroupIcon::Ui(icon),
                 entries: vec![],
             });
+        }
+        for (name, icon) in [("Mergers", "Desc_ConveyorAttachmentMerger_C"), ("Splitters", "Desc_ConveyorAttachmentSplitter_C"), ("Pipeline Junctions", "Desc_PipelineJunction_Cross_C")] {
+            groups.push(Group { name: name.into(), icon: GroupIcon::Item(icon.into()), entries: vec![] });
         }
         for (i, e) in entries.iter().enumerate() {
             if let Some(g) = groups.iter_mut().find(|g| g.name == e.group) {

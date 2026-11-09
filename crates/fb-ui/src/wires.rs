@@ -75,8 +75,84 @@ pub fn paint_labels(app: &mut FactoryApp, ui: &egui::Ui, wires: &[(InputId, Outp
     }
 }
 
+/// Points along a wire's bezier with the distance to each from its start.
+fn samples(p: &[Pos2; 4]) -> Vec<(Pos2, f32)> {
+    let at = |t: f32| {
+        let u = 1.0 - t;
+        let w = [u * u * u, 3.0 * u * u * t, 3.0 * u * t * t, t * t * t];
+        pos2(p.iter().zip(w).map(|(q, k)| q.x * k).sum(), p.iter().zip(w).map(|(q, k)| q.y * k).sum())
+    };
+    let mut out: Vec<(Pos2, f32)> = vec![(p[0], 0.0)];
+    for k in 1..=32 {
+        let q = at(k as f32 / 32.0);
+        let d = out.last().map(|(a, s)| s + a.distance(q)).unwrap_or(0.0);
+        out.push((q, d));
+    }
+    out
+}
+
+/// Small arrows drifting along wires the way things flow: item wires that
+/// carry something, and power wires into and out of factories while their
+/// circuit is lit (between poles power can go either way). Arrows under a
+/// node aren't drawn, as the wires there aren't. Returns whether any moved.
+pub fn paint_flow(app: &FactoryApp, ui: &egui::Ui, wires: &[(InputId, OutputId, [Pos2; 4])], nodes: &egui_node_graph2::NodeRects) -> bool {
+    let zoom = app.state.pan_zoom.zoom;
+    if zoom < MIN_ZOOM {
+        return false;
+    }
+    let g = &app.state.graph;
+    let pole = |n| crate::power_net::pole_of(g, n).is_some();
+    let clip = app.editor_rect;
+    let painter = ui.painter().with_clip_rect(clip);
+    let time = ui.input(|i| i.time) as f32;
+    let (gap, speed, size) = (56.0 * zoom, 28.0 * zoom, 5.0 * zoom.max(0.8));
+    let mut any = false;
+    for (input, output, points) in wires {
+        let (Some(o), Some(i)) = (g.try_get_output(*output), g.try_get_input(*input)) else { continue };
+        let moving = if crate::power_net::is_power(&o.typ.0) {
+            !(pole(o.node) && pole(i.node)) && app.user.power_lit.contains(&(o.node, i.node))
+        } else {
+            app.wire_flow.get(&(*input, *output)).is_some_and(|f| *f > 1e-6)
+        };
+        if !moving || !clip.intersects(Rect::from_points(points)) {
+            continue;
+        }
+        any = true;
+        let path = samples(points);
+        let len = path.last().map(|p| p.1).unwrap_or(0.0);
+        let mut s = (time * speed) % gap;
+        let mut k = 1;
+        while s < len {
+            while k + 1 < path.len() && path[k].1 < s {
+                k += 1;
+            }
+            let (a, b) = (path[k - 1], path[k]);
+            let t = if b.1 > a.1 { (s - a.1) / (b.1 - a.1) } else { 0.0 };
+            let at = a.0 + (b.0 - a.0) * t;
+            let dir = (b.0 - a.0).normalized();
+            if clip.contains(at) && !nodes.values().any(|r| r.contains(at)) {
+                let side = vec2(-dir.y, dir.x) * size * 0.8;
+                let tip = at + dir * size;
+                let back = at - dir * size;
+                painter.add(egui::Shape::convex_polygon(vec![tip, back + side, back - side], egui::Color32::from_white_alpha(190), egui::Stroke::NONE));
+            }
+            s += gap;
+        }
+    }
+    any
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn samples_measure_the_curve() {
+        // A straight wire 100 long, as a bezier.
+        let p = [egui::pos2(0.0, 0.0), egui::pos2(30.0, 0.0), egui::pos2(70.0, 0.0), egui::pos2(100.0, 0.0)];
+        let s = super::samples(&p);
+        assert!((s.last().unwrap().1 - 100.0).abs() < 1e-3);
+        assert!(s.windows(2).all(|w| w[1].1 >= w[0].1), "distance only grows");
+    }
+
     #[test]
     fn short_names() {
         assert_eq!(super::short("Conveyor Belt Mk.3", false), "Mk.3");

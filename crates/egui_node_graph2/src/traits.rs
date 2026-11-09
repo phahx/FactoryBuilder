@@ -127,6 +127,19 @@ where
     /// Must be set to the custom user `ValueType` type
     type ValueType;
 
+    /// FactoryBuilder: whether this node's `port` takes one more wire (a cap
+    /// on its wires, like a building's in game). Wires it won't take aren't
+    /// made, and a dragged wire doesn't snap to it.
+    fn accepts_wire(
+        &self,
+        _node_id: NodeId,
+        _port: AnyParameterId,
+        _graph: &Graph<Self, Self::DataType, Self::ValueType>,
+        _user_state: &mut Self::UserState,
+    ) -> bool {
+        true
+    }
+
     /// Additional UI elements to draw in the nodes, after the parameters.
     fn bottom_ui(
         &self,

@@ -122,6 +122,9 @@ pub enum Kind {
     Input,
     Output,
     Sink,
+    /// A merger (or, for fluids, a pipeline junction) of `class`.
+    Merger,
+    Splitter,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

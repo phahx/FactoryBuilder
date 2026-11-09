@@ -551,6 +551,7 @@ fn a_wire_let_go_on_the_canvas_offers_what_fits_and_connects_it() {
         let ok = match &catalog.entries[i].template {
             crate::graph::Template::Recipe(r) => game.recipes[r].ingredients.iter().any(|a| a.item == "Desc_IronIngot_C"),
             crate::graph::Template::Output(x) | crate::graph::Template::Sink(x) => x == "Desc_IronIngot_C",
+            crate::graph::Template::Merger(x) | crate::graph::Template::Splitter(x) => x == "Desc_IronIngot_C",
             _ => false,
         };
         assert!(ok, "{} doesn't take Iron Ingot", catalog.entries[i].title);
@@ -1775,6 +1776,19 @@ fn plan_plates(ctx: &egui::Context, app: &mut FactoryApp, rate: f64) {
 }
 
 #[test]
+fn arrows_move_along_wires_that_carry_something() {
+    let Some((ctx, mut app, _)) = harness() else { return };
+    frames(&ctx, &mut app, 2);
+    plan_plates(&ctx, &mut app, 30.0);
+    let arrow = |s: &egui::Shape| matches!(s, egui::Shape::Path(p) if p.closed && p.points.len() == 3 && p.fill == egui::Color32::from_white_alpha(190));
+    let first: Vec<egui::Pos2> = drawn_shapes(&ctx, &mut app).iter().filter(|s| arrow(s)).filter_map(|s| if let egui::Shape::Path(p) = s { Some(p.points[0]) } else { None }).collect();
+    assert!(!first.is_empty(), "arrows on the plan's wires");
+    // Off in the View menu: none.
+    app.flow_arrows = false;
+    assert!(!drawn_shapes(&ctx, &mut app).iter().any(arrow));
+}
+
+#[test]
 fn wires_name_the_belt_they_need() {
     let Some((ctx, mut app, _)) = harness() else { return };
     frames(&ctx, &mut app, 2);
@@ -2283,6 +2297,111 @@ fn power_poles_show_which_factories_power_which() {
     app.undo();
     frames(&ctx, &mut app, 2);
     assert_eq!(power_wires(&app).len(), 3);
+}
+
+/// Wires `from`'s `item` output to `to`'s `item` input (as dragging would).
+fn connect(app: &mut FactoryApp, from: egui_node_graph2::NodeId, to: egui_node_graph2::NodeId, item: &str) -> (egui_node_graph2::InputId, egui_node_graph2::OutputId) {
+    let g = &app.state.graph;
+    let o = g[from].outputs.iter().map(|(_, o)| *o).find(|o| g[*o].typ.0 == item).expect("output");
+    let i = g[to].inputs.iter().map(|(_, i)| *i).find(|i| g[*i].typ.0 == item).expect("input");
+    let pos = g.connections(i).len();
+    app.state.graph.add_connection(o, i, pos);
+    app.changed();
+    (i, o)
+}
+
+#[test]
+fn mergers_and_splitters_route_wires_without_changing_flows() {
+    use crate::graph::{NodeKind, Template, MACHINES, RATE};
+    let Some((ctx, mut app, _)) = harness() else { return };
+    frames(&ctx, &mut app, 2);
+    let (ore, ingot) = ("Desc_OreIron_C", "Desc_IronIngot_C");
+    let per_smelter = {
+        let r = &app.user.game.recipes["Recipe_IngotIron_C"];
+        (r.per_min(&r.ingredients[0]), r.per_min(&r.products[0]))
+    };
+    // Ore -> splitter -> two smelters -> merger -> output.
+    let src = app.add_test_node(Template::Resource(ore.into()), egui::pos2(0.0, 0.0));
+    let split = app.add_test_node(Template::Splitter(ore.into()), egui::pos2(300.0, 0.0));
+    let s1 = app.add_test_node(Template::Recipe("Recipe_IngotIron_C".into()), egui::pos2(450.0, -200.0));
+    let s2 = app.add_test_node(Template::Recipe("Recipe_IngotIron_C".into()), egui::pos2(450.0, 200.0));
+    let merge = app.add_test_node(Template::Merger(ingot.into()), egui::pos2(850.0, 0.0));
+    let out = app.add_test_node(Template::Output(ingot.into()), egui::pos2(1000.0, 0.0));
+    let set = |app: &mut FactoryApp, n: egui_node_graph2::NodeId, name: &str, v: f64| {
+        let i = app.state.graph[n].get_input(name).unwrap();
+        app.state.graph[i].value.set_number(v);
+    };
+    set(&mut app, src, RATE, 2.0 * per_smelter.0);
+    set(&mut app, out, RATE, 2.0 * per_smelter.1);
+    set(&mut app, s1, MACHINES, 1.0);
+    set(&mut app, s2, MACHINES, 1.0);
+    let w_in = connect(&mut app, src, split, ore);
+    let w_s1 = connect(&mut app, split, s1, ore);
+    connect(&mut app, split, s2, ore);
+    let w_m1 = connect(&mut app, s1, merge, ingot);
+    connect(&mut app, s2, merge, ingot);
+    let w_out = connect(&mut app, merge, out, ingot);
+    frames(&ctx, &mut app, 2);
+    assert!(app.summary.issues.is_empty(), "{:?}", app.summary.issues);
+    for s in [s1, s2] {
+        assert!((app.user.nodes[&s].efficiency - 1.0).abs() < 1e-4, "each smelter gets its ore through the splitter");
+    }
+    let got = app.outputs().iter().find(|o| o.0 == ingot).map(|o| o.1).unwrap();
+    assert!((got - 2.0 * per_smelter.1).abs() < 1e-3, "both smelters' ingots arrive through the merger: {got}");
+    let flow = |w: (egui_node_graph2::InputId, egui_node_graph2::OutputId)| app.wire_flow.get(&w).copied().unwrap_or(-1.0);
+    assert!((flow(w_in) - 2.0 * per_smelter.0).abs() < 1e-3, "{}", flow(w_in));
+    assert!((flow(w_s1) - per_smelter.0).abs() < 1e-3, "{}", flow(w_s1));
+    assert!((flow(w_m1) - per_smelter.1).abs() < 1e-3, "{}", flow(w_m1));
+    assert!((flow(w_out) - 2.0 * per_smelter.1).abs() < 1e-3, "{}", flow(w_out));
+
+    // The game's limits: a merger joins three belts into one, a splitter
+    // shares one out to three.
+    use egui_node_graph2::{AnyParameterId as P, NodeDataTrait};
+    let takes = |app: &mut FactoryApp, n: egui_node_graph2::NodeId, input: bool| {
+        let g = &app.state.graph;
+        let port = if input { P::Input(g[n].inputs[0].1) } else { P::Output(g[n].outputs[0].1) };
+        let data = g[n].user_data.clone();
+        data.accepts_wire(n, port, &app.state.graph, &mut app.user)
+    };
+    assert!(takes(&mut app, merge, true), "two of three belts in");
+    assert!(!takes(&mut app, merge, false), "its one belt out is taken");
+    assert!(!takes(&mut app, split, true) && takes(&mut app, split, false), "one belt in, two of three out");
+    let s3 = app.add_test_node(Template::Recipe("Recipe_IngotIron_C".into()), egui::pos2(450.0, 600.0));
+    connect(&mut app, split, s3, ore);
+    assert!(!takes(&mut app, split, false), "three out is all");
+
+    // The file format keeps them.
+    let f = app.to_portable();
+    let kinds: Vec<_> = f.nodes.iter().map(|n| n.kind).collect();
+    assert!(kinds.contains(&crate::portable::Kind::Merger) && kinds.contains(&crate::portable::Kind::Splitter), "{kinds:?}");
+    let back = crate::portable::FactoryFile::parse(&f.to_json(false)).unwrap();
+    assert_eq!(back, f);
+    // A fluid gets the game's one Pipeline Junction.
+    let game = app.user.game.clone();
+    let water = NodeKind::Merger { item: "Desc_Water_C".into() };
+    assert_eq!((crate::routers::name(&game, &water), crate::routers::icon(&game, &water)), ("Pipeline Junction", "Desc_PipelineJunction_Cross_C"));
+}
+
+#[test]
+fn a_wire_dropped_on_a_node_connects_to_the_port_that_fits() {
+    use crate::graph::Template;
+    use egui_node_graph2::AnyParameterId;
+    let Some((ctx, mut app, _)) = harness() else { return };
+    frames(&ctx, &mut app, 2);
+    app.minimap = false;
+    let src = app.add_test_node(Template::Resource("Desc_OreIron_C".into()), egui::pos2(100.0, 100.0));
+    let smelter = app.add_test_node(Template::Recipe("Recipe_IngotIron_C".into()), egui::pos2(700.0, 100.0));
+    frames(&ctx, &mut app, 3);
+    let g = app.graph();
+    let out = g[src].outputs[0].1;
+    let ring = *app.port_hooks[&AnyParameterId::Output(out)].last().unwrap();
+    // Let go over the middle of the smelter (not on its bubble).
+    let body = app.node_rects[&smelter].center();
+    drag(&ctx, &mut app, ring, body);
+    let g = app.graph();
+    let input = g[smelter].inputs.iter().map(|(_, i)| *i).find(|i| g[*i].typ.0 == "Desc_OreIron_C").unwrap();
+    assert_eq!(g.connections(input), vec![out], "the ore went to the smelter's ore input");
+    assert!(app.finder.is_none(), "not a drop on empty canvas");
 }
 
 #[test]

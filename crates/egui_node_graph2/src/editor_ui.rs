@@ -20,6 +20,9 @@ pub type PortLocations = std::collections::HashMap<AnyParameterId, Vec<Pos2>>;
 pub type ConnLocations = std::collections::HashMap<InputId, Vec<Pos2>>;
 
 /// Rectangle containing each node.
+/// FactoryBuilder: how near a node (screen px) a dragged wire snaps to it.
+const SNAP_MARGIN: f32 = 8.0;
+
 pub type NodeRects = std::collections::HashMap<NodeId, Rect>;
 
 const DISTANCE_TO_CONNECT: f32 = 10.0;
@@ -336,6 +339,45 @@ where
             self.node_finder = None;
         }
 
+        // FactoryBuilder: a wire dragged over a node (or within a few pixels
+        // of it) snaps to that node's first port that fits it, as in other
+        // node editors; letting go there connects it.
+        let snap: Option<(NodeId, AnyParameterId)> = self.connection_in_progress.and_then(|(origin_node, origin)| {
+            let typ = self.graph.any_param_type(origin).ok()?;
+            let node = self
+                .node_order
+                .iter()
+                .rev()
+                .copied()
+                .find(|n| *n != origin_node && node_rects.get(n).is_some_and(|r| r.expand(SNAP_MARGIN).contains(cursor_pos)))?;
+            let takes = |p: AnyParameterId, us: &mut UserState| self.graph[node].user_data.accepts_wire(node, p, &self.graph, us);
+            let port = match origin {
+                AnyParameterId::Output(_) => self.graph[node]
+                    .inputs
+                    .iter()
+                    .map(|(_, i)| *i)
+                    .filter(|i| self.graph[*i].typ == *typ && !matches!(self.graph[*i].kind(), InputParamKind::ConstantOnly))
+                    .map(AnyParameterId::Input)
+                    .find(|p| takes(*p, user_state))?,
+                AnyParameterId::Input(_) => self.graph[node]
+                    .outputs
+                    .iter()
+                    .map(|(_, o)| *o)
+                    .filter(|o| self.graph[*o].typ == *typ)
+                    .map(AnyParameterId::Output)
+                    .find(|p| takes(*p, user_state))?,
+            };
+            Some((node, port))
+        });
+        // Where a snapped wire ends: a knot's middle, or the port's free bubble.
+        let snap_pos = snap.and_then(|(node, port)| {
+            if self.graph[node].user_data.knot_size().is_some() {
+                node_rects.get(&node).map(|r| r.center())
+            } else {
+                port_locations.get(&port).and_then(|h| h.last().copied())
+            }
+        });
+
         // draw in-progress connections
         if let Some((_, ref locator)) = self.connection_in_progress {
             let port_type = self.graph.any_param_type(*locator).unwrap();
@@ -389,25 +431,27 @@ where
                     .unwrap_or(cursor_pos)
             }
 
+            // A bubble close by first, then the node under the pointer.
+            let or_node = |p: Pos2| if p == cursor_pos { snap_pos.unwrap_or(p) } else { p };
             let (src_pos, dst_pos) = match locator {
                 AnyParameterId::Output(_) => (
                     start_pos,
-                    snap_to_ports(
+                    or_node(snap_to_ports(
                         &self.graph,
                         port_type,
                         &self.graph.inputs,
                         &port_locations,
                         cursor_pos,
-                    ),
+                    )),
                 ),
                 AnyParameterId::Input(_) => (
-                    snap_to_ports(
+                    or_node(snap_to_ports(
                         &self.graph,
                         port_type,
                         &self.graph.outputs,
                         &port_locations,
                         cursor_pos,
-                    ),
+                    )),
                     start_pos,
                 ),
             };
@@ -436,11 +480,24 @@ where
                 let connection_color = port_type.wire_color(user_state, self.graph[output].node, self.graph[input].node);
                 let order = wire_order.entry(output).or_insert_with(|| self.graph.output_connections(output));
                 let k = order.iter().position(|i| *i == input).unwrap_or(0);
-                let hooks = &port_locations[&AnyParameterId::Output(output)];
-                let src_pos = hooks[k.min(hooks.len() - 1)];
-                let dst_pos = conn_locations[&input][hook_n];
-                wires.push((input, output, wire_points(&self.pan_zoom, src_pos, dst_pos)));
-                let shape = connection_shape(&self.pan_zoom, src_pos, dst_pos, connection_color, self.style.wire_width);
+                // Knots: wires meet at the middle, from any side.
+                let (from, to) = (self.graph[output].node, self.graph[input].node);
+                let knot = |n: NodeId| self.graph[n].user_data.knot_size().is_some();
+                let knot_at = |n: NodeId| node_rects.get(&n).map(|r| r.center());
+                let src_pos = match knot_at(from).filter(|_| knot(from)) {
+                    Some(c) => c,
+                    None => {
+                        let hooks = &port_locations[&AnyParameterId::Output(output)];
+                        hooks[k.min(hooks.len() - 1)]
+                    }
+                };
+                let dst_pos = match knot_at(to).filter(|_| knot(to)) {
+                    Some(c) => c,
+                    None => conn_locations[&input][hook_n],
+                };
+                let points = wire_points_ends(&self.pan_zoom, src_pos, knot(from), dst_pos, knot(to));
+                wires.push((input, output, points));
+                let shape = bezier_shape(&self.pan_zoom, points, connection_color, self.style.wire_width);
                 if connection_color.a() < 255 {
                     faint.push(shape);
                 } else {
@@ -456,6 +513,38 @@ where
         // Some responses generate additional responses when processed. These
         // are stored here to report them back to the user.
         let mut extra_responses: Vec<NodeResponse<UserResponse, NodeData>> = Vec::new();
+
+        // FactoryBuilder: let go over a node: connect to the port it snapped to
+        // (a bubble dropped on directly has already done so).
+        if let (Some((_, port)), Some((_, origin))) = (snap, self.connection_in_progress) {
+            let released = ui.ctx().input(|i| i.pointer.any_released());
+            let ended = delayed_responses.iter().any(|r| matches!(r, NodeResponse::ConnectEventEnded { .. }));
+            if released && !ended {
+                let pair = match (origin, port) {
+                    (AnyParameterId::Output(output), AnyParameterId::Input(input)) => Some((output, input)),
+                    (AnyParameterId::Input(input), AnyParameterId::Output(output)) => Some((output, input)),
+                    _ => None,
+                };
+                if let Some((output, input)) = pair {
+                    let input_hook = self.graph.connections(input).len();
+                    let output_hook = self.graph.output_connections(output).len();
+                    delayed_responses.push(NodeResponse::ConnectEventEnded { output, input, input_hook, output_hook });
+                }
+            }
+        }
+
+        // FactoryBuilder: no wire to (or from) a port that's full.
+        delayed_responses.retain(|r| match r {
+            NodeResponse::ConnectEventEnded { output, input, .. } => {
+                if self.graph.connections(*input).contains(output) {
+                    return true;
+                }
+                let (a, b) = (self.graph[*output].node, self.graph[*input].node);
+                self.graph[a].user_data.accepts_wire(a, AnyParameterId::Output(*output), &self.graph, user_state)
+                    && self.graph[b].user_data.accepts_wire(b, AnyParameterId::Input(*input), &self.graph, user_state)
+            }
+            _ => true,
+        });
 
         for response in delayed_responses.iter() {
             match response {
@@ -661,17 +750,34 @@ fn draw_connection(
 }
 
 fn connection_shape(pan_zoom: &PanZoom, src_pos: Pos2, dst_pos: Pos2, color: Color32, width: f32) -> Shape {
+    bezier_shape(pan_zoom, wire_points(pan_zoom, src_pos, dst_pos), color, width)
+}
+
+fn bezier_shape(pan_zoom: &PanZoom, points: [Pos2; 4], color: Color32, width: f32) -> Shape {
     let connection_stroke = egui::Stroke {
         width: width * pan_zoom.zoom,
         color,
     };
-    CubicBezierShape::from_points_stroke(wire_points(pan_zoom, src_pos, dst_pos), false, Color32::TRANSPARENT, connection_stroke).into()
+    CubicBezierShape::from_points_stroke(points, false, Color32::TRANSPARENT, connection_stroke).into()
 }
 
 /// FactoryBuilder: the bezier of a wire (shared by drawing and `GraphResponse::wires`).
 fn wire_points(pan_zoom: &PanZoom, src_pos: Pos2, dst_pos: Pos2) -> [Pos2; 4] {
-    let control_scale = ((dst_pos.x - src_pos.x) * pan_zoom.zoom / 2.0).max(30.0 * pan_zoom.zoom);
-    [src_pos, src_pos + Vec2::X * control_scale, dst_pos - Vec2::X * control_scale, dst_pos]
+    wire_points_ends(pan_zoom, src_pos, false, dst_pos, false)
+}
+
+/// FactoryBuilder: a wire's bezier. Port ends leave sideways (outputs to the
+/// right, inputs from the left); a knot end (`*_free`) leaves along the
+/// axis, across or down, that points most at the other end, so wires between
+/// knots run straight and wires from a knot turn once.
+fn wire_points_ends(pan_zoom: &PanZoom, src: Pos2, src_free: bool, dst: Pos2, dst_free: bool) -> [Pos2; 4] {
+    let d = dst - src;
+    let side = (d.x * pan_zoom.zoom / 2.0).max(30.0 * pan_zoom.zoom);
+    let axis = |v: Vec2| if v.x.abs() >= v.y.abs() { Vec2::X * v.x.signum() } else { Vec2::Y * v.y.signum() };
+    let free = |dir: Vec2| dir * (d.dot(dir).abs() * pan_zoom.zoom / 2.0).max(30.0 * pan_zoom.zoom);
+    let a = if src_free { src + free(axis(d)) } else { src + Vec2::X * side };
+    let b = if dst_free { dst + free(axis(-d)) } else { dst - Vec2::X * side };
+    [src, a, b, dst]
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -729,12 +835,11 @@ where
             self.graph[self.node_id].user_data.knot_ui(ui, rect, self.node_id, user_state);
             self.node_rects.insert(self.node_id, rect);
             if let Some(i) = self.graph[self.node_id].inputs.first().map(|(_, i)| *i) {
-                let n = self.graph.connections(i).len();
-                draw_port(pan_zoom, ui, self.graph, self.node_id, user_state, rect.left_center(), &mut responses, AnyParameterId::Input(i), self.port_locations, self.conn_locations, self.ongoing_drag, true, n, usize::MAX, self.style.port_radius, self.style.node_fill);
+                // Handles to drag new wires from; wires meet the middle.
+                draw_port(pan_zoom, ui, self.graph, self.node_id, user_state, rect.left_center(), &mut responses, AnyParameterId::Input(i), self.port_locations, self.conn_locations, self.ongoing_drag, true, 0, usize::MAX, self.style.port_radius, self.style.node_fill);
             }
             if let Some(o) = self.graph[self.node_id].outputs.first().map(|(_, o)| *o) {
-                let n = self.graph.iter_connections().filter(|(_, x)| *x == o).count();
-                draw_port(pan_zoom, ui, self.graph, self.node_id, user_state, rect.right_center(), &mut responses, AnyParameterId::Output(o), self.port_locations, self.conn_locations, self.ongoing_drag, true, n, usize::MAX, self.style.port_radius, self.style.node_fill);
+                draw_port(pan_zoom, ui, self.graph, self.node_id, user_state, rect.right_center(), &mut responses, AnyParameterId::Output(o), self.port_locations, self.conn_locations, self.ongoing_drag, true, 0, usize::MAX, self.style.port_radius, self.style.node_fill);
             }
             let drag_delta = window_response.drag_delta();
             if drag_delta.length_sq() > 0.0 {

@@ -99,6 +99,14 @@ pub enum NodeKind {
     Pole {
         id: u32,
     },
+    /// Joins wires of one item (routers.rs); a Pipeline Junction for fluids.
+    Merger {
+        item: String,
+    },
+    /// Shares one wire of an item out over several (routers.rs).
+    Splitter {
+        item: String,
+    },
 }
 
 impl NodeKind {
@@ -111,6 +119,8 @@ impl NodeKind {
             NodeKind::Sink { item } => Template::Sink(item),
             NodeKind::Factory { id, .. } => Template::Factory(id),
             NodeKind::Pole { id } => Template::Pole(id),
+            NodeKind::Merger { item } => Template::Merger(item),
+            NodeKind::Splitter { item } => Template::Splitter(item),
         }
     }
 
@@ -124,7 +134,7 @@ impl NodeKind {
             | NodeKind::Sink { item } => Some(item),
             // A factory shows its first product.
             NodeKind::Factory { outs, .. } => outs.first().map(|(item, _)| item.as_str()),
-            NodeKind::Pole { .. } => None,
+            NodeKind::Pole { .. } | NodeKind::Merger { .. } | NodeKind::Splitter { .. } => None,
         }
     }
 }
@@ -148,6 +158,8 @@ pub enum Template {
     Factory(u32),
     /// A power pole on the master graph.
     Pole(u32),
+    Merger(String),
+    Splitter(String),
 }
 
 #[derive(Debug, Clone)]
@@ -195,6 +207,9 @@ pub struct UserState {
     /// selected or under the pointer (power_net::lit_wires).
     #[serde(skip)]
     pub power_lit: std::collections::HashSet<(NodeId, NodeId)>,
+    /// Power pole tiers (pole id -> 1 to 3), from the master graph's plan.
+    #[serde(skip)]
+    pub pole_tiers: HashMap<u32, u8>,
 }
 
 impl UserState {
@@ -287,6 +302,8 @@ impl Template {
             Template::Sink(item) => NodeKind::Sink { item },
             Template::Factory(id) => NodeKind::Factory { id, ins: Vec::new(), outs: Vec::new(), uses_mw: 0.0, makes_mw: 0.0 },
             Template::Pole(id) => NodeKind::Pole { id },
+            Template::Merger(item) => NodeKind::Merger { item },
+            Template::Splitter(item) => NodeKind::Splitter { item },
         }
     }
 }
@@ -317,6 +334,7 @@ impl NodeTemplateTrait for Template {
             Template::Sink(_) => "Sinks".into(),
             Template::Factory(_) => "Factories".into(),
             Template::Pole(_) => "Power".into(),
+            Template::Merger(_) | Template::Splitter(_) => "Logistics".into(),
         }]
     }
 
@@ -334,6 +352,7 @@ impl NodeTemplateTrait for Template {
             | Template::Sink(i) => s.game.item_name(i).to_string(),
             Template::Factory(id) => s.factories.get(id).map(|f| f.name.clone()).unwrap_or_else(|| "Factory".into()),
             Template::Pole(_) => "Power pole".into(),
+            Template::Merger(_) | Template::Splitter(_) => crate::routers::name(&s.game, &self.kind()).into(),
         }
     }
 
@@ -409,6 +428,16 @@ impl NodeTemplateTrait for Template {
                 }
             }
             Template::Pole(_) => crate::power_net::add_pole_ports(graph, node_id),
+            Template::Merger(i) => {
+                item_in(graph, i);
+                item_out(graph, i);
+            }
+            Template::Splitter(i) => {
+                // One wire in.
+                let name = game.item_name(i).to_string();
+                graph.add_wide_input_param(node_id, name, ItemType(i.clone()), PortValue::Item(i.clone()), InputParamKind::ConnectionOnly, std::num::NonZeroU32::new(1), true);
+                item_out(graph, i);
+            }
         }
     }
 }
@@ -579,18 +608,34 @@ fn port_row(ui: &mut Ui, s: &mut UserState, node_id: NodeId, name: &str, item: &
 }
 
 impl NodeDataTrait for NodeData {
-    /// A pole's wires meet at one bubble per side.
+    /// Poles' and routers' wires meet at one bubble per side.
     fn shared_hooks(&self) -> bool {
-        matches!(self.kind, NodeKind::Pole { .. })
+        self.knot_size().is_some()
     }
 
-    /// Poles are small knots.
+    /// Poles and routers are small knots.
     fn knot_size(&self) -> Option<egui::Vec2> {
-        matches!(self.kind, NodeKind::Pole { .. }).then_some(crate::power_net::POLE_SIZE)
+        match self.kind {
+            NodeKind::Pole { .. } => Some(crate::power_net::POLE_SIZE),
+            NodeKind::Merger { .. } | NodeKind::Splitter { .. } => Some(crate::routers::SIZE),
+            _ => None,
+        }
     }
 
     fn knot_ui(&self, ui: &mut Ui, rect: egui::Rect, node_id: NodeId, s: &mut UserState) {
-        crate::power_net::pole_ui(ui, rect, node_id, s);
+        match self.kind {
+            NodeKind::Pole { id } => crate::power_net::pole_ui(ui, rect, node_id, id, s),
+            _ => crate::routers::router_ui(ui, rect, node_id, &self.kind, s),
+        }
+    }
+
+    /// Like the buildings in game: a pole takes as many wires as its tier,
+    /// mergers and splitters three belts, a pipeline junction four pipes.
+    fn accepts_wire(&self, node_id: NodeId, port: AnyParameterId, graph: &FactoryGraph, s: &mut UserState) -> bool {
+        match &self.kind {
+            NodeKind::Pole { id } => crate::power_net::wire_count(graph, node_id) < crate::power_net::max_wires(s.pole_tiers.get(id).copied().unwrap_or(1)),
+            k => crate::routers::accepts(&s.game, k, graph, node_id, port),
+        }
     }
 
     type Response = Resp;
@@ -652,7 +697,7 @@ impl NodeDataTrait for NodeData {
                 NodeKind::Input { .. } => Some("Input"),
                 NodeKind::Output { .. } => Some("Output"),
                 NodeKind::Sink { .. } => Some("Sink"),
-                NodeKind::Pole { .. } => None,
+                NodeKind::Pole { .. } | NodeKind::Merger { .. } | NodeKind::Splitter { .. } => None,
             };
             if let Some(c) = caption {
                 ui.label(RichText::new(c).small().color(TEXT_DIM));
@@ -914,6 +959,7 @@ pub fn node_rates(
                 n.outputs.iter().filter(|(_, id)| !crate::power_net::is_power(&graph[*id].typ.0)).map(|(name, id)| (name.clone(), rate(outs, &graph[*id].typ.0))).collect(),
             )
         }
-        NodeKind::Pole { .. } => (vec![], vec![]),
+        // Not in the simulation: their wires are joined up (routers.rs).
+        NodeKind::Pole { .. } | NodeKind::Merger { .. } | NodeKind::Splitter { .. } => (vec![], vec![]),
     }
 }

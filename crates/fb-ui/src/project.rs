@@ -695,7 +695,7 @@ impl FactoryApp {
         let r = |v: f32| (v * 10.0).round() / 10.0;
         let ids = self.factory_ids();
         let net = &master_planner.power_net;
-        p.poles = net.poles.iter().map(|q| crate::power_net::Pole { id: q.id, x: r(q.x), y: r(q.y) }).collect();
+        p.poles = net.poles.iter().map(|q| crate::power_net::Pole { id: q.id, x: r(q.x), y: r(q.y), tier: q.tier }).collect();
         let exists = |e: &crate::power_net::End| match e {
             crate::power_net::End::Factory(f) => ids.contains(f),
             crate::power_net::End::Pole(q) => net.poles.iter().any(|x| x.id == *q),
@@ -773,7 +773,7 @@ impl FactoryApp {
                 End::Pole(q) => poles.contains(&q).then_some(End::Pole(q)),
             };
             self.planner.power_net = crate::power_net::PowerNet {
-                poles: p.poles.clone(),
+                poles: p.poles.iter().map(|q| crate::power_net::Pole { tier: q.tier.clamp(1, 3), ..q.clone() }).collect(),
                 links: p.power_links.iter().filter_map(|l| Some(crate::power_net::PowerLink { from: end(l.from)?, to: end(l.to)? })).collect(),
             };
         }

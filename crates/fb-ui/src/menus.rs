@@ -63,6 +63,15 @@ pub fn item(ui: &mut Ui, label: &str, shortcut: &str, enabled: bool) -> egui::Re
     }
 }
 
+/// A row in a group of choices: the chosen one has a dot before it.
+pub fn choice(ui: &mut Ui, label: &str, shortcut: &str, chosen: bool, enabled: bool) -> egui::Response {
+    let resp = item(ui, &format!("    {label}"), shortcut, enabled);
+    if chosen {
+        ui.painter().circle_filled(pos2(resp.rect.left() + PAD + 4.0, resp.rect.center().y), 4.0, ACCENT);
+    }
+    resp
+}
+
 /// Hairline between groups of rows.
 pub fn separator(ui: &mut Ui) {
     ui.add_space(4.0);

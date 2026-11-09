@@ -9,7 +9,7 @@ use crate::dialogs::{Dialog, Pending};
 use crate::graph::*;
 use crate::theme::{self, *};
 use egui::{vec2, Align, Align2, Key, KeyboardShortcut, Layout, Modifiers, RichText};
-use egui_node_graph2::{NodeId, NodeResponse};
+use egui_node_graph2::{NodeDataTrait, NodeId, NodeResponse};
 use fb_engine::sim::{simulate, SimLink, SimNode, SimResult};
 use fb_model::*;
 use serde::{Deserialize, Serialize};
@@ -166,6 +166,8 @@ pub struct FactoryApp {
     pub(crate) minimap: bool,
     /// View › Power connections: power grids on the master graph.
     pub(crate) power_links: bool,
+    /// View › Flow direction: arrows moving along wires.
+    pub(crate) flow_arrows: bool,
     /// The master graph's right-click menu on empty canvas: where it opened
     /// (screen) and where a factory added from it goes (unzoomed graph).
     pub(crate) master_menu: Option<(egui::Pos2, egui::Pos2)>,
@@ -285,6 +287,7 @@ impl FactoryApp {
             find: None,
             minimap: true,
             power_links: true,
+            flow_arrows: true,
             master_menu: None,
             block_spot: None,
             factory_menu: None,
@@ -574,7 +577,7 @@ impl FactoryApp {
                     let first = self.status.is_none();
                     if first {
                         let v = &s.settings.view;
-                        (self.snap, self.wire_labels, self.minimap, self.power_links) = (v.snap_to_grid, v.wire_labels, v.minimap, v.power_links);
+                        (self.snap, self.wire_labels, self.minimap, self.power_links, self.flow_arrows) = (v.snap_to_grid, v.wire_labels, v.minimap, v.power_links, v.flow_arrows);
                         (self.map.hide_power, self.map.hide_flow) = (!v.map_power, !v.map_belt_flow);
                     }
                     let setup_done = s.settings.setup_done;
@@ -1467,6 +1470,35 @@ impl FactoryApp {
                         self.focus_node = Some(id);
                     }
                 }
+                // A small factory through a splitter and a merger.
+                "routers" => {
+                    self.dialog = Dialog::None;
+                    self.dirty = false;
+                    self.run_pending(Pending::New);
+                    self.view = crate::map::View::Graph;
+                    let (ore, ingot) = ("Desc_OreIron_C", "Desc_IronIngot_C");
+                    let z = self.state.pan_zoom.zoom;
+                    let at = |x: f32, y: f32| egui::pos2(x * z, y * z);
+                    self.state = crate::project::new_state();
+                    let src = self.add_node(Template::Resource(ore.into()), at(0.0, 120.0));
+                    let split = self.add_node(Template::Splitter(ore.into()), at(380.0, 200.0));
+                    let s1 = self.add_node(Template::Recipe("Recipe_IngotIron_C".into()), at(520.0, 0.0));
+                    let s2 = self.add_node(Template::Recipe("Recipe_IngotIron_C".into()), at(520.0, 300.0));
+                    let merge = self.add_node(Template::Merger(ingot.into()), at(960.0, 200.0));
+                    let out = self.add_node(Template::Output(ingot.into()), at(1100.0, 120.0));
+                    self.set_number(src, RATE, 60.0);
+                    self.set_number(out, RATE, 60.0);
+                    for (a, b, item) in [(src, split, ore), (split, s1, ore), (split, s2, ore), (s1, merge, ingot), (s2, merge, ingot), (merge, out, ingot)] {
+                        let g = &self.state.graph;
+                        let o = g[a].outputs.iter().map(|(_, o)| *o).find(|o| g[*o].typ.0 == item);
+                        let i = g[b].inputs.iter().map(|(_, i)| *i).find(|i| g[*i].typ.0 == item);
+                        if let (Some(o), Some(i)) = (o, i) {
+                            let pos = self.state.graph.connections(i).len();
+                            self.state.graph.add_connection(o, i, pos);
+                        }
+                    }
+                    self.frame_all = true;
+                }
                 // README screenshots: a typical factory (Motors, standard
                 // recipes) in a new project, as Plan factory lays it out.
                 // The plan arrives a few frames later, so it's shot in the
@@ -1865,6 +1897,9 @@ impl FactoryApp {
             self.find_ui(ui, rect);
         }
         self.send_cursor(ui.ctx(), rect);
+        if self.flow_arrows && self.export.is_none() && crate::wires::paint_flow(self, ui, &resp.wires, &resp.node_rects) {
+            ui.ctx().request_repaint();
+        }
         if self.wire_labels {
             crate::wires::paint_labels(self, ui, &resp.wires, &resp.node_rects);
         }
@@ -1964,11 +1999,14 @@ impl FactoryApp {
         // deleting it mid-draw would index a node that no longer exists.
         let (mut do_duplicate, mut do_delete, mut do_move, mut do_frame) = (false, false, false, false);
         let (mut do_open, mut do_rename) = (false, false);
+        let mut set_tier = None;
         let g = &self.state.graph;
         let title = if self.context_targets.len() > 1 { format!("{} nodes", self.context_targets.len()) } else { g[node].label.clone() };
         let factory = crate::project::factory_of(g, node);
-        // A pole has no name, colour or settings to copy.
+        // Poles, mergers and splitters show no name or colour; a pole has
+        // nothing to copy either.
         let only_poles = self.context_targets.iter().all(|n| crate::power_net::pole_of(g, *n).is_some());
+        let only_knots = self.context_targets.iter().all(|n| g[*n].user_data.knot_size().is_some());
         let current = g[node].user_data.color;
         let on_master = self.on_master();
         let mut custom = self.custom_color;
@@ -1980,10 +2018,28 @@ impl FactoryApp {
             if factory.is_some() {
                 do_open = item(ui, "Open", "Double-click", true).clicked();
             }
-            if !only_poles {
+            if !only_knots {
                 do_rename = item(ui, "Rename", "F2", true).clicked();
                 separator(ui);
+            }
+            if !only_poles {
                 do_duplicate = item(ui, "Duplicate", "Ctrl+D", true).clicked();
+            }
+            // A pole's tier: how many wires it takes, as in game.
+            if let (true, [one]) = (only_poles, &self.context_targets[..]) {
+                let pole = crate::power_net::pole_of(g, *one);
+                let tier = pole.and_then(|p| self.planner.power_net.poles.iter().find(|x| x.id == p)).map(|p| p.tier).unwrap_or(1);
+                let wires = crate::power_net::wire_count(g, *one);
+                crate::menus::caption(ui, "Power Pole");
+                for t in 1..=3u8 {
+                    let max = crate::power_net::max_wires(t);
+                    let r = crate::menus::choice(ui, &format!("Mk.{t}"), &format!("up to {max} wires"), t == tier, wires <= max)
+                        .on_disabled_hover_text(format!("This pole has {wires} wires."));
+                    if r.clicked() {
+                        set_tier = pole.map(|p| (p, t));
+                    }
+                }
+                separator(ui);
             }
             do_delete = item(ui, "Delete", "Del", true).clicked();
             do_frame = item(ui, "Add comment frame", "C", true).clicked();
@@ -1993,7 +2049,7 @@ impl FactoryApp {
                     .on_hover_text("Moves these nodes into a factory of their own, linked to this one on the master graph.")
                     .clicked();
             }
-            if !only_poles {
+            if !only_knots {
                 separator(ui);
                 pick = crate::menus::colours(ui, assets.as_mut(), current, &mut custom, &mut swatches);
             }
@@ -2014,7 +2070,13 @@ impl FactoryApp {
             }
             self.changed();
         }
-        let chose = do_duplicate || do_delete || do_move || do_frame || do_open || do_rename;
+        if let Some((pole, t)) = set_tier {
+            if let Some(p) = self.planner.power_net.poles.iter_mut().find(|p| p.id == pole) {
+                p.tier = t;
+                self.changed();
+            }
+        }
+        let chose = do_duplicate || do_delete || do_move || do_frame || do_open || do_rename || set_tier.is_some();
         if chose || crate::menus::dismissed(ctx, &menu) {
             self.context_menu = None;
         }
@@ -2048,6 +2110,7 @@ impl FactoryApp {
                 wire_labels: self.wire_labels,
                 minimap: self.minimap,
                 power_links: self.power_links,
+                flow_arrows: self.flow_arrows,
                 map_power: !self.map.hide_power,
                 map_belt_flow: !self.map.hide_flow,
             };
@@ -2059,7 +2122,7 @@ impl FactoryApp {
     /// F2: rename the selected node, or the selected comment frame.
     pub(crate) fn start_rename(&mut self) {
         if let [n] = self.state.selected_nodes[..] {
-            if self.state.graph.nodes.contains_key(n) && crate::power_net::pole_of(&self.state.graph, n).is_none() {
+            if self.state.graph.nodes.contains_key(n) && self.state.graph[n].user_data.knot_size().is_none() {
                 self.node_rename = Some((n, self.state.graph[n].label.clone()));
             }
         } else if self.state.selected_nodes.is_empty() {
@@ -2612,20 +2675,35 @@ pub(crate) fn evaluate_graph(game: &GameData, g: &FactoryGraph, cache: &mut SimC
     };
     let mut links = Vec::new();
     let mut link_wires = Vec::new();
+    let router = |n: NodeId| crate::routers::is_router(&g[n].user_data.kind);
+    let sim_link = |output: egui_node_graph2::OutputId, input: egui_node_graph2::InputId| {
+        let (from, to) = (g[output].node, g[input].node);
+        let to_port = item_inputs(to).iter().position(|i| *i == input)?;
+        let from_port = g[from].outputs.iter().position(|(_, o)| *o == output)?;
+        Some(SimLink { from_node: index[&from], from_port, to_node: index[&to], to_port })
+    };
     for (input, outputs) in g.iter_connection_groups() {
-        let Some(to) = g.try_get_input(input).map(|i| i.node) else {
+        if g.try_get_input(input).is_none() {
             continue;
-        };
-        let Some(to_port) = item_inputs(to).iter().position(|i| *i == input) else {
-            continue;
-        };
+        }
         for output in outputs {
-            let from = g[output].node;
-            let Some(from_port) = g[from].outputs.iter().position(|(_, o)| *o == output) else {
+            // Wires through mergers and splitters go in below, joined up.
+            if router(g[output].node) || router(g[input].node) {
                 continue;
-            };
-            links.push(SimLink { from_node: index[&from], from_port, to_node: index[&to], to_port });
-            link_wires.push((input, output));
+            }
+            if let Some(l) = sim_link(output, input) {
+                links.push(l);
+                link_wires.push((input, output));
+            }
+        }
+    }
+    let routes = crate::routers::route(g);
+    let first_route = links.len();
+    let mut routed = Vec::new();
+    for (k, (o, i)) in routes.pairs.iter().enumerate() {
+        if let Some(l) = sim_link(*o, *i) {
+            links.push(l);
+            routed.push(k);
         }
     }
     let mut connected_in = BTreeSet::new();
@@ -2672,6 +2750,20 @@ pub(crate) fn evaluate_graph(game: &GameData, g: &FactoryGraph, cache: &mut SimC
     };
 
     let mut e = Evaluation { wire_flow: link_wires.into_iter().zip(result.link_flow.iter().copied()).collect(), ..Default::default() };
+    // Wires through routers carry the flows of the links they stand for.
+    let mut pair_flow = vec![0.0; routes.pairs.len()];
+    for (n, k) in routed.iter().enumerate() {
+        pair_flow[*k] = result.link_flow.get(first_route + n).copied().unwrap_or(0.0);
+    }
+    for (wire, carried) in &routes.carries {
+        e.wire_flow.insert(*wire, carried.iter().map(|k| pair_flow[*k]).sum());
+    }
+    for &id in &ids {
+        if router(id) {
+            let through: f64 = g[id].inputs.first().map(|(_, i)| g.connections(*i).iter().map(|o| e.wire_flow.get(&(*i, *o)).copied().unwrap_or(0.0)).sum()).unwrap_or(0.0);
+            e.ports.insert((id, crate::routers::ROUTED.into()), PortStat { have: through, want: through, connected: true });
+        }
+    }
     let mut sum = Summary::default();
     for (i, &id) in ids.iter().enumerate() {
         let (ins, outs) = &rates[i];
@@ -2722,7 +2814,7 @@ pub(crate) fn evaluate_graph(game: &GameData, g: &FactoryGraph, cache: &mut SimC
                 *sum.sunk.entry(item.clone()).or_default() += got;
                 sum.sink_points += got * game.items.get(item).map(|it| it.sink_points).unwrap_or(0) as f64;
             }
-            NodeKind::Pole { .. } => {}
+            NodeKind::Pole { .. } | NodeKind::Merger { .. } | NodeKind::Splitter { .. } => {}
             NodeKind::Factory { .. } => {
                 let name = &g[id].label;
                 for (p, (port, want)) in ins.iter().enumerate() {

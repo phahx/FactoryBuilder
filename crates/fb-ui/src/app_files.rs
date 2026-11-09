@@ -149,6 +149,8 @@ impl FactoryApp {
                 NodeKind::Input { item } => (portable::Kind::Input, item.clone()),
                 NodeKind::Output { item } => (portable::Kind::Output, item.clone()),
                 NodeKind::Sink { item } => (portable::Kind::Sink, item.clone()),
+                NodeKind::Merger { item } => (portable::Kind::Merger, item.clone()),
+                NodeKind::Splitter { item } => (portable::Kind::Splitter, item.clone()),
                 NodeKind::Factory { .. } | NodeKind::Pole { .. } => continue, // only on the master graph
             };
             let is_recipe = kind == portable::Kind::Recipe;
@@ -250,6 +252,8 @@ impl FactoryApp {
                 portable::Kind::Input if known_item => Template::Input(n.class.clone()),
                 portable::Kind::Output if known_item => Template::Output(n.class.clone()),
                 portable::Kind::Sink if known_item => Template::Sink(n.class.clone()),
+                portable::Kind::Merger if known_item => Template::Merger(n.class.clone()),
+                portable::Kind::Splitter if known_item => Template::Splitter(n.class.clone()),
                 _ => {
                     skipped += 1;
                     continue;

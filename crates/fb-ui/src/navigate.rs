@@ -59,6 +59,7 @@ impl FactoryApp {
             NodeKind::Sink { .. } => parts.push("Sink".into()),
             NodeKind::Factory { .. } => parts.push("Factory".into()),
             NodeKind::Pole { .. } => parts.push("Power pole".into()),
+            k @ (NodeKind::Merger { .. } | NodeKind::Splitter { .. }) => parts.push(crate::routers::name(game, k).into()),
         }
         for (_, i) in &n.inputs {
             if let crate::graph::PortValue::Item(item) = &g[*i].value {

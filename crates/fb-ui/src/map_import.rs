@@ -379,7 +379,7 @@ fn power_poles(world: &World, factory_of: &HashMap<u32, u32>, factories: &[Proje
             let pole = near.unwrap_or_else(|| {
                 let id = poles.len() as u32 + 1;
                 let half = crate::power_net::POLE_SIZE / 2.0;
-                poles.push(Pole { id, x: spot.0 - half.x, y: spot.1 - half.y });
+                poles.push(Pole { id, x: spot.0 - half.x, y: spot.1 - half.y, tier: 1 });
                 here.push((id, spot));
                 id
             });
@@ -408,6 +408,11 @@ fn power_poles(world: &World, factory_of: &HashMap<u32, u32>, factories: &[Proje
                 }
             }
         }
+    }
+    // Each pole the lowest tier that takes its wires.
+    for p in &mut poles {
+        let wires = links.iter().filter(|l| l.from == End::Pole(p.id) || l.to == End::Pole(p.id)).count();
+        p.tier = crate::power_net::tier_for(wires);
     }
     (poles, links, circuits)
 }
@@ -740,6 +745,13 @@ mod tests {
         eprintln!("left out (class: count, with a recipe set): {out:?}");
         assert!(r.factories > 10 && r.links > 10, "{r:?}");
         eprintln!("poles {}, power wires {}", p.poles.len(), p.power_links.len());
+        let mut tiers = [0; 3];
+        for q in &p.poles {
+            let wires = p.power_links.iter().filter(|l| l.from == End::Pole(q.id) || l.to == End::Pole(q.id)).count();
+            assert!(wires <= crate::power_net::max_wires(q.tier), "pole {} Mk.{} has {wires} wires", q.id, q.tier);
+            tiers[q.tier as usize - 1] += 1;
+        }
+        eprintln!("poles by tier (Mk.1, Mk.2, Mk.3): {tiers:?}");
         let poles: BTreeSet<u32> = p.poles.iter().map(|q| q.id).collect();
         assert!(p.power_links.iter().all(|l| [l.from, l.to].iter().all(|e| match e {
             End::Factory(f) => *f as usize <= p.factories.len(),

@@ -30,8 +30,27 @@ const POLE_OUT: &str = "Out";
 /// Port stats on a pole: its circuit's MW made and used.
 pub const MADE: &str = "made";
 pub const USED: &str = "used";
-/// The game's Power Pole Mk.1, as icon for a pole.
-pub const POLE_ICON: &str = "Desc_PowerPoleMk1_C";
+/// Most Power Line connections a Power Pole Mk.1, Mk.2 and Mk.3 take, from
+/// the game's Docs ("Allows for up to 4 / 7 / 10 Power Line connections").
+pub const POLE_WIRES: [usize; 3] = [4, 7, 10];
+/// Their icons.
+const POLE_ICONS: [&str; 3] = ["Desc_PowerPoleMk1_C", "Desc_PowerPoleMk2_C", "Desc_PowerPoleMk3_C"];
+/// Port stat key on a pole: how many wires it has.
+pub const WIRES: &str = "wires";
+
+/// Most wires a pole of `tier` (1 to 3) takes.
+pub fn max_wires(tier: u8) -> usize {
+    POLE_WIRES[tier.clamp(1, 3) as usize - 1]
+}
+
+/// The lowest tier that takes `wires`.
+pub fn tier_for(wires: usize) -> u8 {
+    (1..=3).find(|t| max_wires(*t) >= wires).unwrap_or(3)
+}
+
+fn mk1() -> u8 {
+    1
+}
 /// A pole node's size (unzoomed).
 pub const POLE_SIZE: Vec2 = vec2(36.0, 40.0);
 /// Less than this (MW) and a factory neither sends nor needs power.
@@ -74,6 +93,9 @@ pub struct Pole {
     /// On the master graph (unzoomed graph units).
     pub x: f32,
     pub y: f32,
+    /// Power Pole Mk.1, 2 or 3: how many wires it takes.
+    #[serde(default = "mk1")]
+    pub tier: u8,
 }
 
 /// The project's power poles and wires.
@@ -93,7 +115,7 @@ impl PowerNet {
     /// Adds a pole at (`x`, `y`); returns its id.
     pub fn add_pole(&mut self, x: f32, y: f32) -> u32 {
         let id = self.poles.iter().map(|p| p.id).max().unwrap_or(0) + 1;
-        self.poles.push(Pole { id, x, y });
+        self.poles.push(Pole { id, x, y, tier: 1 });
         id
     }
 }
@@ -209,6 +231,7 @@ pub fn sync(state: &mut EditorState, user: &mut UserState, net: &mut PowerNet, s
     }
 
     // Poles: one node each while shown.
+    user.pole_tiers = net.poles.iter().map(|p| (p.id, p.tier.clamp(1, 3))).collect();
     let mut seen = BTreeSet::new();
     for node in state.graph.iter_nodes().collect::<Vec<_>>() {
         let NodeKind::Pole { id } = state.graph[node].user_data.kind else { continue };
@@ -356,6 +379,8 @@ pub fn evaluate(g: &FactoryGraph, ports: &mut HashMap<(NodeId, String), PortStat
                 let (m, u) = circuit.get(&node).map_or((0.0, 0.0), |&c| (made[c], used[c]));
                 ports.insert((node, MADE.into()), PortStat { have: m, want: m, connected: true });
                 ports.insert((node, USED.into()), PortStat { have: u, want: u, connected: true });
+                let n = wire_count(g, node) as f64;
+                ports.insert((node, WIRES.into()), PortStat { have: n, want: n, connected: true });
             }
             _ => {}
         }
@@ -371,6 +396,11 @@ pub fn evaluate(g: &FactoryGraph, ports: &mut HashMap<(NodeId, String), PortStat
             issues.push((takers[c][0], format!("Power for {who} is {} MW short", fmt_num(used[c] - made[c]))));
         }
     }
+}
+
+/// Wires on a node, all ports.
+pub fn wire_count(g: &FactoryGraph, node: NodeId) -> usize {
+    g[node].inputs.iter().map(|(_, i)| g.connections(*i).len()).sum::<usize>() + g[node].outputs.iter().map(|(_, o)| g.output_connections(*o).len()).sum::<usize>()
 }
 
 /// A power wire: faint, so a big circuit's wires stay in the background,
@@ -422,16 +452,17 @@ pub fn port_row(ui: &mut Ui, s: &mut UserState, node_id: NodeId, name: &str, inp
     });
 }
 
-/// A pole: the game's Power Pole icon (red ring when its circuit is short),
-/// and its circuit's figures on hover.
-pub fn pole_ui(ui: &mut Ui, rect: egui::Rect, node_id: NodeId, s: &mut UserState) {
+/// A pole: the game's icon for its tier (red ring when its circuit is
+/// short), and its wires and circuit's figures on hover.
+pub fn pole_ui(ui: &mut Ui, rect: egui::Rect, node_id: NodeId, pole: u32, s: &mut UserState) {
     let get = |name: &str| s.ports.get(&(node_id, name.to_string())).map(|p| p.have).unwrap_or(0.0);
-    let (made, used) = (get(MADE), get(USED));
+    let (made, used, wires) = (get(MADE), get(USED), get(WIRES) as usize);
+    let tier = s.pole_tiers.get(&pole).copied().unwrap_or(1).clamp(1, 3);
     let short = used > made + MIN_MW;
     if short {
-        ui.painter().circle_stroke(rect.center(), rect.width().max(rect.height()) * 0.55, egui::Stroke::new(2.0, DANGER));
+        ui.painter().circle_stroke(rect.center(), rect.width().max(rect.height()) * 0.55, egui::Stroke::new(2.0_f32, DANGER));
     }
-    match s.assets.as_mut().and_then(|a| a.item_uri(POLE_ICON)) {
+    match s.assets.as_mut().and_then(|a| a.item_uri(POLE_ICONS[tier as usize - 1])) {
         Some(uri) => {
             egui::Image::new(uri).paint_at(ui, egui::Rect::from_center_size(rect.center(), egui::Vec2::splat(rect.height())));
         }
@@ -441,7 +472,8 @@ pub fn pole_ui(ui: &mut Ui, rect: egui::Rect, node_id: NodeId, s: &mut UserState
     }
     if ui.rect_contains_pointer(rect) && !ui.input(|i| i.pointer.any_down()) {
         egui::show_tooltip_at_pointer(ui.ctx(), ui.layer_id(), egui::Id::new(("pole_tip", node_id)), |ui| {
-            crate::widgets::tooltip_title(ui, "Power pole");
+            crate::widgets::tooltip_title(ui, &format!("Power Pole Mk.{tier}"));
+            ui.label(RichText::new(format!("{wires} of {} Power Line connections", max_wires(tier))).color(TEXT_DIM));
             ui.label(RichText::new(format!("Its circuit makes {} MW and uses {} MW.", fmt_num(made), fmt_num(used))).color(TEXT));
             let (note, color) = if short {
                 (format!("{} MW short", fmt_num(used - made)), DANGER)
@@ -463,6 +495,14 @@ mod tests {
         assert_eq!((net.add_pole(0.0, 0.0), net.add_pole(0.0, 0.0)), (1, 2));
         net.poles.remove(1);
         assert_eq!(net.add_pole(0.0, 0.0), 2);
+    }
+
+    #[test]
+    fn pole_tiers_take_the_games_wire_counts() {
+        assert_eq!((max_wires(1), max_wires(2), max_wires(3)), (4, 7, 10));
+        assert_eq!((tier_for(0), tier_for(4), tier_for(5), tier_for(7), tier_for(8), tier_for(10)), (1, 1, 2, 2, 3, 3));
+        let p: Pole = serde_json::from_str(r#"{"id":1,"x":0,"y":0}"#).unwrap();
+        assert_eq!(p.tier, 1, "files from before tiers are Mk.1");
     }
 
     #[test]
