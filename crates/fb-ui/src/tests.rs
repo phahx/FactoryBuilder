@@ -2065,9 +2065,10 @@ fn master_graph_links_factories_and_flags_shortfalls() {
     app.activate(smelting);
     let find = |app: &FactoryApp, f: fn(&crate::graph::NodeKind) -> bool| app.state.graph.iter_nodes().find(|n| f(&app.state.graph[*n].user_data.kind)).unwrap();
     let recipe = find(&app, |k| matches!(k, crate::graph::NodeKind::Recipe { .. }));
-    let ore = find(&app, |k| matches!(k, crate::graph::NodeKind::Resource { .. }));
-    let out = find(&app, |k| matches!(k, crate::graph::NodeKind::Output { .. }));
-    for (node, name, v) in [(recipe, crate::graph::MACHINES, 2.0), (ore, crate::graph::RATE, 60.0), (out, crate::graph::RATE, 60.0)] {
+    // (The ore's miner was added when the factory came in: twice as many.)
+    let miner = find(&app, |k| matches!(k, crate::graph::NodeKind::Extractor { .. }));
+    let miners = crate::graph::input_number(&app.state.graph, miner, crate::graph::MACHINES);
+    for (node, name, v) in [(recipe, crate::graph::MACHINES, 2.0), (miner, crate::graph::MACHINES, 2.0 * miners)] {
         let i = app.state.graph[node].get_input(name).unwrap();
         app.state.graph[i].value.set_number(v);
     }
@@ -2101,8 +2102,8 @@ fn master_graph_links_factories_and_flags_shortfalls() {
     assert!(!app.is_dirty());
 }
 
-/// `machines` Coal-Powered Generators fed coal and water from resource
-/// nodes (rates from the game's own recipe).
+/// `machines` Coal-Powered Generators fed coal and water brought in from
+/// elsewhere (Input nodes; rates from the game's own recipe).
 fn power_plant(app: &FactoryApp, name: &str, machines: f64) -> crate::portable::FactoryFile {
     use crate::portable::{FactoryFile, Kind, Node, Wire};
     let gen = fb_model::DEFAULT_GENERATOR;
@@ -2110,7 +2111,7 @@ fn power_plant(app: &FactoryApp, name: &str, machines: f64) -> crate::portable::
     let mut f = FactoryFile::new(Some(name.into()));
     f.nodes.push(Node { kind: Kind::Recipe, class: gen.into(), machines: Some(machines), clock: Some(100.0), sloops: None, rate: None, name: None, color: None, item: None, purity: None, x: 400.0, y: 0.0 });
     for (k, a) in r.ingredients.iter().enumerate() {
-        f.nodes.push(Node { kind: Kind::Resource, class: a.item.clone(), machines: None, clock: None, sloops: None, rate: Some(r.per_min(a) * machines), name: None, color: None, item: None, purity: None, x: 0.0, y: 200.0 * k as f32 });
+        f.nodes.push(Node { kind: Kind::Input, class: a.item.clone(), machines: None, clock: None, sloops: None, rate: Some(r.per_min(a) * machines), name: None, color: None, item: None, purity: None, x: 0.0, y: 200.0 * k as f32 });
         f.wires.push(Wire { from: k + 1, output: 0, to: 0, input: k, slot: 0 });
     }
     f
@@ -2500,9 +2501,14 @@ fn extractors_and_pumps_are_buildings_with_power() {
     app.context_menu = Some((miner, egui::pos2(600.0, 300.0)));
     app.context_targets = vec![miner];
     frames(&ctx, &mut app, 1);
-    press(&ctx, &mut app, "    Pure");
+    // Purity is the resource node's (the miner's menu no longer has it).
+    assert!(!crate::widgets::TEST_BUTTONS.with(|b| b.borrow().iter().any(|x| x.0 == "    Pure")));
+    app.context_menu = None;
+    frames(&ctx, &mut app, 1);
+    press(&ctx, &mut app, "Pure");
     frames(&ctx, &mut app, 2);
-    assert!(matches!(app.graph()[miner].user_data.kind, NodeKind::Extractor { purity: fb_model::Purity::Pure, .. }));
+    assert!(app.graph().iter_nodes().any(|n| matches!(app.graph()[n].user_data.kind, NodeKind::Resource { purity: fb_model::Purity::Pure, .. })));
+    assert_eq!(crate::extractors::purity_of(app.graph(), miner), fb_model::Purity::Pure, "the miner uses its resource's purity");
     assert!(app.power() != power_before, "the extractor's power follows its building");
     // The resource's wire into the miner isn't a belt: no belt label on it,
     // and the resource takes more extractors without a splitter.
@@ -2560,16 +2566,17 @@ fn extractors_extract_by_themselves_and_their_resource_shows_it() {
     frames(&ctx, &mut app, 2);
     let (ore, item) = (app.add_test_node(Template::Resource("Desc_OreIron_C".into()), egui::pos2(0.0, 0.0)), "Desc_OreIron_C");
     let miner = app.add_test_node(Template::Extractor { item: item.into(), class: "Build_MinerMk1_C".into(), purity: fb_model::Purity::Normal }, egui::pos2(350.0, 0.0));
-    let out = app.add_test_node(Template::Output(item.into()), egui::pos2(750.0, 0.0));
+    // A smelter running a sixth of one: it takes 5 ore a minute.
+    let out = app.add_test_node(Template::Recipe("Recipe_IngotIron_C".into()), egui::pos2(750.0, 0.0));
     let set = |app: &mut FactoryApp, n: egui_node_graph2::NodeId, name: &str, v: f64| {
         let i = app.state.graph[n].get_input(name).unwrap();
         app.state.graph[i].value.set_number(v);
     };
     set(&mut app, ore, RATE, 30.0);
     set(&mut app, miner, MACHINES, 1.0);
-    set(&mut app, out, RATE, 5.0);
+    set(&mut app, out, MACHINES, 1.0 / 6.0);
     let (ground, _) = connect(&mut app, ore, miner, item);
-    connect(&mut app, miner, out, item);
+    let (smelter_in, _) = connect(&mut app, miner, out, item);
     frames(&ctx, &mut app, 2);
     // What comes after takes 5: the miner extracts 5 (backed up, as in
     // game), not starved by its resource node.
@@ -2585,10 +2592,11 @@ fn extractors_extract_by_themselves_and_their_resource_shows_it() {
     assert!(texts.iter().any(|t| t == "Extracted"), "the resource's rate is shown, not edited");
     // The resource node's old Rate doesn't limit anything.
     set(&mut app, ore, RATE, 1.0);
-    set(&mut app, out, RATE, 90.0);
+    set(&mut app, out, MACHINES, 3.0);
     app.changed();
     frames(&ctx, &mut app, 2);
-    let got = app.outputs().iter().find(|o| o.0 == item).map(|o| o.1).unwrap();
+    let port = app.graph()[out].inputs.iter().find(|(_, i)| *i == smelter_in).map(|(n, _)| n.clone()).unwrap();
+    let got = stat(&app, out, &port).have;
     assert!((got - 60.0).abs() < 1e-6, "one Miner Mk.1 makes its 60, whatever the resource said: {got}");
     assert!((app.summary.resources[item] - 60.0).abs() < 1e-6, "Raw resources counts what's extracted");
     assert!(matches!(app.graph()[miner].user_data.kind, NodeKind::Extractor { .. }));
@@ -2756,7 +2764,7 @@ fn moving_a_selection_to_a_new_factory_keeps_the_totals() {
     assert_eq!(app.active, here, "stays in the factory it was moved from");
     assert_eq!(app.factory_count(), 3);
     let kinds: Vec<String> = app.state.graph.iter_nodes().map(|n| format!("{:?}", app.state.graph[n].user_data.kind)).collect();
-    assert_eq!(app.node_count(), 3, "ore, smelter and an Output for the ingots: {kinds:?}");
+    assert_eq!(app.node_count(), 4, "ore, its miner, smelter and an Output for the ingots: {kinds:?}");
     assert!(kinds.iter().any(|k| k.contains("Output") && k.contains("Desc_IronIngot_C")), "{kinds:?}");
     assert!(app.summary.issues.is_empty(), "{:?}", app.summary.issues);
     let new = *app.factory_ids().last().unwrap();

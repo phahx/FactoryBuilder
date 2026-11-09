@@ -13,6 +13,61 @@ use egui::{vec2, RichText, Ui};
 use egui_node_graph2::NodeId;
 use fb_model::{Extractor, ExtractorKind, GameData, Purity};
 
+/// An extractor's node purity: its resource node's, when it stands on one.
+pub fn purity_of(g: &FactoryGraph, node: NodeId) -> Purity {
+    let own = match g[node].user_data.kind {
+        NodeKind::Extractor { purity, .. } => purity,
+        _ => return Purity::Normal,
+    };
+    g[node]
+        .inputs
+        .iter()
+        .flat_map(|(_, i)| g.connections(*i))
+        .find_map(|o| match g[g[o].node].user_data.kind {
+            NodeKind::Resource { purity, .. } => Some(purity),
+            _ => None,
+        })
+        .unwrap_or(own)
+}
+
+/// Whether an extractor stands on a resource node (so its purity is that node's).
+pub fn on_resource(g: &FactoryGraph, node: NodeId) -> bool {
+    g[node].inputs.iter().flat_map(|(_, i)| g.connections(*i)).any(|o| matches!(g[g[o].node].user_data.kind, NodeKind::Resource { .. }))
+}
+
+/// Under a resource node: its purity (not for water, which has none).
+pub fn resource_footer(ui: &mut Ui, s: &mut UserState, graph: &FactoryGraph, node_id: NodeId, item: &str, purity: Purity) -> Vec<egui_node_graph2::NodeResponse<Resp, NodeData>> {
+    let game = s.game.clone();
+    let form = game.item_form(item);
+    // Only when what extracts it cares (a Water Extractor doesn't).
+    let on_it: Vec<String> = graph[node_id]
+        .outputs
+        .iter()
+        .flat_map(|(_, o)| graph.output_connections(*o))
+        .filter_map(|i| match &graph[graph[i].node].user_data.kind {
+            NodeKind::Extractor { class, .. } => Some(class.clone()),
+            _ => None,
+        })
+        .collect();
+    let uses = if on_it.is_empty() {
+        game.extraction.extractors.iter().any(|e| e.can_extract(item, form) && e.kind != ExtractorKind::Water)
+    } else {
+        on_it.iter().any(|c| has_purity(&game, c))
+    };
+    if !uses {
+        return vec![];
+    }
+    let (r_div, _) = ui.allocate_exact_size(vec2(ui.available_width(), 1.0), egui::Sense::hover());
+    ui.painter().rect_filled(r_div, 0.0, DIVIDER);
+    let mut p = purity;
+    let tip = |x: Purity| format!("A {} node gives {}x the output.", x.label(), fmt_num(x.multiplier()));
+    let (ti, tn, tp) = (tip(Purity::Impure), tip(Purity::Normal), tip(Purity::Pure));
+    if crate::widgets::tabs(ui, &mut p, &[(Purity::Impure, "Impure", &ti), (Purity::Normal, "Normal", &tn), (Purity::Pure, "Pure", &tp)]) {
+        return vec![egui_node_graph2::NodeResponse::User(Resp::Purity(node_id, p))];
+    }
+    vec![]
+}
+
 pub fn find<'a>(game: &'a GameData, class: &str) -> Option<&'a Extractor> {
     game.extraction.extractors.iter().find(|e| e.class == class)
 }
@@ -98,23 +153,31 @@ pub fn mw_per_unit(game: &GameData, settings: &ExtractionSettings) -> std::colle
         .collect()
 }
 
-/// Plan factory's Resource nodes get an extractor after them, chosen by the
-/// Overview's extractor settings (miner tier, purity, clock speed): the
-/// resource goes into it and what it extracts goes on to the machines.
-pub fn add_to_plan(state: &mut EditorState, user: &mut UserState, settings: &ExtractionSettings) {
+/// Resource nodes wired straight into machines (Plan factory's, and older
+/// projects') get an extractor between, chosen by the Overview's extractor
+/// settings (miner tier, purity, clock speed) and sized to the rate the
+/// resource gave: the resource goes into it and what it extracts goes on to
+/// the machines. Returns true if anything changed.
+pub fn add_to_plan(state: &mut EditorState, user: &mut UserState, settings: &ExtractionSettings) -> bool {
     let game = user.game.clone();
     let z = state.pan_zoom.zoom;
-    let resources: Vec<(NodeId, String, f64)> = state
-        .graph
+    let g = &state.graph;
+    let direct = |n: NodeId| g[n].outputs.iter().flat_map(|(_, o)| g.output_connections(*o)).any(|i| !matches!(g[g[i].node].user_data.kind, NodeKind::Extractor { .. }));
+    let resources: Vec<(NodeId, String, f64)> = g
         .iter_nodes()
-        .filter_map(|n| match &state.graph[n].user_data.kind {
-            NodeKind::Resource { item } => Some((n, item.clone(), input_number(&state.graph, n, RATE))),
+        .filter(|n| direct(*n))
+        .filter_map(|n| match &g[n].user_data.kind {
+            NodeKind::Resource { item, .. } => Some((n, item.clone(), input_number(g, n, RATE))),
             _ => None,
         })
         .collect();
+    let changed = !resources.is_empty();
     for (r, item, rate) in resources {
         let Some(p) = plan_resource(&game, &item, rate, settings) else { continue };
         let purity = p.purity.unwrap_or_default();
+        if let NodeKind::Resource { purity: rp, .. } = &mut state.graph[r].user_data.kind {
+            *rp = purity;
+        }
         let per = per_machine(&game, &p.class, purity) * p.clock;
         if per <= 0.0 {
             continue;
@@ -133,11 +196,15 @@ pub fn add_to_plan(state: &mut EditorState, user: &mut UserState, settings: &Ext
         // What the resource fed now comes from the extractor.
         let Some(out) = g[r].outputs.first().map(|(_, o)| *o) else { continue };
         let (Some(x_in), Some(x_out)) = (g[x].inputs.iter().map(|(_, i)| *i).find(|i| g[*i].typ.0 == item), g[x].outputs.first().map(|(_, o)| *o)) else { continue };
-        for i in g.output_connections(out) {
+        for i in g.output_connections(out).into_iter().filter(|i| *i != x_in) {
+            if matches!(g[g[i].node].user_data.kind, NodeKind::Extractor { .. }) {
+                continue;
+            }
             let pos = g.connections(i).iter().position(|o| *o == out).unwrap_or(0);
             g.remove_connection(i, out);
             g.add_connection(x_out, i, pos);
         }
         g.add_connection(out, x_in, 0);
     }
+    changed
 }

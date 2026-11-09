@@ -65,9 +65,11 @@ pub enum NodeKind {
     Recipe {
         recipe: String,
     },
-    /// Raw resource extraction.
+    /// A raw resource: the node(s) its extractors stand on, of `purity`.
     Resource {
         item: String,
+        #[serde(default)]
+        purity: fb_model::Purity,
     },
     /// Supplied from another factory.
     Input {
@@ -126,7 +128,7 @@ impl NodeKind {
     pub fn template(&self) -> Template {
         match self.clone() {
             NodeKind::Recipe { recipe } => Template::Recipe(recipe),
-            NodeKind::Resource { item } => Template::Resource(item),
+            NodeKind::Resource { item, .. } => Template::Resource(item),
             NodeKind::Input { item } => Template::Input(item),
             NodeKind::Output { item } => Template::Output(item),
             NodeKind::Sink { item } => Template::Sink(item),
@@ -143,7 +145,7 @@ impl NodeKind {
     pub fn icon_item<'a>(&'a self, game: &'a GameData) -> Option<&'a str> {
         match self {
             NodeKind::Recipe { recipe } => game.recipes.get(recipe).and_then(|r| r.icon_item()),
-            NodeKind::Resource { item }
+            NodeKind::Resource { item, .. }
             | NodeKind::Input { item }
             | NodeKind::Output { item }
             | NodeKind::Sink { item } => Some(item),
@@ -192,6 +194,8 @@ pub enum Template {
 pub enum Resp {
     /// The user committed a number on a node.
     Edited,
+    /// A resource node's purity was changed.
+    Purity(NodeId, fb_model::Purity),
 }
 impl UserResponseTrait for Resp {}
 
@@ -239,6 +243,12 @@ pub struct UserState {
     /// Resource nodes with extractors on them: what those extract.
     #[serde(skip)]
     pub ground: HashMap<NodeId, f64>,
+    /// Resource nodes wired straight into machines (no extractor).
+    #[serde(skip)]
+    pub direct_resources: std::collections::HashSet<NodeId>,
+    /// Output nodes: what arrives.
+    #[serde(skip)]
+    pub delivered: HashMap<NodeId, f64>,
 }
 
 impl UserState {
@@ -325,7 +335,7 @@ impl Template {
     pub fn kind(&self) -> NodeKind {
         match self.clone() {
             Template::Recipe(recipe) => NodeKind::Recipe { recipe },
-            Template::Resource(item) => NodeKind::Resource { item },
+            Template::Resource(item) => NodeKind::Resource { item, purity: fb_model::Purity::Normal },
             Template::Input(item) => NodeKind::Input { item },
             Template::Output(item) => NodeKind::Output { item },
             Template::Sink(item) => NodeKind::Sink { item },
@@ -535,20 +545,34 @@ impl WidgetValueTrait for PortValue {
         s: &mut UserState,
         d: &NodeData,
     ) -> Vec<Resp> {
-        // A resource node with extractors on it gives what they extract:
-        // its rate is theirs to set, so it's shown, not edited.
-        if let (PortValue::Number { suffix, .. }, NodeKind::Resource { .. }, Some(&got)) = (&*self, &d.kind, s.ground.get(&node_id)) {
-            if name == RATE {
+        // A resource gives what the extractors on it take, and an Output
+        // takes what arrives: their rates are shown, not edited (a resource
+        // wired straight into machines keeps its own rate).
+        if let PortValue::Number { suffix, .. } = &*self {
+            let shown = match &d.kind {
+                NodeKind::Resource { .. } if name == RATE && !s.direct_resources.contains(&node_id) => Some((
+                    "Extracted",
+                    s.ground.get(&node_id).copied().unwrap_or(0.0),
+                    "What the extractors on this resource take: their building, clock speed and this node's purity decide it.",
+                )),
+                NodeKind::Output { .. } if name == RATE => Some((
+                    "Delivered",
+                    s.delivered.get(&node_id).copied().unwrap_or(0.0),
+                    "What arrives here from the machines before it.",
+                )),
+                _ => None,
+            };
+            if let Some((label, v, tip)) = shown {
                 let suffix = suffix.clone();
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new("Extracted").color(TEXT_DIM));
+                    ui.label(RichText::new(label).color(TEXT_DIM));
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         ui.label(RichText::new(suffix).color(TEXT_DIM));
-                        ui.label(RichText::new(fmt_num(got)).color(TEXT));
+                        ui.label(RichText::new(fmt_num(v)).color(TEXT));
                     });
                 })
                 .response
-                .on_hover_text("What the extractors on this resource take. Set their machines and clock speed to change it.");
+                .on_hover_text(tip);
                 return vec![];
             }
         }
@@ -880,7 +904,8 @@ impl NodeDataTrait for NodeData {
                     });
                 });
             }
-            NodeKind::Extractor { item, class, purity } => crate::extractors::footer(ui, s, graph, node_id, item, class, *purity),
+            NodeKind::Extractor { item, class, .. } => crate::extractors::footer(ui, s, graph, node_id, item, class, crate::extractors::purity_of(graph, node_id)),
+            NodeKind::Resource { item, purity } => return crate::extractors::resource_footer(ui, s, graph, node_id, item, *purity),
             NodeKind::Factory { id, .. } => {
                 let Some(f) = s.factories.get(id).cloned() else { return vec![] };
                 let (r_div, _) = ui.allocate_exact_size(vec2(ui.available_width(), 1.0), egui::Sense::hover());
@@ -1019,13 +1044,8 @@ pub fn node_rates(
                     .collect(),
             )
         }
-        NodeKind::Output { .. } => {
-            let rate = input_number(graph, node, RATE);
-            (
-                item_inputs.map(|(name, _)| (name.clone(), rate)).collect(),
-                vec![],
-            )
-        }
+        // Takes whatever arrives, like a sink.
+        NodeKind::Output { .. } => (item_inputs.map(|(name, _)| (name.clone(), 0.0)).collect(), vec![]),
         NodeKind::Sink { .. } => (
             item_inputs.map(|(name, _)| (name.clone(), 0.0)).collect(),
             vec![],
@@ -1041,8 +1061,9 @@ pub fn node_rates(
         // Not in the simulation: their wires are joined up (routers.rs).
         NodeKind::Pole { .. } | NodeKind::Merger { .. } | NodeKind::Splitter { .. } | NodeKind::Pump { .. } => (vec![], vec![]),
         // What it takes from the deposit is what it puts out.
-        NodeKind::Extractor { class, purity, .. } => {
-            let rate = crate::extractors::per_machine(game, class, *purity) * input_number(graph, node, MACHINES) * input_number(graph, node, CLOCK) / 100.0;
+        NodeKind::Extractor { class, .. } => {
+            let purity = crate::extractors::purity_of(graph, node);
+            let rate = crate::extractors::per_machine(game, class, purity) * input_number(graph, node, MACHINES) * input_number(graph, node, CLOCK) / 100.0;
             (item_inputs.map(|(name, _)| (name.clone(), rate)).collect(), n.outputs.iter().map(|(name, _)| (name.clone(), rate)).collect())
         }
     }

@@ -145,7 +145,7 @@ impl FactoryApp {
             let pos = state.node_positions.get(id).map(|p| (p.to_vec2() / z).to_pos2()).unwrap_or(Pos2::ZERO);
             let (kind, class) = match &n.user_data.kind {
                 NodeKind::Recipe { recipe } => (portable::Kind::Recipe, recipe.clone()),
-                NodeKind::Resource { item } => (portable::Kind::Resource, item.clone()),
+                NodeKind::Resource { item, .. } => (portable::Kind::Resource, item.clone()),
                 NodeKind::Input { item } => (portable::Kind::Input, item.clone()),
                 NodeKind::Output { item } => (portable::Kind::Output, item.clone()),
                 NodeKind::Sink { item } => (portable::Kind::Sink, item.clone()),
@@ -158,6 +158,7 @@ impl FactoryApp {
             let is_recipe = matches!(kind, portable::Kind::Recipe | portable::Kind::Extractor);
             let (item, purity) = match &n.user_data.kind {
                 NodeKind::Extractor { item, purity, .. } => (Some(item.clone()), Some(*purity)),
+                NodeKind::Resource { purity, .. } => (None, Some(*purity)),
                 NodeKind::Pump { item, .. } => (Some(item.clone()), None),
                 _ => (None, None),
             };
@@ -288,6 +289,9 @@ impl FactoryApp {
             set(self, crate::graph::SLOOPS, n.sloops.map(f64::from));
             set(self, RATE, n.rate);
             self.state.graph[id].user_data.color = n.color.as_deref().and_then(portable::color_from_hex);
+            if let (NodeKind::Resource { purity, .. }, Some(p)) = (&mut self.state.graph[id].user_data.kind, n.purity) {
+                *purity = p;
+            }
             if let Some(name) = n.name.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
                 self.state.graph[id].label = name.chars().take(200).collect();
             }
@@ -313,6 +317,9 @@ impl FactoryApp {
             list.sort_by_key(|(slot, _)| *slot);
             self.state.graph.set_output_order(oid, list.into_iter().map(|(_, i)| i).collect());
         }
+        // Older files: an extractor where a resource feeds machines directly.
+        let settings = self.planner.extraction.clone();
+        crate::extractors::add_to_plan(&mut self.state, &mut self.user, &settings);
         let next = self.planner.frames.iter().map(|f| f.id).max().unwrap_or(0);
         for (k, fr) in f.frames.iter().enumerate() {
             self.planner.frames.push(frame_from_file(fr, next + 1 + k as u32, offset));

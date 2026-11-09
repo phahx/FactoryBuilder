@@ -435,7 +435,7 @@ impl FactoryApp {
         let Some(d) = self.doc_mut(id) else { return FactoryInfo::default() };
         if d.info.is_none() {
             if let Some(b) = &d.body {
-                let e = evaluate_graph(&game, &b.state.graph, &mut None);
+                let e = evaluate_graph(&game, &b.state.graph, &mut None, &b.planner.targets);
                 d.info = Some(FactoryInfo::from_summary(&name, &e.summary));
             }
         }
@@ -613,9 +613,14 @@ impl FactoryApp {
         if self.game_loaded {
             let game = self.user.game.clone();
             crate::graph::add_missing_sloop_inputs(&game, &mut self.state.graph);
+            let settings = self.planner.extraction.clone();
+            crate::extractors::add_to_plan(&mut self.state, &mut self.user, &settings);
+            let mut scratch = UserState { game: game.clone(), zoom: 1.0, ..Default::default() };
             for d in &mut self.docs {
                 if let Some(b) = d.body.as_mut() {
                     crate::graph::add_missing_sloop_inputs(&game, &mut b.state.graph);
+                    let settings = b.planner.extraction.clone();
+                    crate::extractors::add_to_plan(&mut b.state, &mut scratch, &settings);
                 }
             }
             self.sync_master();

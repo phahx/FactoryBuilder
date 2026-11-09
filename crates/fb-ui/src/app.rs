@@ -457,6 +457,8 @@ impl FactoryApp {
         if self.game_loaded {
             let game = self.user.game.clone();
             crate::graph::add_missing_sloop_inputs(&game, &mut self.state.graph);
+            let settings = self.planner.extraction.clone();
+            crate::extractors::add_to_plan(&mut self.state, &mut self.user, &settings);
         }
         self.project_name = name;
         self.reset_history();
@@ -773,7 +775,10 @@ impl FactoryApp {
         self.catalog = Some(crate::finder::Catalog::new(&game));
         // A project restored before the game data arrived: old recipe nodes
         // get the Somersloops field, without counting as an edit.
-        if crate::graph::add_missing_sloop_inputs(&game, &mut self.state.graph) {
+        let sloops = crate::graph::add_missing_sloop_inputs(&game, &mut self.state.graph);
+        self.user.game = Rc::new(game.clone());
+        let settings = self.planner.extraction.clone();
+        if sloops | crate::extractors::add_to_plan(&mut self.state, &mut self.user, &settings) {
             self.committed = self.project_json();
         }
         if self.planner.enabled.is_empty() {
@@ -1098,11 +1103,13 @@ impl FactoryApp {
     /// the nodes and the overview show.
     fn evaluate(&mut self) {
         let game = self.user.game.clone();
-        let e = evaluate_graph(&game, &self.state.graph, &mut self.sim_cache);
+        let e = evaluate_graph(&game, &self.state.graph, &mut self.sim_cache, &self.planner.targets);
         self.wire_flow = e.wire_flow;
         self.user.ports = e.ports;
         self.user.nodes = e.nodes;
         self.user.ground = e.ground;
+        self.user.direct_resources = e.direct_resources;
+        self.user.delivered = e.delivered;
         self.summary = e.summary;
     }
 
@@ -1854,6 +1861,12 @@ impl FactoryApp {
             self.state.node_finder = None;
         }
         for r in &resp.node_responses {
+            if let NodeResponse::User(Resp::Purity(node, p)) = r {
+                if let Some(NodeKind::Resource { purity, .. }) = self.state.graph.nodes.get_mut(*node).map(|n| &mut n.user_data.kind) {
+                    *purity = *p;
+                    self.changed();
+                }
+            }
             match r {
                 NodeResponse::User(Resp::Edited)
                 | NodeResponse::ConnectEventEnded { .. }
@@ -2048,7 +2061,7 @@ impl FactoryApp {
                             set_extractor = Some((x.class.clone(), *purity));
                         }
                     }
-                    if crate::extractors::has_purity(&game, class) {
+                    if crate::extractors::has_purity(&game, class) && !crate::extractors::on_resource(g, *one) {
                         crate::menus::caption(ui, "Node purity");
                         for p in fb_model::Purity::ALL {
                             if crate::menus::choice(ui, p.label(), "", p == *purity, true).clicked() {
@@ -2719,12 +2732,16 @@ pub(crate) struct Evaluation {
     pub wire_flow: std::collections::HashMap<(egui_node_graph2::InputId, egui_node_graph2::OutputId), f64>,
     /// Resource nodes with extractors on them: what those extract, per minute.
     pub ground: std::collections::HashMap<NodeId, f64>,
+    /// Resource nodes wired straight into machines.
+    pub direct_resources: std::collections::HashSet<NodeId>,
+    /// Output nodes: what arrives.
+    pub delivered: std::collections::HashMap<NodeId, f64>,
 }
 
 /// Runs the flow simulation over a factory graph (or the master graph of
 /// factory blocks) and works out the stats the nodes and overview show.
 /// `cache` skips the simulation when nothing that affects it changed.
-pub(crate) fn evaluate_graph(game: &GameData, g: &FactoryGraph, cache: &mut SimCache) -> Evaluation {
+pub(crate) fn evaluate_graph(game: &GameData, g: &FactoryGraph, cache: &mut SimCache, targets: &[Target]) -> Evaluation {
     let ids: Vec<NodeId> = g.iter_nodes().collect();
     let index: BTreeMap<NodeId, usize> = ids.iter().enumerate().map(|(i, id)| (*id, i)).collect();
     let item_inputs = |id: NodeId| -> Vec<egui_node_graph2::InputId> {
@@ -2784,7 +2801,8 @@ pub(crate) fn evaluate_graph(game: &GameData, g: &FactoryGraph, cache: &mut SimC
             inputs: ins.iter().enumerate().map(|(p, x)| if extractor || (factory && !connected_in.contains(&(i, p))) { 0.0 } else { x.1 }).collect(),
             outputs: outs.iter().map(|x| x.1).collect(),
             throttles: matches!(g[id].user_data.kind, NodeKind::Recipe { .. } | NodeKind::Extractor { .. }),
-            sink: matches!(g[id].user_data.kind, NodeKind::Sink { .. }),
+            // Outputs take whatever arrives, like sinks.
+            sink: matches!(g[id].user_data.kind, NodeKind::Sink { .. } | NodeKind::Output { .. }),
         });
         rates.push((ins, outs));
     }
@@ -2861,11 +2879,19 @@ pub(crate) fn evaluate_graph(game: &GameData, g: &FactoryGraph, cache: &mut SimC
                 }
             }
             // With extractors on it, what they extract counts instead.
-            NodeKind::Resource { item } => *sum.resources.entry(item.clone()).or_default() += result.shipped[i].iter().sum::<f64>(),
+            NodeKind::Resource { item, .. } => *sum.resources.entry(item.clone()).or_default() += result.shipped[i].iter().sum::<f64>(),
             NodeKind::Input { item } => *sum.inputs.entry(item.clone()).or_default() += result.shipped[i].iter().sum::<f64>(),
             NodeKind::Output { item } => {
                 let got: f64 = result.received[i].iter().sum();
-                let want: f64 = ins.iter().map(|x| x.1).sum();
+                // The plan's target for it, shared by its Output nodes;
+                // with none, what arrives is all there is to want.
+                let nodes = ids.iter().filter(|n| matches!(&g[**n].user_data.kind, NodeKind::Output { item: x } if x == item)).count().max(1) as f64;
+                let target: f64 = targets.iter().filter(|t| t.item == *item).map(|t| t.rate).sum();
+                let want = if target > 0.0 { target / nodes } else { got };
+                e.delivered.insert(id, got);
+                for (name, _) in ins.iter() {
+                    e.ports.insert((id, name.clone()), PortStat { have: got, want, connected: connected_in.contains(&(i, 0)) });
+                }
                 if got < want * 0.995 {
                     sum.issues.push((id, format!("Only {} of {} {} delivered", crate::fmt::fmt_rate(got), crate::fmt::fmt_rate(want), game.item_name(item))));
                 }
@@ -2878,7 +2904,7 @@ pub(crate) fn evaluate_graph(game: &GameData, g: &FactoryGraph, cache: &mut SimC
             }
             NodeKind::Pole { .. } | NodeKind::Merger { .. } | NodeKind::Splitter { .. } => {}
             NodeKind::Pump { class, .. } => power = game.buildable_power.get(class).copied().unwrap_or(0.0),
-            NodeKind::Extractor { item, class, purity } => {
+            NodeKind::Extractor { item, class, .. } => {
                 if let Some(ex) = crate::extractors::find(game, class) {
                     let setup = crate::graph::machine_setup(game, g, id);
                     power = crate::extractors::power(ex, setup.count, setup.clock);
@@ -2886,7 +2912,8 @@ pub(crate) fn evaluate_graph(game: &GameData, g: &FactoryGraph, cache: &mut SimC
                     e.0 += setup.count as f64;
                     e.1 += input_number(g, id, MACHINES);
                     sum.power_shards += setup.shards();
-                    sum.extracted.entry(item.clone()).or_default().push(crate::extractors::line(game, class, *purity, &setup));
+                    let purity = crate::extractors::purity_of(g, id);
+                    sum.extracted.entry(item.clone()).or_default().push(crate::extractors::line(game, class, purity, &setup));
                     *sum.resources.entry(item.clone()).or_default() += result.shipped[i].iter().sum::<f64>();
                     if eff < 0.995 {
                         sum.issues.push((id, format!("{} runs at {:.0}%", ex.name, eff * 100.0)));
@@ -2921,6 +2948,12 @@ pub(crate) fn evaluate_graph(game: &GameData, g: &FactoryGraph, cache: &mut SimC
         *e.ground.entry(r).or_default() += got;
         if let Some((name, _)) = g[x].inputs.iter().find(|(_, i)| *i == input) {
             e.ports.insert((x, name.clone()), PortStat { have: got, want: got, connected: true });
+        }
+    }
+    for (input, output) in g.iter_connections() {
+        let r = g[output].node;
+        if matches!(g[r].user_data.kind, NodeKind::Resource { .. }) && !crate::extractors::from_the_ground(g, output, input) {
+            e.direct_resources.insert(r);
         }
     }
     for (&r, &total) in &e.ground {

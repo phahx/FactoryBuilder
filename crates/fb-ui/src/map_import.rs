@@ -31,8 +31,8 @@ pub struct ImportReport {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 enum Group {
     Recipe(String),
-    /// The deposits of one resource the extractors take from.
-    Resource(String),
+    /// The nodes of one resource and purity (0 to 2) extractors stand on.
+    Resource(String, u8),
     /// Extractors: resource, building class, node purity (0 to 2).
     Extractor(String, String, u8),
 }
@@ -76,14 +76,14 @@ fn import_with(world: &World, selected: &BTreeSet<u32>, game: &GameData, map: Op
     let mut report = ImportReport::default();
     let mut groups: BTreeMap<Group, Vec<&Machine>> = BTreeMap::new();
     let mut group_of: BTreeMap<u32, Group> = BTreeMap::new();
-    let mut resource_rate: BTreeMap<String, f64> = BTreeMap::new();
+    let mut resource_rate: BTreeMap<(String, u8), f64> = BTreeMap::new();
     let mut group_rate: BTreeMap<Group, f64> = BTreeMap::new();
     for m in world.machines.iter().filter(|m| selected.contains(&m.id)) {
         let g = match &m.recipe {
             Some(r) if game.recipes.contains_key(r) => Group::Recipe(r.clone()),
             _ => match extractor_info(game, map, world, m) {
                 Some((res, purity, rate)) => {
-                    *resource_rate.entry(res.clone()).or_default() += rate;
+                    *resource_rate.entry((res.clone(), purity_code(purity))).or_default() += rate;
                     let g = Group::Extractor(res, m.class.clone(), purity_code(purity));
                     *group_rate.entry(g.clone()).or_default() += rate;
                     g
@@ -98,9 +98,9 @@ fn import_with(world: &World, selected: &BTreeSet<u32>, game: &GameData, map: Op
         group_of.insert(m.id, g.clone());
         groups.entry(g).or_default().push(m);
     }
-    // A deposit node for each resource extracted.
-    for res in resource_rate.keys() {
-        groups.entry(Group::Resource(res.clone())).or_default();
+    // A resource node for each resource and purity extracted.
+    for (res, p) in resource_rate.keys() {
+        groups.entry(Group::Resource(res.clone(), *p)).or_default();
     }
 
     let mut f = FactoryFile::new(Some("Imported factory".into()));
@@ -124,7 +124,7 @@ fn import_with(world: &World, selected: &BTreeSet<u32>, game: &GameData, map: Op
                 let common = counts.iter().max_by_key(|(_, n)| **n).map(|(s, _)| *s).unwrap_or(0);
                 Node { kind: Kind::Recipe, class: r.clone(), machines: Some(count), clock: Some((clock * 100.0 * 1000.0).round() / 1000.0), sloops: Some(common).filter(|s| *s > 0), rate: None, name: None, color: None, item: None, purity: None, x: 0.0, y: 0.0 }
             }
-            Group::Resource(res) => Node { kind: Kind::Resource, class: res.clone(), machines: None, clock: None, sloops: None, rate: Some((resource_rate[res] * 1000.0).round() / 1000.0), name: None, color: None, item: None, purity: None, x: 0.0, y: 0.0 },
+            Group::Resource(res, p) => Node { kind: Kind::Resource, class: res.clone(), machines: None, clock: None, sloops: None, rate: Some((resource_rate[&(res.clone(), *p)] * 1000.0).round() / 1000.0), name: None, color: None, item: None, purity: Purity::ALL.get(*p as usize).copied(), x: 0.0, y: 0.0 },
             Group::Extractor(res, class, p) => {
                 let count = ms.len() as f64;
                 let clock = ms.iter().map(|m| m.clock as f64).sum::<f64>() / count;
@@ -154,13 +154,13 @@ fn import_with(world: &World, selected: &BTreeSet<u32>, game: &GameData, map: Op
     let in_port = |g: &Group, item: &str| -> Option<usize> {
         match g {
             Group::Recipe(r) => game.recipes[r].ingredients.iter().position(|a| a.item == item),
-            Group::Resource(_) | Group::Extractor(..) => None,
+            Group::Resource(..) | Group::Extractor(..) => None,
         }
     };
     let out_port = |g: &Group, item: &str| -> Option<usize> {
         match g {
             Group::Recipe(r) => game.recipes[r].products.iter().position(|a| a.item == item),
-            Group::Resource(res) | Group::Extractor(res, ..) => (res == item).then_some(0),
+            Group::Resource(res, _) | Group::Extractor(res, ..) => (res == item).then_some(0),
         }
     };
 
@@ -168,8 +168,8 @@ fn import_with(world: &World, selected: &BTreeSet<u32>, game: &GameData, map: Op
     // extractor group takes from its resource's deposit.
     let mut wires: BTreeSet<(usize, usize, usize, usize)> = BTreeSet::new();
     for g in groups.keys() {
-        if let Group::Extractor(res, ..) = g {
-            wires.insert((index[&Group::Resource(res.clone())], 0, index[g], 0));
+        if let Group::Extractor(res, _, p) = g {
+            wires.insert((index[&Group::Resource(res.clone(), *p)], 0, index[g], 0));
         }
     }
     let mut from_outside: BTreeSet<(Group, String)> = BTreeSet::new();
@@ -206,9 +206,9 @@ fn import_with(world: &World, selected: &BTreeSet<u32>, game: &GameData, map: Op
                     per_min(recipe, item, &recipe.products) * k * boost
                 }
             }
-            Group::Resource(res) => {
+            Group::Resource(res, p) => {
                 if !inputs && res == item {
-                    resource_rate[res]
+                    resource_rate[&(res.clone(), *p)]
                 } else {
                     0.0
                 }
