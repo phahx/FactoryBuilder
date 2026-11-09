@@ -135,6 +135,126 @@ pub fn route(g: &FactoryGraph) -> Routes {
     routes
 }
 
+/// Turns every belt (or pipe) that several machines share into mergers and
+/// splitters, as it would be built in game: the suppliers' wires join
+/// through mergers (three at a time) into one, which splitters (three ways
+/// at a time) share out to the consumers. For fluids, Pipeline Junctions do
+/// both. Wires between one supplier and one consumer stay as they are, and
+/// flows don't change (see the module notes).
+pub fn tidy(state: &mut EditorState, user: &mut UserState) {
+    use std::collections::BTreeMap;
+    let g = &state.graph;
+    // Belts: the item wires joined through shared ports, by union-find.
+    let wires: Vec<(InputId, OutputId)> = g
+        .iter_connections()
+        .filter(|(i, o)| matches!(g[*i].value, PortValue::Item(_)) && !is_router(&g[g[*o].node].user_data.kind) && !is_router(&g[g[*i].node].user_data.kind))
+        .collect();
+    let mut parent: Vec<usize> = (0..wires.len()).collect();
+    fn find(p: &mut [usize], mut x: usize) -> usize {
+        while p[x] != x {
+            p[x] = p[p[x]];
+            x = p[x];
+        }
+        x
+    }
+    let mut by_in: HashMap<InputId, usize> = HashMap::new();
+    let mut by_out: HashMap<OutputId, usize> = HashMap::new();
+    for (k, (i, o)) in wires.iter().enumerate() {
+        for first in [by_in.get(i).copied(), by_out.get(o).copied()].into_iter().flatten() {
+            let (a, b) = (find(&mut parent, first), find(&mut parent, k));
+            parent[a] = b;
+        }
+        by_in.entry(*i).or_insert(k);
+        by_out.entry(*o).or_insert(k);
+    }
+    let mut belts: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+    for k in 0..wires.len() {
+        let r = find(&mut parent, k);
+        belts.entry(r).or_default().push(k);
+    }
+    let z = state.pan_zoom.zoom;
+    let y_of = |state: &EditorState, n: NodeId| state.node_positions.get(n).map_or(0.0, |p| p.y);
+    for members in belts.into_values() {
+        let g = &state.graph;
+        let mut sources: Vec<OutputId> = Vec::new();
+        let mut sinks: Vec<InputId> = Vec::new();
+        for &k in &members {
+            let (i, o) = wires[k];
+            if !sources.contains(&o) {
+                sources.push(o);
+            }
+            if !sinks.contains(&i) {
+                sinks.push(i);
+            }
+        }
+        if sources.len() < 2 && sinks.len() < 2 {
+            continue;
+        }
+        let item = g[sources[0]].typ.0.clone();
+        // Top to bottom, so the trees don't cross themselves.
+        sources.sort_by(|a, b| y_of(state, g[*a].node).total_cmp(&y_of(state, g[*b].node)));
+        sinks.sort_by(|a, b| y_of(state, g[*a].node).total_cmp(&y_of(state, g[*b].node)));
+        for &k in &members {
+            let (i, o) = wires[k];
+            state.graph.remove_connection(i, o);
+        }
+        let mid = |state: &EditorState, ns: &[NodeId]| {
+            let ps: Vec<egui::Pos2> = ns.iter().filter_map(|n| state.node_positions.get(*n).copied()).collect();
+            let n = ps.len().max(1) as f32;
+            egui::pos2(ps.iter().map(|p| p.x).sum::<f32>() / n, ps.iter().map(|p| p.y).sum::<f32>() / n)
+        };
+        let wire = |state: &mut EditorState, o: OutputId, i: InputId| {
+            let pos = state.graph.connections(i).len();
+            state.graph.add_connection(o, i, pos);
+        };
+        let router_ports = |state: &EditorState, n: NodeId| (state.graph[n].inputs[0].1, state.graph[n].outputs[0].1);
+        // Join the suppliers, three at a time.
+        let mut level = sources;
+        while level.len() > 1 {
+            let groups = level.len().div_ceil(MERGER_INPUTS);
+            let size = level.len().div_ceil(groups);
+            let mut next = Vec::new();
+            for chunk in level.chunks(size) {
+                if chunk.len() == 1 {
+                    next.push(chunk[0]);
+                    continue;
+                }
+                let at = mid(state, &chunk.iter().map(|o| state.graph[*o].node).collect::<Vec<_>>()) + egui::vec2(200.0 * z, 0.0);
+                let m = crate::project::add_node_to(state, user, Template::Merger(item.clone()), at);
+                let (m_in, m_out) = router_ports(state, m);
+                for o in chunk {
+                    wire(state, *o, m_in);
+                }
+                next.push(m_out);
+            }
+            level = next;
+        }
+        // Share out to the consumers, three ways at a time.
+        let fluid = user.game.item_form(&item).is_fluid();
+        fn split(state: &mut EditorState, user: &mut UserState, item: &str, fluid: bool, from: OutputId, to: &[InputId], z: f32) {
+            if to.len() == 1 {
+                let pos = state.graph.connections(to[0]).len();
+                state.graph.add_connection(from, to[0], pos);
+                return;
+            }
+            let ns: Vec<egui::Pos2> = to.iter().filter_map(|i| state.node_positions.get(state.graph[*i].node).copied()).collect();
+            let n = ns.len().max(1) as f32;
+            let at = egui::pos2(ns.iter().map(|p| p.x).sum::<f32>() / n - 200.0 * z, ns.iter().map(|p| p.y).sum::<f32>() / n);
+            let template = if fluid { Template::Merger(item.to_string()) } else { Template::Splitter(item.to_string()) };
+            let s = crate::project::add_node_to(state, user, template, at);
+            let (s_in, s_out) = (state.graph[s].inputs[0].1, state.graph[s].outputs[0].1);
+            let pos = state.graph.connections(s_in).len();
+            state.graph.add_connection(from, s_in, pos);
+            let groups = to.len().min(SPLITTER_OUTPUTS);
+            let size = to.len().div_ceil(groups);
+            for chunk in to.chunks(size) {
+                split(state, user, item, fluid, s_out, chunk, z);
+            }
+        }
+        split(state, user, &item, fluid, level[0], &sinks, z);
+    }
+}
+
 /// A router: its icon, and what goes through it on hover.
 pub fn router_ui(ui: &mut Ui, rect: egui::Rect, node_id: NodeId, kind: &NodeKind, s: &mut UserState) {
     let game = s.game.clone();

@@ -624,6 +624,8 @@ impl FactoryApp {
                         Ok(SolveOutcome::Solved(plan)) => {
                             self.solve_notes.clear();
                             self.apply_plan(&plan);
+                            // Shared belts and pipes through mergers and splitters.
+                            crate::routers::tidy(&mut self.state, &mut self.user);
                             self.changed();
                             self.relayout = true;
                             self.say(
@@ -913,12 +915,9 @@ impl FactoryApp {
                 (a, b, pa, pb)
             })
             .collect();
-        let pos = fb_engine::layout::layered_ports(
-            ids.len(),
-            &wires,
-            theme::graph_style().node_width,
-            &heights,
-        );
+        // Mergers, splitters and poles are narrow; their columns are too.
+        let widths: Vec<f32> = ids.iter().map(|id| g[*id].user_data.knot_size().map_or(theme::graph_style().node_width, |s| s.x)).collect();
+        let pos = fb_engine::layout::layered_ports_widths(ids.len(), &wires, &widths, &heights);
         let zoom = self.state.pan_zoom.zoom;
         for (id, p) in ids.iter().zip(pos) {
             self.state

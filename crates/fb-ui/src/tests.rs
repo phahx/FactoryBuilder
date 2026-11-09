@@ -484,28 +484,38 @@ fn drag(ctx: &egui::Context, app: &mut FactoryApp, from: egui::Pos2, to: egui::P
     frames(ctx, app, 2);
 }
 
+/// Wired by hand (plans route shared belts through splitters and mergers):
+/// ore feeding two smelters, and a second ore node into the first smelter
+/// too. Returns the output with two wires and the input with two.
+fn fan_graph(ctx: &egui::Context, app: &mut FactoryApp) -> (egui_node_graph2::OutputId, egui_node_graph2::InputId) {
+    use crate::graph::Template;
+    frames(ctx, app, 2);
+    app.minimap = false;
+    let at = |app: &FactoryApp, x: f32, y: f32| app.screen_to_graph(egui::pos2(x, y));
+    let p = at(app, 420.0, 150.0);
+    let ore = app.add_test_node(Template::Resource("Desc_OreIron_C".into()), p);
+    let p = at(app, 420.0, 450.0);
+    let ore2 = app.add_test_node(Template::Resource("Desc_OreIron_C".into()), p);
+    let p = at(app, 820.0, 120.0);
+    let a = app.add_test_node(Template::Recipe("Recipe_IngotIron_C".into()), p);
+    let p = at(app, 820.0, 420.0);
+    let b = app.add_test_node(Template::Recipe("Recipe_IngotIron_C".into()), p);
+    let (input, output) = connect(app, ore, a, "Desc_OreIron_C");
+    connect(app, ore, b, "Desc_OreIron_C");
+    connect(app, ore2, a, "Desc_OreIron_C");
+    frames(ctx, app, 3);
+    (output, input)
+}
+
 #[test]
 fn each_output_bubble_pulls_its_own_wire() {
     use egui_node_graph2::AnyParameterId;
     let Some((ctx, mut app, _)) = harness() else {
         return;
     };
-    frames(&ctx, &mut app, 2);
-    // Reinforced Iron Plate: the smelters' ingots feed both plates and rods,
-    // so one output carries two wires.
-    app.planner_mut().targets = vec![Target {
-        item: "Desc_IronPlateReinforced_C".into(),
-        rate: 5.0,
-    }];
-    app.press_plan();
-    frames(&ctx, &mut app, 8);
-    let g = app.graph();
-    let (output, wires): (_, Vec<_>) = g
-        .outputs
-        .keys()
-        .map(|o| (o, g.output_connections(o)))
-        .find(|(_, w)| w.len() >= 2)
-        .expect("an output with two wires");
+    let (output, _) = fan_graph(&ctx, &mut app);
+    let wires = app.graph().output_connections(output);
+    assert_eq!(wires.len(), 2);
     let hooks = app.port_hooks[&AnyParameterId::Output(output)].clone();
     assert_eq!(
         hooks.len(),
@@ -575,20 +585,9 @@ fn input_bubble_pulls_its_own_wire() {
     let Some((ctx, mut app, _)) = harness() else {
         return;
     };
-    frames(&ctx, &mut app, 2);
-    app.planner_mut().targets = vec![Target {
-        item: "Desc_IronPlateReinforced_C".into(),
-        rate: 5.0,
-    }];
-    app.press_plan();
-    frames(&ctx, &mut app, 8);
-    // Find an input fed by two outputs, if the plan has one; otherwise
-    // dragging the single wire must still take exactly that wire.
-    let g = app.graph();
-    let (input, outs) = g
-        .iter_connection_groups()
-        .max_by_key(|(_, o)| o.len())
-        .expect("a connected input");
+    let (_, input) = fan_graph(&ctx, &mut app);
+    let outs = app.graph().connections(input);
+    assert_eq!(outs.len(), 2);
     let hooks = app.port_hooks[&AnyParameterId::Input(input)].clone();
     assert_eq!(hooks.len(), outs.len() + 1);
     let last = outs.len() - 1;
@@ -720,19 +719,8 @@ fn connecting_by_hand_keeps_existing_wire_order() {
     let Some((ctx, mut app, _)) = harness() else {
         return;
     };
-    frames(&ctx, &mut app, 2);
-    app.planner_mut().targets = vec![Target {
-        item: "Desc_IronPlateReinforced_C".into(),
-        rate: 5.0,
-    }];
-    app.press_plan();
-    frames(&ctx, &mut app, 8);
+    let (output, _) = fan_graph(&ctx, &mut app);
     let g = app.graph();
-    let output = g
-        .outputs
-        .keys()
-        .find(|o| g.output_connections(*o).len() >= 2)
-        .expect("an output with two wires");
     let item = g[output].typ.0.clone();
     let before = g.output_connections(output);
     // The sinks go in the canvas's bottom-right corner, where the minimap sits.
@@ -2380,6 +2368,58 @@ fn mergers_and_splitters_route_wires_without_changing_flows() {
     let game = app.user.game.clone();
     let water = NodeKind::Merger { item: "Desc_Water_C".into() };
     assert_eq!((crate::routers::name(&game, &water), crate::routers::icon(&game, &water)), ("Pipeline Junction", "Desc_PipelineJunction_Cross_C"));
+}
+
+#[test]
+fn plans_share_belts_and_pipes_through_mergers_splitters_and_junctions() {
+    use crate::graph::NodeKind;
+    let Some((ctx, mut app, _)) = harness() else { return };
+    frames(&ctx, &mut app, 2);
+    // Heavy Modular Frames and Plastic with every recipe: belts and pipes
+    // shared by several machines.
+    app.planner_mut().targets = vec![Target { item: "Desc_ModularFrameHeavy_C".into(), rate: 4.0 }, Target { item: "Desc_Plastic_C".into(), rate: 30.0 }];
+    app.planner_mut().enabled = app.user.game.recipes.keys().cloned().collect();
+    app.press_plan();
+    frames(&ctx, &mut app, 8);
+    let g = app.graph();
+    let game = app.user.game.clone();
+    let router = |n: egui_node_graph2::NodeId| crate::routers::is_router(&g[n].user_data.kind);
+    let (mut mergers, mut splitters, mut junctions) = (0, 0, 0);
+    for n in g.iter_nodes() {
+        let kind = &g[n].user_data.kind;
+        let ins: usize = g[n].inputs.iter().map(|(_, i)| g.connections(*i).len()).sum();
+        let outs: usize = g[n].outputs.iter().map(|(_, o)| g.output_connections(*o).len()).sum();
+        match kind {
+            NodeKind::Merger { item } | NodeKind::Splitter { item } if game.item_form(item).is_fluid() => {
+                junctions += 1;
+                assert!(ins + outs <= crate::routers::JUNCTION_PIPES && ins >= 1 && outs >= 1, "junction {ins} in {outs} out");
+            }
+            NodeKind::Merger { .. } => {
+                mergers += 1;
+                assert!((2..=crate::routers::MERGER_INPUTS).contains(&ins) && outs == 1, "merger {ins} in {outs} out");
+            }
+            NodeKind::Splitter { .. } => {
+                splitters += 1;
+                assert!(ins == 1 && (2..=crate::routers::SPLITTER_OUTPUTS).contains(&outs), "splitter {ins} in {outs} out");
+            }
+            _ => {
+                // A machine's port never shares a wire with another machine's now.
+                for (_, i) in &g[n].inputs {
+                    assert!(g.connections(*i).len() <= 1 || g.connections(*i).iter().all(|o| router(g[*o].node)), "{} has a shared input", g[n].label);
+                }
+                for (_, o) in &g[n].outputs {
+                    assert!(g.output_connections(*o).len() <= 1, "{} has a shared output", g[n].label);
+                }
+            }
+        }
+    }
+    eprintln!("mergers {mergers}, splitters {splitters}, junctions {junctions}");
+    assert!(mergers + splitters > 0 && junctions > 0, "belts and pipes both shared in this plan");
+    // Same factory as before: everything delivered, nothing short.
+    for (item, got, want) in app.outputs() {
+        assert!((got - want).abs() < want * 1e-3 + 1e-6, "{item}: {got} of {want}");
+    }
+    assert!(app.summary.issues.is_empty(), "{:?}", app.summary.issues);
 }
 
 #[test]

@@ -52,8 +52,31 @@ pub fn layered_sized(n: usize, edges: &[(usize, usize)], width: f32, heights: &[
 /// to, from_port_y, to_port_y)`, the port heights measured from each node's
 /// top. Nodes line up on their ports, so wires run level.
 pub fn layered_ports(n: usize, wires: &[(usize, usize, f32, f32)], width: f32, heights: &[f32]) -> Vec<[f32; 2]> {
+    let (layer, y) = place(n, wires, heights);
+    (0..n).map(|i| [40.0 + layer[i] as f32 * (width + GAP_X), y[i]]).collect()
+}
+
+/// Like [`layered_ports`], for nodes of different widths: each column is as
+/// wide as its widest node, and narrower nodes sit in its middle.
+pub fn layered_ports_widths(n: usize, wires: &[(usize, usize, f32, f32)], widths: &[f32], heights: &[f32]) -> Vec<[f32; 2]> {
+    let (layer, y) = place(n, wires, heights);
+    let w = |i: usize| widths.get(i).copied().unwrap_or(COLUMN_WIDTH);
+    let columns = layer.iter().max().map_or(0, |m| m + 1);
+    let mut col = vec![0.0f32; columns];
+    for i in 0..n {
+        col[layer[i]] = col[layer[i]].max(w(i));
+    }
+    let mut left = vec![40.0f32; columns];
+    for c in 1..columns {
+        left[c] = left[c - 1] + col[c - 1] + GAP_X;
+    }
+    (0..n).map(|i| [left[layer[i]] + (col[layer[i]] - w(i)) / 2.0, y[i]]).collect()
+}
+
+/// Each node's column and top.
+fn place(n: usize, wires: &[(usize, usize, f32, f32)], heights: &[f32]) -> (Vec<usize>, Vec<f32>) {
     if n == 0 {
-        return Vec::new();
+        return (Vec::new(), Vec::new());
     }
     let pairs: Vec<(usize, usize)> = wires.iter().map(|w| (w.0, w.1)).collect();
     let dag = acyclic(n, &pairs);
@@ -77,7 +100,7 @@ pub fn layered_ports(n: usize, wires: &[(usize, usize, f32, f32)], width: f32, h
     let mut lg = LayerGraph::new(n, &oriented, &layer, |i| heights.get(i).copied().unwrap_or(ROW_HEIGHT - GAP_Y));
     lg.order();
     let y = lg.rows();
-    (0..n).map(|i| [40.0 + layer[i] as f32 * (width + GAP_X), y[i]]).collect()
+    (layer, y)
 }
 
 /// The edges (deduplicated, no self loops) with cycles broken by turning
@@ -447,6 +470,16 @@ mod tests {
             }
         }
         count
+    }
+
+    #[test]
+    fn narrow_nodes_get_narrow_columns() {
+        // A wide node, a small one, a wide one.
+        let wires = [(0, 1, 50.0, 18.0), (1, 2, 18.0, 50.0)];
+        let p = layered_ports_widths(3, &wires, &[300.0, 36.0, 300.0], &[100.0, 36.0, 100.0]);
+        assert_eq!(p[0][0], 40.0);
+        assert_eq!(p[1][0], 40.0 + 300.0 + GAP_X, "right after the first column");
+        assert_eq!(p[2][0], 40.0 + 300.0 + GAP_X + 36.0 + GAP_X, "the small column is only as wide as its node");
     }
 
     #[test]
