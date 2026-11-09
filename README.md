@@ -121,8 +121,9 @@ save left them (saves don't keep names), and its Live map button sets up two opt
 
 - **A dedicated server.** The Map tab follows the newest save of the session it's running,
   through the game's own server API (`https://<server>:7777/api/v1`), and downloads a save only
-  when there's a newer one. Make an API token with `server.GenerateAPIToken` in the server
-  console. The token is kept encrypted for your Windows account and only ever sent to that
+  when there's a newer one. For its API token, open Server Manager in Satisfactory, pick the
+  server, sign in as admin, and type `server.GenerateAPIToken` in its Console tab (the only
+  place server commands run, rented servers included). The token is kept encrypted for your Windows account and only ever sent to that
   server. Its certificate is usually self-signed, so, as the game does, you confirm its
   fingerprint once; a different certificate is refused until you confirm it again.
 - **The [Ficsit Remote Monitoring](https://ficsit.app/mod/FicsitRemoteMonitoring) mod**, on

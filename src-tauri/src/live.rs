@@ -165,13 +165,13 @@ pub fn api_data(r: &Reply) -> Result<Value, String> {
     if let Some(code) = v.get("errorCode").and_then(Value::as_str) {
         let msg = v.get("errorMessage").and_then(Value::as_str).unwrap_or("");
         return Err(match (r.status, code) {
-            (401 | 403, _) => "The server refused the API token. Make a new one with server.GenerateAPIToken in the server console.".to_string(),
+            (401 | 403, _) => "The server refused the API token. Make a new one: in Satisfactory, Server Manager › this server › Console, type server.GenerateAPIToken.".to_string(),
             _ if msg.is_empty() => format!("The server said: {code}"),
             _ => format!("The server said: {msg} ({code})"),
         });
     }
     if r.status == 401 || r.status == 403 {
-        return Err("The server refused the API token. Make a new one with server.GenerateAPIToken in the server console.".into());
+        return Err("The server refused the API token. Make a new one: in Satisfactory, Server Manager › this server › Console, type server.GenerateAPIToken.".into());
     }
     if !(200..300).contains(&r.status) {
         return Err(format!("The server answered HTTP {}.", r.status));

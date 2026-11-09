@@ -498,7 +498,7 @@ pub fn dialog(app: &mut FactoryApp, ctx: &egui::Context, draft: &mut LiveSetting
                     save_token = widgets::button_enabled(ui, "Save token", !token.trim().is_empty()).clicked();
                 }
             });
-            widgets::caption(ui, "Make one by typing server.GenerateAPIToken in the server's console. It's only ever sent to this server.");
+            widgets::caption(ui, "To make one: in Satisfactory, open Server Manager, pick this server, sign in as admin, and in its Console tab type server.GenerateAPIToken. Copy what it prints and paste it here. This works for rented servers too (BisectHosting and the like): commands only run from that Console tab, not from a hosting panel. The token is only ever sent to this server.");
             ui.horizontal(|ui| {
                 do_check = widgets::button_enabled(ui, if checking { "Checking…" } else { "Check server" }, !checking && !draft.server_host.trim().is_empty()).clicked();
             });
