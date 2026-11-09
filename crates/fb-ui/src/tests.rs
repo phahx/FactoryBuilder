@@ -525,7 +525,8 @@ fn each_output_bubble_pulls_its_own_wire() {
     let wires = app.graph().output_connections(output);
     assert_eq!(wires.len(), 2);
     let hooks = app.port_hooks[&AnyParameterId::Output(output)].clone();
-    assert_eq!(hooks.len(), wires.len(), "one bubble per wire, and no free ring: the port is full");
+    // A resource takes any number of wires (it's the ground, not a belt).
+    assert_eq!(hooks.len(), wires.len() + 1, "one bubble per wire plus a free ring");
     // Pull the second bubble's wire off and drop it on empty canvas.
     drag(
         &ctx,
@@ -725,28 +726,28 @@ fn a_full_port_takes_no_more_wires() {
     };
     frames(&ctx, &mut app, 2);
     app.minimap = false;
-    // Ore feeding one smelter: the ore's one belt is taken.
+    // A smelter sending its ingots to an Output: its one belt is taken.
     let at = |app: &FactoryApp, x: f32, y: f32| app.screen_to_graph(egui::pos2(x, y));
     let p = at(&app, 420.0, 150.0);
-    let ore = app.add_test_node(Template::Resource("Desc_OreIron_C".into()), p);
-    let p = at(&app, 820.0, 150.0);
     let smelter = app.add_test_node(Template::Recipe("Recipe_IngotIron_C".into()), p);
+    let p = at(&app, 820.0, 150.0);
+    let output = app.add_test_node(Template::Output("Desc_IronIngot_C".into()), p);
     let p = at(&app, 820.0, 600.0);
-    let sink = app.add_test_node(Template::Sink("Desc_OreIron_C".into()), p);
-    connect(&mut app, ore, smelter, "Desc_OreIron_C");
+    let sink = app.add_test_node(Template::Sink("Desc_IronIngot_C".into()), p);
+    connect(&mut app, smelter, output, "Desc_IronIngot_C");
     frames(&ctx, &mut app, 3);
-    let out = app.graph()[ore].outputs[0].1;
+    let out = app.graph()[smelter].outputs[0].1;
     assert_eq!(app.port_hooks[&AnyParameterId::Output(out)].len(), 1, "no free ring");
     let sink_in = app.graph()[sink].inputs[0].1;
-    // Dropped on the ore's bubble, or on the ore node: no second belt.
+    // Dropped on the smelter's bubble, or on the smelter: no second belt.
     let sink_ring = app.port_hooks[&AnyParameterId::Input(sink_in)][0];
     let bubble = app.port_hooks[&AnyParameterId::Output(out)][0];
     drag(&ctx, &mut app, sink_ring, bubble);
     let sink_ring = app.port_hooks[&AnyParameterId::Input(sink_in)][0];
-    let body = app.node_rects[&ore].center();
+    let body = app.node_rects[&smelter].center();
     drag(&ctx, &mut app, sink_ring, body);
     let g = app.graph();
-    assert_eq!(g.output_connections(out).len(), 1, "still one belt out of the ore");
+    assert_eq!(g.output_connections(out).len(), 1, "still one belt out of the smelter");
     assert!(g.connections(sink_in).is_empty(), "the sink got none");
 }
 
