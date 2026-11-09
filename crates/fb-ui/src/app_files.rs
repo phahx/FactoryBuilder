@@ -65,7 +65,7 @@ pub fn is_project_path(path: &str) -> bool {
 /// rest); a file's wires refer to nodes by their place in it.
 pub(crate) fn portable_order(state: &EditorState) -> Vec<NodeId> {
     let g = &state.graph;
-    let plain = |id: &NodeId| g.nodes.contains_key(*id) && !matches!(g[*id].user_data.kind, NodeKind::Factory { .. });
+    let plain = |id: &NodeId| g.nodes.contains_key(*id) && !matches!(g[*id].user_data.kind, NodeKind::Factory { .. } | NodeKind::Pole { .. });
     let mut ids: Vec<NodeId> = state.node_order.iter().copied().filter(plain).collect();
     for id in g.iter_nodes() {
         if plain(&id) && !ids.contains(&id) {
@@ -149,7 +149,7 @@ impl FactoryApp {
                 NodeKind::Input { item } => (portable::Kind::Input, item.clone()),
                 NodeKind::Output { item } => (portable::Kind::Output, item.clone()),
                 NodeKind::Sink { item } => (portable::Kind::Sink, item.clone()),
-                NodeKind::Factory { .. } => continue, // only on the master graph
+                NodeKind::Factory { .. } | NodeKind::Pole { .. } => continue, // only on the master graph
             };
             let is_recipe = kind == portable::Kind::Recipe;
             let has_rate = matches!(kind, portable::Kind::Resource | portable::Kind::Input | portable::Kind::Output);
@@ -222,6 +222,8 @@ impl FactoryApp {
             recipe_filter: self.planner.recipe_filter.clone(),
             // Frames come with the nodes (insert_portable).
             frames: Vec::new(),
+            // Only the master graph has power grids (load_project_file).
+            power_net: Default::default(),
             power: PowerSettings {
                 mode: if plan.generate_power { PowerMode::Generate } else { PowerMode::Grid },
                 generators: match &plan.generators {

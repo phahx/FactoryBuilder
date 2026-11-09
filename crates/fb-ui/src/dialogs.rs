@@ -293,8 +293,8 @@ pub fn show(app: &mut FactoryApp, ctx: &egui::Context) {
                     });
                     ui.add_space(12.0);
                     let text = format!(
-                        "{} factories · {} links between them · {} machines",
-                        r.factories, r.links, r.machines
+                        "{} factories · {} links between them · {} power circuits · {} machines",
+                        r.factories, r.links, r.circuits, r.machines
                     );
                     ui.label(RichText::new(text).color(TEXT));
                     if r.left_out > 0 {

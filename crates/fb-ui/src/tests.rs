@@ -2100,6 +2100,191 @@ fn master_graph_links_factories_and_flags_shortfalls() {
     assert!(!app.is_dirty());
 }
 
+/// `machines` Coal-Powered Generators fed coal and water from resource
+/// nodes (rates from the game's own recipe).
+fn power_plant(app: &FactoryApp, name: &str, machines: f64) -> crate::portable::FactoryFile {
+    use crate::portable::{FactoryFile, Kind, Node, Wire};
+    let gen = fb_model::DEFAULT_GENERATOR;
+    let r = &app.user.game.recipes[gen];
+    let mut f = FactoryFile::new(Some(name.into()));
+    f.nodes.push(Node { kind: Kind::Recipe, class: gen.into(), machines: Some(machines), clock: Some(100.0), sloops: None, rate: None, name: None, color: None, x: 400.0, y: 0.0 });
+    for (k, a) in r.ingredients.iter().enumerate() {
+        f.nodes.push(Node { kind: Kind::Resource, class: a.item.clone(), machines: None, clock: None, sloops: None, rate: Some(r.per_min(a) * machines), name: None, color: None, x: 0.0, y: 200.0 * k as f32 });
+        f.wires.push(Wire { from: k + 1, output: 0, to: 0, input: k, slot: 0 });
+    }
+    f
+}
+
+/// Power wires on the master graph (any direction), as (from node, to node).
+fn power_wires(app: &FactoryApp) -> Vec<(egui_node_graph2::NodeId, egui_node_graph2::NodeId)> {
+    let g = &app.state.graph;
+    g.iter_connections().filter(|(i, _)| g[*i].typ.0 == crate::power_net::POWER).map(|(i, o)| (g[o].node, g[i].node)).collect()
+}
+
+/// Factory `factory`'s block's power input (`input`) or output, if shown.
+fn power_port(app: &FactoryApp, factory: u32, input: bool) -> bool {
+    let g = &app.state.graph;
+    let b = crate::project::block_of(g, factory).unwrap();
+    let is = |t: &String| t == crate::power_net::POWER;
+    if input {
+        g[b].inputs.iter().any(|(_, i)| is(&g[*i].typ.0))
+    } else {
+        g[b].outputs.iter().any(|(_, o)| is(&g[*o].typ.0))
+    }
+}
+
+/// Wires factory `factory`'s power port to pole `pole` (whichever way it
+/// goes), as dragging a wire does.
+fn wire_to_pole(app: &mut FactoryApp, factory: u32, pole: u32) {
+    let g = &app.state.graph;
+    let b = crate::project::block_of(g, factory).unwrap();
+    let p = crate::power_net::pole_node(g, pole).unwrap();
+    let out = |n: egui_node_graph2::NodeId| g[n].outputs.iter().map(|(_, o)| *o).find(|o| g[*o].typ.0 == crate::power_net::POWER);
+    let inp = |n: egui_node_graph2::NodeId| g[n].inputs.iter().map(|(_, i)| *i).find(|i| g[*i].typ.0 == crate::power_net::POWER);
+    let (o, i) = match out(b) {
+        Some(o) => (o, inp(p).unwrap()),
+        None => (out(p).unwrap(), inp(b).unwrap()),
+    };
+    let pos = app.state.graph.connections(i).len();
+    app.state.graph.add_connection(o, i, pos);
+    app.changed();
+}
+
+#[test]
+fn power_poles_show_which_factories_power_which() {
+    use crate::power_net::{pole_node, MADE, PORT, USED};
+    let Some((ctx, mut app, store)) = harness() else { return };
+    frames(&ctx, &mut app, 2);
+    let plant_file = power_plant(&app, "Coal power", 2.0);
+    app.add_factory_file(&ctx, &plant_file);
+    let plant = app.active;
+    app.add_factory_file(&ctx, &ingot_factory("Smelting", 1.0));
+    let smelting = app.active;
+    app.add_factory_file(&ctx, &rod_factory("Rods"));
+    let rods = app.active;
+    press(&ctx, &mut app, "Project");
+    frames(&ctx, &mut app, 2);
+    let made_mw = app.factory_info(plant).generation.expect("the plant makes power");
+    let smelting_mw = app.factory_info(smelting).power_mw;
+    let rods_mw = app.factory_info(rods).power_mw;
+    assert!(made_mw > 0.0 && smelting_mw > 0.0 && rods_mw > 0.0);
+
+    // Power ports: out of the plant (it makes more than it uses), into the others.
+    assert!(power_port(&app, plant, false) && !power_port(&app, plant, true));
+    assert!(power_port(&app, smelting, true) && !power_port(&app, smelting, false));
+    assert!(power_wires(&app).is_empty(), "nothing wired yet");
+
+    // A pole from the canvas menu; the plant and the smelters wired to it.
+    app.new_pole_at(egui::pos2(0.0, -400.0));
+    frames(&ctx, &mut app, 2);
+    assert_eq!(app.planner.power_net.poles.len(), 1);
+    let pole = app.planner.power_net.poles[0].id;
+    let node = pole_node(&app.state.graph, pole).expect("its node");
+    assert_eq!(app.state.selected_nodes, vec![node]);
+    wire_to_pole(&mut app, plant, pole);
+    wire_to_pole(&mut app, smelting, pole);
+    frames(&ctx, &mut app, 2);
+    assert_eq!(app.planner.power_net.links.len(), 2);
+    let stat = |app: &FactoryApp, n, name: &str| app.user.ports[&(n, name.to_string())];
+    let node = pole_node(&app.state.graph, pole).unwrap();
+    assert!((stat(&app, node, MADE).have - made_mw).abs() < 1e-6);
+    assert!((stat(&app, node, USED).have - smelting_mw).abs() < 1e-6);
+    let sb = crate::project::block_of(&app.state.graph, smelting).unwrap();
+    let s = stat(&app, sb, PORT);
+    assert!(s.connected && (s.have - s.want).abs() < 1e-9, "fully powered: {s:?}");
+    assert!(app.summary.issues.is_empty(), "{:?}", app.summary.issues);
+    // Item flows don't see power wires.
+    assert!(app.project_totals().from_outside.contains_key("Desc_IronIngot_C"));
+
+    // View > Power connections off: no pole, no power ports, no power
+    // wires; they're kept, and come back when it's turned on again.
+    app.power_links = false;
+    frames(&ctx, &mut app, 2);
+    assert!(pole_node(&app.state.graph, pole).is_none());
+    assert!(!power_port(&app, plant, false) && !power_port(&app, smelting, true));
+    assert!(power_wires(&app).is_empty());
+    assert_eq!(app.planner.power_net.links.len(), 2);
+    app.power_links = true;
+    frames(&ctx, &mut app, 2);
+    assert_eq!(power_wires(&app).len(), 2);
+
+    // Disconnecting takes the wire away; Undo puts it back.
+    let g = &app.state.graph;
+    let sb = crate::project::block_of(g, smelting).unwrap();
+    let i = g[sb].inputs.iter().map(|(_, i)| *i).find(|i| g[*i].typ.0 == crate::power_net::POWER).unwrap();
+    let o = g.connections(i)[0];
+    app.state.graph.remove_connection(i, o);
+    app.changed();
+    frames(&ctx, &mut app, 2);
+    assert_eq!(app.planner.power_net.links.len(), 1);
+    app.undo();
+    frames(&ctx, &mut app, 2);
+    assert_eq!(app.planner.power_net.links.len(), 2);
+    assert_eq!(power_wires(&app).len(), 2);
+
+    // Short: the rods join, and the plant runs a fifth of one generator.
+    wire_to_pole(&mut app, rods, pole);
+    frames(&ctx, &mut app, 2);
+    app.activate(plant);
+    let gen = app.state.graph.iter_nodes().find(|n| matches!(app.state.graph[*n].user_data.kind, crate::graph::NodeKind::Recipe { .. })).unwrap();
+    let i = app.state.graph[gen].get_input(crate::graph::MACHINES).unwrap();
+    app.state.graph[i].value.set_number(0.2);
+    app.changed();
+    frames(&ctx, &mut app, 2);
+    let small = app.factory_info(plant).generation.unwrap();
+    assert!(small < smelting_mw + rods_mw, "{small} MW for {} MW", smelting_mw + rods_mw);
+    press(&ctx, &mut app, "Project");
+    frames(&ctx, &mut app, 2);
+    let short = crate::fmt::fmt_num(smelting_mw + rods_mw - small);
+    let issues: Vec<String> = app.summary.issues.iter().map(|i| i.1.clone()).collect();
+    assert!(issues.iter().any(|i| *i == format!("Power for Rods and 1 more is {short} MW short")), "{issues:?}");
+    let rb = crate::project::block_of(&app.state.graph, rods).unwrap();
+    let s = stat(&app, rb, PORT);
+    assert!((s.have - rods_mw * small / (smelting_mw + rods_mw)).abs() < 1e-6, "its share of what's made: {s:?}");
+    // However many wires, a pole has one bubble each side.
+    let g = &app.state.graph;
+    let node = pole_node(g, pole).unwrap();
+    let out = g[node].outputs[0].1;
+    assert_eq!(g.output_connections(out).len(), 2);
+    app.request_frame_all();
+    frames(&ctx, &mut app, 2);
+    assert_eq!(app.port_hooks[&egui_node_graph2::AnyParameterId::Output(out)].len(), 1);
+    // Selecting a factory lights its whole circuit.
+    app.state.selected_nodes = vec![rb];
+    frames(&ctx, &mut app, 1);
+    assert_eq!(app.user.power_lit.len(), 3);
+    app.state.selected_nodes.clear();
+    frames(&ctx, &mut app, 1);
+    assert!(app.user.power_lit.is_empty());
+
+    // Saved and opened again: the pole and the wires come back.
+    let path = "C:/Factories/Power.fbproject";
+    app.save_as(path);
+    frames(&ctx, &mut app, 2);
+    let text = store.borrow().get(path).cloned().expect("written");
+    let p = crate::portable::ProjectFile::parse(&text).unwrap();
+    assert_eq!((p.poles.len(), p.power_links.len()), (1, 3));
+    app.new_project();
+    frames(&ctx, &mut app, 1);
+    app.open(path);
+    frames(&ctx, &mut app, 3);
+    assert_eq!(power_wires(&app).len(), 3);
+    assert!(!app.is_dirty(), "opening isn't an edit");
+
+    // Deleting the pole deletes its wires (no question asked; Undo).
+    let pole = app.planner.power_net.poles[0].id;
+    let node = pole_node(&app.state.graph, pole).unwrap();
+    app.state.selected_nodes = vec![node];
+    app.delete_selected();
+    frames(&ctx, &mut app, 2);
+    assert!(app.planner.power_net.poles.is_empty() && app.planner.power_net.links.is_empty());
+    assert!(power_wires(&app).is_empty());
+    assert!(matches!(app.dialog, crate::dialogs::Dialog::None));
+    app.undo();
+    frames(&ctx, &mut app, 2);
+    assert_eq!(power_wires(&app).len(), 3);
+}
+
 #[test]
 fn factory_tabs_keep_their_own_graph_and_history() {
     let Some((ctx, mut app, store)) = harness() else { return };

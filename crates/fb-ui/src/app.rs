@@ -42,6 +42,9 @@ pub struct Planner {
     /// files and rooms carry them).
     #[serde(default)]
     pub frames: Vec<crate::frames::CommentFrame>,
+    /// The master graph's power grids (only the master graph has any).
+    #[serde(default, skip_serializing_if = "crate::power_net::PowerNet::is_empty")]
+    pub power_net: crate::power_net::PowerNet,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -161,6 +164,8 @@ pub struct FactoryApp {
     pub(crate) find: Option<crate::navigate::FindState>,
     /// View › Minimap.
     pub(crate) minimap: bool,
+    /// View › Power connections: power grids on the master graph.
+    pub(crate) power_links: bool,
     /// The master graph's right-click menu on empty canvas: where it opened
     /// (screen) and where a factory added from it goes (unzoomed graph).
     pub(crate) master_menu: Option<(egui::Pos2, egui::Pos2)>,
@@ -279,6 +284,7 @@ impl FactoryApp {
             frames: Default::default(),
             find: None,
             minimap: true,
+            power_links: true,
             master_menu: None,
             block_spot: None,
             factory_menu: None,
@@ -568,7 +574,7 @@ impl FactoryApp {
                     let first = self.status.is_none();
                     if first {
                         let v = &s.settings.view;
-                        (self.snap, self.wire_labels, self.minimap) = (v.snap_to_grid, v.wire_labels, v.minimap);
+                        (self.snap, self.wire_labels, self.minimap, self.power_links) = (v.snap_to_grid, v.wire_labels, v.minimap, v.power_links);
                         (self.map.hide_power, self.map.hide_flow) = (!v.map_power, !v.map_belt_flow);
                     }
                     let setup_done = s.settings.setup_done;
@@ -993,7 +999,13 @@ impl FactoryApp {
     pub(crate) fn delete_selected(&mut self) {
         if self.on_master() {
             let g = &self.state.graph;
+            // Poles go now (Undo brings them back); factories ask first.
+            let poles: Vec<u32> = self.state.selected_nodes.iter().filter_map(|n| crate::power_net::pole_of(g, *n)).collect();
             let ids: Vec<u32> = self.state.selected_nodes.iter().filter_map(|n| crate::project::factory_of(g, *n)).collect();
+            if !poles.is_empty() {
+                crate::power_net::remove_poles(&mut self.state, &mut self.planner.power_net, &poles);
+                self.changed();
+            }
             if !ids.is_empty() {
                 self.dialog = Dialog::DeleteFactories { ids };
             }
@@ -1428,6 +1440,33 @@ impl FactoryApp {
                     self.frame_all = false;
                     self.state.pan_zoom.pan = vec2(24.0, 24.0);
                 }
+                // The project from the save with its biggest power plant
+                // selected: what its grid powers lights up.
+                "power_lit" => {
+                    self.frame_all = true;
+                    let g = &self.state.graph;
+                    let plant = g
+                        .iter_nodes()
+                        .filter_map(|n| match g[n].user_data.kind {
+                            NodeKind::Factory { uses_mw, makes_mw, .. } => Some((n, makes_mw - uses_mw)),
+                            _ => None,
+                        })
+                        .max_by(|a, b| a.1.total_cmp(&b.1));
+                    self.state.selected_nodes = plant.map(|p| vec![p.0]).unwrap_or_default();
+                }
+                // Some factories and their poles up close.
+                "power_close" => {
+                    self.state.selected_nodes.clear();
+                    let pole = self.planner.power_net.poles.get(self.planner.power_net.poles.len() / 3).and_then(|p| crate::power_net::pole_node(&self.state.graph, p.id));
+                    if let Some(id) = pole {
+                        let k = 1.0 / self.state.pan_zoom.zoom;
+                        for (_, p) in self.state.node_positions.iter_mut() {
+                            *p = (p.to_vec2() * k).to_pos2();
+                        }
+                        self.state.pan_zoom.zoom(egui::Rect::EVERYTHING, &std::sync::Arc::new(_ctx.style().as_ref().clone()), k);
+                        self.focus_node = Some(id);
+                    }
+                }
                 // README screenshots: a typical factory (Motors, standard
                 // recipes) in a new project, as Plan factory lays it out.
                 // The plan arrives a few frames later, so it's shot in the
@@ -1735,6 +1774,15 @@ impl FactoryApp {
         }
         let frame_slot = Self::frames_slot(ui);
         let selected_before = self.state.selected_nodes.clone();
+        // Power wires about what's selected or under the pointer stand out.
+        self.user.power_lit.clear();
+        if self.on_master() && self.power_links {
+            let mut focus = self.state.selected_nodes.clone();
+            if let Some(p) = ui.input(|i| i.pointer.hover_pos()).filter(|p| rect.contains(*p)) {
+                focus.extend(self.node_rects.iter().filter(|(_, r)| r.contains(p)).map(|(id, _)| *id).last());
+            }
+            self.user.power_lit = crate::power_net::lit_wires(&self.state.graph, &focus);
+        }
         let resp = self
             .state
             .draw_graph_editor(ui, &self.templates, &mut self.user, Vec::new());
@@ -1757,6 +1805,10 @@ impl FactoryApp {
         }
         if !ui.input(|i| i.pointer.any_down()) {
             self.snap_raw.clear();
+        }
+        // Wiring, moving or renaming grids on the master graph.
+        if self.on_master() && self.power_links {
+            crate::power_net::read_back(&self.state, &mut self.planner.power_net);
         }
         let frame_menu = self.frames_ui(ui, rect, frame_slot);
         if frame_menu {
@@ -1915,6 +1967,8 @@ impl FactoryApp {
         let g = &self.state.graph;
         let title = if self.context_targets.len() > 1 { format!("{} nodes", self.context_targets.len()) } else { g[node].label.clone() };
         let factory = crate::project::factory_of(g, node);
+        // A pole has no name, colour or settings to copy.
+        let only_poles = self.context_targets.iter().all(|n| crate::power_net::pole_of(g, *n).is_some());
         let current = g[node].user_data.color;
         let on_master = self.on_master();
         let mut custom = self.custom_color;
@@ -1926,9 +1980,11 @@ impl FactoryApp {
             if factory.is_some() {
                 do_open = item(ui, "Open", "Double-click", true).clicked();
             }
-            do_rename = item(ui, "Rename", "F2", true).clicked();
-            separator(ui);
-            do_duplicate = item(ui, "Duplicate", "Ctrl+D", true).clicked();
+            if !only_poles {
+                do_rename = item(ui, "Rename", "F2", true).clicked();
+                separator(ui);
+                do_duplicate = item(ui, "Duplicate", "Ctrl+D", true).clicked();
+            }
             do_delete = item(ui, "Delete", "Del", true).clicked();
             do_frame = item(ui, "Add comment frame", "C", true).clicked();
             if !on_master {
@@ -1937,8 +1993,10 @@ impl FactoryApp {
                     .on_hover_text("Moves these nodes into a factory of their own, linked to this one on the master graph.")
                     .clicked();
             }
-            separator(ui);
-            pick = crate::menus::colours(ui, assets.as_mut(), current, &mut custom, &mut swatches);
+            if !only_poles {
+                separator(ui);
+                pick = crate::menus::colours(ui, assets.as_mut(), current, &mut custom, &mut swatches);
+            }
         });
         self.user.assets = assets;
         self.custom_color = custom;
@@ -1989,6 +2047,7 @@ impl FactoryApp {
                 snap_to_grid: self.snap,
                 wire_labels: self.wire_labels,
                 minimap: self.minimap,
+                power_links: self.power_links,
                 map_power: !self.map.hide_power,
                 map_belt_flow: !self.map.hide_flow,
             };
@@ -2000,7 +2059,7 @@ impl FactoryApp {
     /// F2: rename the selected node, or the selected comment frame.
     pub(crate) fn start_rename(&mut self) {
         if let [n] = self.state.selected_nodes[..] {
-            if self.state.graph.nodes.contains_key(n) {
+            if self.state.graph.nodes.contains_key(n) && crate::power_net::pole_of(&self.state.graph, n).is_none() {
                 self.node_rename = Some((n, self.state.graph[n].label.clone()));
             }
         } else if self.state.selected_nodes.is_empty() {
@@ -2663,6 +2722,7 @@ pub(crate) fn evaluate_graph(game: &GameData, g: &FactoryGraph, cache: &mut SimC
                 *sum.sunk.entry(item.clone()).or_default() += got;
                 sum.sink_points += got * game.items.get(item).map(|it| it.sink_points).unwrap_or(0) as f64;
             }
+            NodeKind::Pole { .. } => {}
             NodeKind::Factory { .. } => {
                 let name = &g[id].label;
                 for (p, (port, want)) in ins.iter().enumerate() {
@@ -2679,6 +2739,7 @@ pub(crate) fn evaluate_graph(game: &GameData, g: &FactoryGraph, cache: &mut SimC
         }
         e.nodes.insert(id, NodeStat { efficiency: eff, power_mw: power });
     }
+    crate::power_net::evaluate(g, &mut e.ports, &mut sum.issues);
     e.summary = sum;
     e
 }

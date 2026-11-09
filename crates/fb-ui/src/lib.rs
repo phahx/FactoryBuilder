@@ -22,6 +22,7 @@ pub mod portable;
 pub mod progress_ui;
 pub mod project;
 pub mod project_ui;
+pub mod power_net;
 pub mod power_ui;
 pub mod room;
 pub mod room_extras;

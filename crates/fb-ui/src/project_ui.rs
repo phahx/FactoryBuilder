@@ -199,7 +199,8 @@ pub fn factory_menu(app: &mut FactoryApp, ctx: &egui::Context) {
     }
 }
 
-/// Right-click on the master graph's empty canvas: add a factory there.
+/// Right-click on the master graph's empty canvas: add a factory (or a
+/// power grid) there.
 pub fn master_canvas_menu(app: &mut FactoryApp, ctx: &egui::Context) {
     let Some((pos, at)) = app.master_menu else { return };
     if !app.on_master() {
@@ -207,11 +208,20 @@ pub fn master_canvas_menu(app: &mut FactoryApp, ctx: &egui::Context) {
         return;
     }
     let mut pick = None;
-    let menu = crate::menus::popup(ctx, "master_menu", pos, "Add factory", |ui| {
+    let power = app.power_links;
+    let menu = crate::menus::popup(ctx, "master_menu", pos, "Add", |ui| {
         for (k, label) in ["New factory", "Add factory file…", "Add factory from a share code…"].into_iter().enumerate() {
             if crate::menus::item(ui, label, "", true).clicked() {
                 pick = Some(k);
             }
+        }
+        crate::menus::separator(ui);
+        if crate::menus::item(ui, "New power pole", "", power)
+            .on_hover_text("A pole to run power wires through: wire factories' Power ports to poles, and poles to each other. Everything wired together is one circuit.")
+            .on_disabled_hover_text("Turn on View › Power connections to see power wiring.")
+            .clicked()
+        {
+            pick = Some(3);
         }
     });
     if pick.is_some() || crate::menus::dismissed(ctx, &menu) {
@@ -227,6 +237,7 @@ pub fn master_canvas_menu(app: &mut FactoryApp, ctx: &egui::Context) {
             app.block_spot = Some(at);
             app.dialog = Dialog::share_code(crate::dialogs::ShareMode::AddFactory);
         }
+        Some(3) => app.new_pole_at(at),
         _ => {}
     }
 }

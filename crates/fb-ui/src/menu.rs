@@ -179,6 +179,9 @@ pub fn menu_bar(app: &mut FactoryApp, ctx: &egui::Context) {
                     toggled |= ui.checkbox(&mut app.wire_labels, "Belt and pipe labels")
                         .on_hover_text("Show on each wire the slowest belt or pipe that carries it.")
                         .changed();
+                    toggled |= ui.checkbox(&mut app.power_links, "Power connections")
+                        .on_hover_text("On the master graph: power grids, and which factories send power to them and take power from them.")
+                        .changed();
                     toggled |= ui.checkbox(&mut app.minimap, "Minimap")
                         .on_hover_text("The whole graph in the canvas's corner; click it to move the view.")
                         .changed();

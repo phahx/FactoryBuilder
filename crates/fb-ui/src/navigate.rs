@@ -58,6 +58,7 @@ impl FactoryApp {
             NodeKind::Output { .. } => parts.push("Output".into()),
             NodeKind::Sink { .. } => parts.push("Sink".into()),
             NodeKind::Factory { .. } => parts.push("Factory".into()),
+            NodeKind::Pole { .. } => parts.push("Power pole".into()),
         }
         for (_, i) in &n.inputs {
             if let crate::graph::PortValue::Item(item) = &g[*i].value {

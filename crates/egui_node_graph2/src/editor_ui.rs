@@ -271,6 +271,10 @@ where
             drag_released_on_background = true;
         }
 
+        // FactoryBuilder: wires go under the nodes (filled in once they're
+        // drawn and their ports are known), as in other node editors.
+        let wire_slot = ui.painter().add(Shape::Noop);
+
         /* Draw nodes */
         for node_id in self.node_order.iter().copied() {
             let responses = GraphNodeWidget {
@@ -419,7 +423,9 @@ where
 
         // draw existing connections
         // FactoryBuilder: each wire starts at its own bubble on the output.
+        // Faint wires first, so solid ones cross over them.
         let mut wires = Vec::new();
+        let (mut faint, mut solid): (Vec<Shape>, Vec<Shape>) = (Vec::new(), Vec::new());
         let mut wire_order: std::collections::HashMap<OutputId, Vec<InputId>> = Default::default();
         for (input, outputs) in self.graph.iter_connection_groups() {
             for (hook_n, &output) in outputs.iter().enumerate() {
@@ -427,23 +433,23 @@ where
                     .graph
                     .any_param_type(AnyParameterId::Output(output))
                     .unwrap();
-                let connection_color = port_type.data_type_color(user_state);
+                let connection_color = port_type.wire_color(user_state, self.graph[output].node, self.graph[input].node);
                 let order = wire_order.entry(output).or_insert_with(|| self.graph.output_connections(output));
                 let k = order.iter().position(|i| *i == input).unwrap_or(0);
                 let hooks = &port_locations[&AnyParameterId::Output(output)];
                 let src_pos = hooks[k.min(hooks.len() - 1)];
                 let dst_pos = conn_locations[&input][hook_n];
                 wires.push((input, output, wire_points(&self.pan_zoom, src_pos, dst_pos)));
-                draw_connection(
-                    &self.pan_zoom,
-                    ui.painter(),
-                    src_pos,
-                    dst_pos,
-                    connection_color,
-                    self.style.wire_width,
-                );
+                let shape = connection_shape(&self.pan_zoom, src_pos, dst_pos, connection_color, self.style.wire_width);
+                if connection_color.a() < 255 {
+                    faint.push(shape);
+                } else {
+                    solid.push(shape);
+                }
             }
         }
+        faint.extend(solid);
+        ui.painter().set(wire_slot, Shape::Vec(faint));
 
         /* Handle responses from drawing nodes */
 
@@ -651,19 +657,15 @@ fn draw_connection(
     color: Color32,
     width: f32,
 ) {
+    painter.add(connection_shape(pan_zoom, src_pos, dst_pos, color, width));
+}
+
+fn connection_shape(pan_zoom: &PanZoom, src_pos: Pos2, dst_pos: Pos2, color: Color32, width: f32) -> Shape {
     let connection_stroke = egui::Stroke {
         width: width * pan_zoom.zoom,
         color,
     };
-
-    let bezier = CubicBezierShape::from_points_stroke(
-        wire_points(pan_zoom, src_pos, dst_pos),
-        false,
-        Color32::TRANSPARENT,
-        connection_stroke,
-    );
-
-    painter.add(bezier);
+    CubicBezierShape::from_points_stroke(wire_points(pan_zoom, src_pos, dst_pos), false, Color32::TRANSPARENT, connection_stroke).into()
 }
 
 /// FactoryBuilder: the bezier of a wire (shared by drawing and `GraphResponse::wires`).
@@ -716,6 +718,35 @@ where
     ) -> Vec<NodeResponse<UserResponse, NodeData>> {
         let margin = egui::vec2(15.0, 5.0) * pan_zoom.zoom;
         let mut responses = Vec::<NodeResponse<UserResponse, NodeData>>::new();
+
+        // FactoryBuilder: a knot (see NodeDataTrait::knot_size).
+        if let Some(size) = self.graph[self.node_id].user_data.knot_size() {
+            let rect = Rect::from_min_size(ui.max_rect().min, size * pan_zoom.zoom);
+            let window_response = ui.interact(rect, Id::new((self.node_id, "window")), Sense::click_and_drag());
+            if self.selected {
+                ui.painter().rect_filled(rect.expand(3.0 * pan_zoom.zoom), self.style.rounding * pan_zoom.zoom, self.style.selection);
+            }
+            self.graph[self.node_id].user_data.knot_ui(ui, rect, self.node_id, user_state);
+            self.node_rects.insert(self.node_id, rect);
+            if let Some(i) = self.graph[self.node_id].inputs.first().map(|(_, i)| *i) {
+                let n = self.graph.connections(i).len();
+                draw_port(pan_zoom, ui, self.graph, self.node_id, user_state, rect.left_center(), &mut responses, AnyParameterId::Input(i), self.port_locations, self.conn_locations, self.ongoing_drag, true, n, usize::MAX, self.style.port_radius, self.style.node_fill);
+            }
+            if let Some(o) = self.graph[self.node_id].outputs.first().map(|(_, o)| *o) {
+                let n = self.graph.iter_connections().filter(|(_, x)| *x == o).count();
+                draw_port(pan_zoom, ui, self.graph, self.node_id, user_state, rect.right_center(), &mut responses, AnyParameterId::Output(o), self.port_locations, self.conn_locations, self.ongoing_drag, true, n, usize::MAX, self.style.port_radius, self.style.node_fill);
+            }
+            let drag_delta = window_response.drag_delta();
+            if drag_delta.length_sq() > 0.0 {
+                responses.push(NodeResponse::MoveNode { node: self.node_id, drag_delta });
+                responses.push(NodeResponse::RaiseNode(self.node_id));
+            }
+            if responses.is_empty() && window_response.clicked_by(PointerButton::Primary) {
+                responses.push(NodeResponse::SelectNode(self.node_id));
+                responses.push(NodeResponse::RaiseNode(self.node_id));
+            }
+            return responses;
+        }
 
         let background_color = self.style.node_fill;
         let text_color = self.style.text;
@@ -840,7 +871,7 @@ where
                         .unwrap_or(std::u32::MAX)
                         as usize;
                     let port_height = port_height(
-                        max_connections != 1,
+                        max_connections != 1 && !self.graph[self.node_id].user_data.shared_hooks(),
                         self.graph.connections(param_id).len(),
                         max_connections,
                         self.style.port_radius,
@@ -887,7 +918,8 @@ where
 
                 // FactoryBuilder: outputs show a bubble per wire too; make room.
                 let out_conns = self.graph.iter_connections().filter(|(_, o)| *o == param_id).count();
-                let needed = (port_height(true, out_conns, usize::MAX, self.style.port_radius) + 5.0) * pan_zoom.zoom;
+                let wide = !self.graph[self.node_id].user_data.shared_hooks();
+                let needed = (port_height(wide, out_conns, usize::MAX, self.style.port_radius) + 5.0) * pan_zoom.zoom;
                 let missing = needed - (ui.min_rect().bottom() - height_before);
                 if missing > 0.0 {
                     ui.add_space(missing);
@@ -958,6 +990,8 @@ where
             NodeData: NodeDataTrait,
         {
             let port_type = graph.any_param_type(param_id).unwrap();
+            let shared = graph[node_id].user_data.shared_hooks();
+            let wide_port = wide_port && !shared;
 
             let spacing = hook_spacing(port_radius);
             let port_rect = Rect::from_center_size(
@@ -1013,7 +1047,7 @@ where
                     lit = Some(k);
                 }
                 if resp.drag_started() {
-                    let connected = k < connections;
+                    let connected = k < connections && !shared;
                     match param_id {
                         AnyParameterId::Input(input) => match graph.connections(input).get(k).copied() {
                             Some(output) if connected => responses.push(NodeResponse::DisconnectEvent { input, output }),
@@ -1042,7 +1076,7 @@ where
             let r = port_radius * pan_zoom.zoom;
             for (k, center) in hooks.iter().enumerate() {
                 let color = if lit == Some(k) { Color32::WHITE } else { base_color };
-                if k < connections {
+                if k < connections || (shared && connections > 0) {
                     ui.painter().circle_filled(*center, r, color);
                 } else {
                     ui.painter().circle(*center, r - 0.75, ring_fill, Stroke::new(1.5_f32 * pan_zoom.zoom.max(0.5), color));
@@ -1052,6 +1086,12 @@ where
             if let AnyParameterId::Input(input) = param_id {
                 for (k, dst_pos) in hooks.iter().enumerate() {
                     conn_locations.entry(input).or_default().insert(k, *dst_pos);
+                }
+                // A shared bubble: every wire ends at it.
+                if shared {
+                    for k in 1..connections {
+                        conn_locations.entry(input).or_default().insert(k, hooks[0]);
+                    }
                 }
             }
 
@@ -1063,11 +1103,13 @@ where
                     match (param_id, origin_param) {
                         (AnyParameterId::Input(input), AnyParameterId::Output(output)) => {
                             let output_hook = graph.output_connections(output).len();
-                            responses.push(NodeResponse::ConnectEventEnded { output, input, input_hook: k, output_hook });
+                            let input_hook = if shared { connections } else { k };
+                            responses.push(NodeResponse::ConnectEventEnded { output, input, input_hook, output_hook });
                         }
                         (AnyParameterId::Output(output), AnyParameterId::Input(input)) => {
                             let input_hook = graph.connections(input).len();
-                            responses.push(NodeResponse::ConnectEventEnded { output, input, input_hook, output_hook: k });
+                            let output_hook = if shared { connections } else { k };
+                            responses.push(NodeResponse::ConnectEventEnded { output, input, input_hook, output_hook });
                         }
                         _ => {}
                     }

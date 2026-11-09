@@ -210,14 +210,17 @@ fn free_block_pos(state: &EditorState) -> Pos2 {
 
 /// Brings the master graph up to date with the factories: one block each
 /// (new factories get one), names, and ports for what each takes in and
-/// sends out. Links stay on the items that are still there.
-pub(crate) fn sync_master_graph(game: &GameData, state: &mut EditorState, user: &mut UserState, infos: &[(u32, FactoryInfo)]) {
+/// sends out. Links stay on the items that are still there. Then the power
+/// grids (shown or not, `show_power`; see power_net.rs).
+pub(crate) fn sync_master_graph(game: &GameData, state: &mut EditorState, user: &mut UserState, infos: &[(u32, FactoryInfo)], net: &mut crate::power_net::PowerNet, show_power: bool) {
     user.factories = infos.iter().cloned().collect();
     let known: BTreeSet<u32> = infos.iter().map(|(id, _)| *id).collect();
     let mut seen = BTreeSet::new();
     for node in state.graph.iter_nodes().collect::<Vec<_>>() {
         let keep = match state.graph[node].user_data.kind {
             NodeKind::Factory { id, .. } => known.contains(&id) && seen.insert(id),
+            // power_net::sync's to keep or not.
+            NodeKind::Pole { .. } => true,
             _ => false,
         };
         if !keep {
@@ -236,22 +239,30 @@ pub(crate) fn sync_master_graph(game: &GameData, state: &mut EditorState, user: 
             Some(node) => update_block(game, &mut state.graph, node, info),
         }
     }
+    crate::power_net::sync(state, user, net, show_power);
 }
 
 fn update_block(game: &GameData, g: &mut FactoryGraph, node: NodeId, info: &FactoryInfo) {
     if g[node].label != info.name {
         g[node].label = info.name.clone();
     }
-    if let NodeKind::Factory { ins, outs, .. } = &mut g[node].user_data.kind {
+    if let NodeKind::Factory { ins, outs, uses_mw, makes_mw, .. } = &mut g[node].user_data.kind {
         if *ins != info.ins {
             *ins = info.ins.clone();
         }
         if *outs != info.outs {
             *outs = info.outs.clone();
         }
+        let makes = info.generation.unwrap_or(0.0);
+        if *uses_mw != info.power_mw || *makes_mw != makes {
+            (*uses_mw, *makes_mw) = (info.power_mw, makes);
+        }
     }
-    let have_in: Vec<String> = g[node].inputs.iter().map(|(_, i)| g[*i].typ.0.clone()).collect();
-    let have_out: Vec<String> = g[node].outputs.iter().map(|(_, o)| g[*o].typ.0.clone()).collect();
+    // Item ports only: power ports are power_net.rs's (it puts back any
+    // removed here).
+    let item = |t: &str| !crate::power_net::is_power(t);
+    let have_in: Vec<String> = g[node].inputs.iter().map(|(_, i)| g[*i].typ.0.clone()).filter(|t| item(t)).collect();
+    let have_out: Vec<String> = g[node].outputs.iter().map(|(_, o)| g[*o].typ.0.clone()).filter(|t| item(t)).collect();
     let want_in: Vec<String> = info.ins.iter().map(|(i, _)| i.clone()).collect();
     let want_out: Vec<String> = info.outs.iter().map(|(i, _)| i.clone()).collect();
     if have_in == want_in && have_out == want_out {
@@ -439,12 +450,13 @@ impl FactoryApp {
         }
         let infos = self.factory_infos();
         let game = self.user.game.clone();
+        let show = self.power_links;
         if self.active == MASTER {
-            sync_master_graph(&game, &mut self.state, &mut self.user, &infos);
+            sync_master_graph(&game, &mut self.state, &mut self.user, &infos, &mut self.planner.power_net, show);
         } else {
             let mut scratch = UserState { game: game.clone(), zoom: 1.0, ..Default::default() };
             if let Some(b) = self.doc_mut(MASTER).and_then(|d| d.body.as_mut()) {
-                sync_master_graph(&game, &mut b.state, &mut scratch, &infos);
+                sync_master_graph(&game, &mut b.state, &mut scratch, &infos, &mut b.planner.power_net, show);
             }
         }
     }
@@ -486,6 +498,21 @@ impl FactoryApp {
             self.state.selected_nodes = vec![n];
             self.changed();
         }
+    }
+
+    /// The master graph's right-click menu: a new power pole centred on
+    /// `at` (unzoomed), selected.
+    pub(crate) fn new_pole_at(&mut self, at: Pos2) {
+        if self.active != MASTER {
+            return;
+        }
+        let half = crate::power_net::POLE_SIZE / 2.0;
+        let id = self.planner.power_net.add_pole(at.x - half.x, at.y - half.y);
+        self.sync_master();
+        if let Some(n) = crate::power_net::pole_node(&self.state.graph, id) {
+            self.state.selected_nodes = vec![n];
+        }
+        self.changed();
     }
 
     /// The master graph's right-click menu: a new empty factory at `at`.
@@ -663,8 +690,17 @@ impl FactoryApp {
             p.links.push(portable::Link { from, to, item: g[output].typ.0.clone(), slot });
         }
         p.links.sort_by(|a, b| (a.from, &a.item, a.slot, a.to).cmp(&(b.from, &b.item, b.slot, b.to)));
-        let master_frames = if self.active == MASTER { &self.planner.frames } else { self.doc(MASTER).and_then(|d| d.body.as_ref()).map(|b| &b.planner.frames).unwrap_or(&self.planner.frames) };
-        p.frames = master_frames.iter().map(crate::app_files::frame_to_file).collect();
+        let master_planner = if self.active == MASTER { &self.planner } else { self.doc(MASTER).and_then(|d| d.body.as_ref()).map(|b| &b.planner).unwrap_or(&self.planner) };
+        p.frames = master_planner.frames.iter().map(crate::app_files::frame_to_file).collect();
+        let r = |v: f32| (v * 10.0).round() / 10.0;
+        let ids = self.factory_ids();
+        let net = &master_planner.power_net;
+        p.poles = net.poles.iter().map(|q| crate::power_net::Pole { id: q.id, x: r(q.x), y: r(q.y) }).collect();
+        let exists = |e: &crate::power_net::End| match e {
+            crate::power_net::End::Factory(f) => ids.contains(f),
+            crate::power_net::End::Pole(q) => net.poles.iter().any(|x| x.id == *q),
+        };
+        p.power_links = net.links.iter().copied().filter(|l| exists(&l.from) && exists(&l.to)).collect();
         p
     }
 
@@ -729,6 +765,19 @@ impl FactoryApp {
             }
         }
         self.planner.frames = p.frames.iter().enumerate().map(|(k, f)| crate::app_files::frame_from_file(f, k as u32 + 1, Vec2::ZERO)).collect();
+        {
+            use crate::power_net::End;
+            let poles: BTreeSet<u32> = p.poles.iter().map(|q| q.id).collect();
+            let end = |e: End| match e {
+                End::Factory(f) => ids.get(&f).map(|d| End::Factory(*d)),
+                End::Pole(q) => poles.contains(&q).then_some(End::Pole(q)),
+            };
+            self.planner.power_net = crate::power_net::PowerNet {
+                poles: p.poles.clone(),
+                links: p.power_links.iter().filter_map(|l| Some(crate::power_net::PowerLink { from: end(l.from)?, to: end(l.to)? })).collect(),
+            };
+        }
+        self.sync_master();
         self.committed = self.project_json();
         self.frame_all = true;
         skipped

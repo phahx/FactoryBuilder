@@ -520,6 +520,9 @@ pub struct ViewSettings {
     pub wire_labels: bool,
     #[serde(default = "yes")]
     pub minimap: bool,
+    /// Master graph: power grids and the factories on them.
+    #[serde(default = "yes")]
+    pub power_links: bool,
     /// Map: power lines and what they carry.
     #[serde(default = "yes")]
     pub map_power: bool,
@@ -534,7 +537,7 @@ fn yes() -> bool {
 
 impl Default for ViewSettings {
     fn default() -> Self {
-        ViewSettings { snap_to_grid: false, wire_labels: true, minimap: true, map_power: true, map_belt_flow: true }
+        ViewSettings { snap_to_grid: false, wire_labels: true, minimap: true, power_links: true, map_power: true, map_belt_flow: true }
     }
 }
 

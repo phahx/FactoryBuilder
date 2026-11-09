@@ -32,6 +32,8 @@ pub enum PortValue {
     None,
     /// An item port: wires only.
     Item(String),
+    /// A power port on the master graph (power_net.rs): wires only.
+    Power,
     /// An editable number.
     Number {
         value: f64,
@@ -87,6 +89,15 @@ pub enum NodeKind {
         ins: Vec<(String, f64)>,
         #[serde(default)]
         outs: Vec<(String, f64)>,
+        /// MW its machines use and its generators make.
+        #[serde(default)]
+        uses_mw: f64,
+        #[serde(default)]
+        makes_mw: f64,
+    },
+    /// A power pole on the master graph (power_net.rs).
+    Pole {
+        id: u32,
     },
 }
 
@@ -99,6 +110,7 @@ impl NodeKind {
             NodeKind::Output { item } => Template::Output(item),
             NodeKind::Sink { item } => Template::Sink(item),
             NodeKind::Factory { id, .. } => Template::Factory(id),
+            NodeKind::Pole { id } => Template::Pole(id),
         }
     }
 
@@ -112,6 +124,7 @@ impl NodeKind {
             | NodeKind::Sink { item } => Some(item),
             // A factory shows its first product.
             NodeKind::Factory { outs, .. } => outs.first().map(|(item, _)| item.as_str()),
+            NodeKind::Pole { .. } => None,
         }
     }
 }
@@ -133,6 +146,8 @@ pub enum Template {
     Sink(String),
     /// A factory block on the master graph.
     Factory(u32),
+    /// A power pole on the master graph.
+    Pole(u32),
 }
 
 #[derive(Debug, Clone)]
@@ -176,6 +191,10 @@ pub struct UserState {
     /// The master graph is the one being drawn.
     #[serde(skip)]
     pub master: bool,
+    /// Power wires drawn bright (from node, to node): the ones about what's
+    /// selected or under the pointer (power_net::lit_wires).
+    #[serde(skip)]
+    pub power_lit: std::collections::HashSet<(NodeId, NodeId)>,
 }
 
 impl UserState {
@@ -219,12 +238,22 @@ impl DataTypeTrait<UserState> for ItemType {
     fn data_type_color(&self, user_state: &mut UserState) -> Color32 {
         if self.0.is_empty() {
             DIVIDER
+        } else if crate::power_net::is_power(&self.0) {
+            crate::power_net::WIRE
         } else {
             user_state.item_color(&self.0)
         }
     }
     fn name(&self) -> Cow<'_, str> {
         Cow::Borrowed(&self.0)
+    }
+
+    fn wire_color(&self, user_state: &mut UserState, from: NodeId, to: NodeId) -> Color32 {
+        if crate::power_net::is_power(&self.0) {
+            crate::power_net::wire_color(user_state.power_lit.contains(&(from, to)))
+        } else {
+            self.data_type_color(user_state)
+        }
     }
 }
 
@@ -256,7 +285,8 @@ impl Template {
             Template::Input(item) => NodeKind::Input { item },
             Template::Output(item) => NodeKind::Output { item },
             Template::Sink(item) => NodeKind::Sink { item },
-            Template::Factory(id) => NodeKind::Factory { id, ins: Vec::new(), outs: Vec::new() },
+            Template::Factory(id) => NodeKind::Factory { id, ins: Vec::new(), outs: Vec::new(), uses_mw: 0.0, makes_mw: 0.0 },
+            Template::Pole(id) => NodeKind::Pole { id },
         }
     }
 }
@@ -286,6 +316,7 @@ impl NodeTemplateTrait for Template {
             Template::Output(_) => "Outputs".into(),
             Template::Sink(_) => "Sinks".into(),
             Template::Factory(_) => "Factories".into(),
+            Template::Pole(_) => "Power".into(),
         }]
     }
 
@@ -302,6 +333,7 @@ impl NodeTemplateTrait for Template {
             | Template::Output(i)
             | Template::Sink(i) => s.game.item_name(i).to_string(),
             Template::Factory(id) => s.factories.get(id).map(|f| f.name.clone()).unwrap_or_else(|| "Factory".into()),
+            Template::Pole(_) => "Power pole".into(),
         }
     }
 
@@ -309,7 +341,7 @@ impl NodeTemplateTrait for Template {
         let kind = match self {
             Template::Factory(id) => {
                 let f = s.factories.get(id).cloned().unwrap_or_default();
-                NodeKind::Factory { id: *id, ins: f.ins, outs: f.outs }
+                NodeKind::Factory { id: *id, ins: f.ins, outs: f.outs, uses_mw: f.power_mw, makes_mw: f.generation.unwrap_or(0.0) }
             }
             t => t.kind(),
         };
@@ -376,6 +408,7 @@ impl NodeTemplateTrait for Template {
                     item_out(graph, item);
                 }
             }
+            Template::Pole(_) => crate::power_net::add_pole_ports(graph, node_id),
         }
     }
 }
@@ -464,6 +497,10 @@ impl WidgetValueTrait for PortValue {
                 port_row(ui, s, node_id, name, &item, true);
                 vec![]
             }
+            PortValue::Power => {
+                crate::power_net::port_row(ui, s, node_id, name, true);
+                vec![]
+            }
             PortValue::None => vec![],
         }
     }
@@ -542,6 +579,20 @@ fn port_row(ui: &mut Ui, s: &mut UserState, node_id: NodeId, name: &str, item: &
 }
 
 impl NodeDataTrait for NodeData {
+    /// A pole's wires meet at one bubble per side.
+    fn shared_hooks(&self) -> bool {
+        matches!(self.kind, NodeKind::Pole { .. })
+    }
+
+    /// Poles are small knots.
+    fn knot_size(&self) -> Option<egui::Vec2> {
+        matches!(self.kind, NodeKind::Pole { .. }).then_some(crate::power_net::POLE_SIZE)
+    }
+
+    fn knot_ui(&self, ui: &mut Ui, rect: egui::Rect, node_id: NodeId, s: &mut UserState) {
+        crate::power_net::pole_ui(ui, rect, node_id, s);
+    }
+
     type Response = Resp;
     type UserState = UserState;
     type DataType = ItemType;
@@ -557,7 +608,11 @@ impl NodeDataTrait for NodeData {
     ) -> Vec<NodeResponse<Resp, NodeData>> {
         if let Ok(out) = graph[node_id].get_output(name) {
             let item = graph[out].typ.0.clone();
-            port_row(ui, s, node_id, name, &item, false);
+            if crate::power_net::is_power(&item) {
+                crate::power_net::port_row(ui, s, node_id, name, false);
+            } else {
+                port_row(ui, s, node_id, name, &item, false);
+            }
         }
         vec![]
     }
@@ -597,6 +652,7 @@ impl NodeDataTrait for NodeData {
                 NodeKind::Input { .. } => Some("Input"),
                 NodeKind::Output { .. } => Some("Output"),
                 NodeKind::Sink { .. } => Some("Sink"),
+                NodeKind::Pole { .. } => None,
             };
             if let Some(c) = caption {
                 ui.label(RichText::new(c).small().color(TEXT_DIM));
@@ -852,10 +908,12 @@ pub fn node_rates(
         ),
         NodeKind::Factory { ins, outs, .. } => {
             let rate = |list: &[(String, f64)], item: &str| list.iter().filter(|(i, _)| i == item).map(|(_, r)| *r).sum::<f64>();
+            // Power ports come after the item ports and aren't items.
             (
                 item_inputs.map(|(name, id)| (name.clone(), rate(ins, &graph[*id].typ.0))).collect(),
-                n.outputs.iter().map(|(name, id)| (name.clone(), rate(outs, &graph[*id].typ.0))).collect(),
+                n.outputs.iter().filter(|(_, id)| !crate::power_net::is_power(&graph[*id].typ.0)).map(|(name, id)| (name.clone(), rate(outs, &graph[*id].typ.0))).collect(),
             )
         }
+        NodeKind::Pole { .. } => (vec![], vec![]),
     }
 }

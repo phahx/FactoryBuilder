@@ -85,6 +85,12 @@ pub trait DataTypeTrait<UserState>: PartialEq + Eq {
     /// }
     /// ```
     fn name(&self) -> std::borrow::Cow<str>;
+
+    /// FactoryBuilder: the colour of a wire of this type from node `from` to
+    /// node `to` (by default the type's colour).
+    fn wire_color(&self, user_state: &mut UserState, _from: NodeId, _to: NodeId) -> egui::Color32 {
+        self.data_type_color(user_state)
+    }
 }
 
 /// This trait must be implemented for the `NodeData` generic parameter of the
@@ -93,6 +99,25 @@ pub trait NodeDataTrait
 where
     Self: Sized,
 {
+    /// FactoryBuilder: all the wires of each of this node's ports meet at one
+    /// bubble, instead of a bubble per wire (for nodes with very many
+    /// wires). Dragging that bubble always starts a new wire; wires come
+    /// off from their other end.
+    fn shared_hooks(&self) -> bool {
+        false
+    }
+
+    /// FactoryBuilder: `Some(size)` (unzoomed) draws this node as a small
+    /// knot, like a reroute node: no title or body, just [`Self::knot_ui`]'s
+    /// picture, with its first input's bubble on its left edge and its first
+    /// output's on its right.
+    fn knot_size(&self) -> Option<egui::Vec2> {
+        None
+    }
+
+    /// FactoryBuilder: paints a knot node into `rect` (screen units).
+    fn knot_ui(&self, _ui: &mut egui::Ui, _rect: egui::Rect, _node_id: NodeId, _user_state: &mut Self::UserState) {}
+
     /// Must be set to the custom user `NodeResponse` type
     type Response;
     /// Must be set to the custom user `UserState` type

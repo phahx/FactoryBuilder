@@ -7,9 +7,11 @@
 //!
 //! "Make project from save" does that for every group of machines on the
 //! map at once: each is a factory, linked on the master graph by the belts
-//! and pipes between them.
+//! and pipes between them, and power poles wired the way each power
+//! circuit joins them.
 
 use crate::portable::{FactoryFile, Kind, Link, Node, ProjectFactory, ProjectFile, Wire};
+use crate::power_net::{End, Pole, PowerLink};
 use fb_model::world::{MapInfo, Machine, World};
 use fb_model::{GameData, Purity};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -267,6 +269,8 @@ pub struct WorldReport {
     pub factories: usize,
     /// Links between factories on the master graph.
     pub links: usize,
+    /// Power circuits joining two or more factories.
+    pub circuits: usize,
     /// Machines brought in.
     pub machines: usize,
     /// Machines that couldn't be (no recipe set, generators...).
@@ -277,7 +281,9 @@ pub struct WorldReport {
 /// A project of the whole save: every group of machines standing within
 /// `gap_cm` of each other is a factory (as Import into planner makes it),
 /// and the belts and pipes running between groups are links on the master
-/// graph. Linked factories sit together (see [`arrange_blocks`]).
+/// graph. Linked factories sit together (see [`arrange_blocks`]). Power
+/// circuits that join two or more factories are wired through power poles
+/// (see [`power_poles`]; a circuit inside one factory joins nothing).
 pub fn world_project(world: &World, game: &GameData, map: Option<&MapInfo>, gap_cm: f32) -> (ProjectFile, WorldReport) {
     let mut report = WorldReport::default();
     let mut p = ProjectFile::new(Some(world.save.name.clone()));
@@ -328,10 +334,86 @@ pub fn world_project(world: &World, game: &GameData, map: Option<&MapInfo>, gap_
     for (f, (x, y)) in p.factories.iter_mut().zip(arrange_blocks(&boxes, &linked)) {
         (f.x, f.y) = (x, y);
     }
+    (p.poles, p.power_links, report.circuits) = power_poles(world, &factory_of, &p.factories, &boxes);
     report.factories = p.factories.len();
     report.links = p.links.len();
     (p, report)
 }
+
+/// Poles for each power circuit that joins two or more factories with
+/// machines (`factory_of`: machine id -> factory id). Every one gets a pole at
+/// a corner of its block, in the gaps between blocks: top right for one
+/// that makes more power than it uses (in the save), where its Power output
+/// is, top left for the rest. Factories whose corners meet share a pole.
+/// Each circuit's poles are joined pole to nearest pole (a minimum spanning
+/// tree), so its wires run short, along the gaps. Returns the poles, the
+/// wires and how many circuits.
+fn power_poles(world: &World, factory_of: &HashMap<u32, u32>, factories: &[ProjectFactory], boxes: &[(f32, f32, f32, f32)]) -> (Vec<Pole>, Vec<PowerLink>, usize) {
+    let mut on: BTreeMap<u32, BTreeSet<u32>> = BTreeMap::new();
+    let mut balance: HashMap<u32, f32> = HashMap::new();
+    // Only factories with machines in their plan: miners and pumps are
+    // resource nodes there, which use no power, so a site of only those has
+    // no Power port to wire.
+    let planned = |f: u32| factories[f as usize - 1].factory.nodes.iter().any(|n| n.kind == Kind::Recipe);
+    for (m, c) in &world.machine_circuit {
+        if let Some(&f) = factory_of.get(m).filter(|f| planned(**f)) {
+            on.entry(*c).or_default().insert(f);
+        }
+    }
+    for (m, u) in &world.machine_power {
+        if let Some(&f) = factory_of.get(m) {
+            *balance.entry(f).or_default() += u.makes - u.max;
+        }
+    }
+    let (mut poles, mut links) = (Vec::new(), Vec::new());
+    let mut circuits = 0;
+    for members in on.into_values().filter(|fs| fs.len() >= 2) {
+        circuits += 1;
+        // This circuit's poles: (id, centre).
+        let mut here: Vec<(u32, (f32, f32))> = Vec::new();
+        for f in members {
+            let (b, w) = (&factories[f as usize - 1], boxes[f as usize - 1].2);
+            let makes = balance.get(&f).is_some_and(|v| *v > 0.0);
+            let spot = (if makes { b.x + w + BLOCK_GAP / 2.0 } else { b.x - BLOCK_GAP / 2.0 }, b.y - BLOCK_GAP / 2.0);
+            let near = here.iter().find(|(_, c)| (c.0 - spot.0).hypot(c.1 - spot.1) < POLE_SHARE).map(|(id, _)| *id);
+            let pole = near.unwrap_or_else(|| {
+                let id = poles.len() as u32 + 1;
+                let half = crate::power_net::POLE_SIZE / 2.0;
+                poles.push(Pole { id, x: spot.0 - half.x, y: spot.1 - half.y });
+                here.push((id, spot));
+                id
+            });
+            links.push(PowerLink { from: End::Factory(f), to: End::Pole(pole) });
+        }
+        // Prim's tree over the poles, each wire left to right.
+        let n = here.len();
+        let mut joined = vec![false; n];
+        let mut best: Vec<(f32, usize)> = vec![(f32::INFINITY, 0); n];
+        let dist = |a: usize, b: usize| (here[a].1 .0 - here[b].1 .0).hypot(here[a].1 .1 - here[b].1 .1);
+        if n > 0 {
+            joined[0] = true;
+            for k in 1..n {
+                best[k] = (dist(0, k), 0);
+            }
+        }
+        for _ in 1..n {
+            let Some(k) = (0..n).filter(|k| !joined[*k]).min_by(|a, b| best[*a].0.total_cmp(&best[*b].0)) else { break };
+            joined[k] = true;
+            let j = best[k].1;
+            let (l, r) = if here[j].1 .0 <= here[k].1 .0 { (j, k) } else { (k, j) };
+            links.push(PowerLink { from: End::Pole(here[l].0), to: End::Pole(here[r].0) });
+            for m in 0..n {
+                if !joined[m] && dist(k, m) < best[m].0 {
+                    best[m] = (dist(k, m), k);
+                }
+            }
+        }
+    }
+    (poles, links, circuits)
+}
+
+/// Corners closer than this (graph units) share a pole.
+const POLE_SHARE: f32 = 60.0;
 
 /// A factory's name: the most advanced thing it makes (by sink points;
 /// fluids have none, so then what most machines make). Power plants are
@@ -578,6 +660,55 @@ mod tests {
         assert!(p.factories[0].x < p.factories[1].x, "blocks sit the way the factories do");
     }
 
+    #[test]
+    fn circuits_joining_factories_get_poles() {
+        let mut game = GameData::default();
+        game.items.insert("Ingot".into(), fb_model::Item { class: "Ingot".into(), name: "Ingot".into(), description: String::new(), form: fb_model::Form::Solid, sink_points: 1, raw: false, color: [0; 4] });
+        game.recipes.insert(
+            "MakeIngot".into(),
+            fb_model::Recipe { class: "MakeIngot".into(), name: "MakeIngot".into(), alternate: false, duration_s: 6.0, ingredients: vec![], products: vec![fb_model::Amount { item: "Ingot".into(), amount: 1.0 }], building: "Build_ConstructorMk1_C".into(), variable_power_mw: None, generates_mw: 0.0 },
+        );
+        // Three sites far apart. Circuit 5 joins the first two; circuit 9
+        // is the third's alone; circuit 7 has two machines of the first.
+        let mut w = World::default();
+        w.machines = vec![machine(0, 0.0, "MakeIngot"), machine(1, 100.0, "MakeIngot"), machine(2, 100_000.0, "MakeIngot"), machine(3, 200_000.0, "MakeIngot")];
+        w.machine_circuit = [(0, 5), (1, 7), (2, 5), (3, 9)].into_iter().collect();
+        // The first makes power (so its pole is on its right), the second uses it.
+        w.machine_power = [(0, fb_model::world::PowerUse { now: 0.0, max: 0.0, makes: 75.0 }), (2, fb_model::world::PowerUse { now: 4.0, max: 4.0, makes: 0.0 })].into_iter().collect();
+        let (p, r) = world_project(&w, &game, None, 5000.0);
+        assert_eq!(r.factories, 3);
+        assert_eq!(r.circuits, 1, "only circuit 5 joins two factories");
+        // Each factory's pole sits at its corner: top right for the plant,
+        // top left for the other.
+        let centre = |id: u32| {
+            let q = p.poles.iter().find(|q| q.id == id).unwrap();
+            (q.x + crate::power_net::POLE_SIZE.x / 2.0, q.y + crate::power_net::POLE_SIZE.y / 2.0)
+        };
+        let pole_of = |f: u32| {
+            p.power_links.iter().find_map(|l| match (l.from, l.to) {
+                (End::Factory(x), End::Pole(q)) | (End::Pole(q), End::Factory(x)) if x == f => Some(q),
+                _ => None,
+            })
+        };
+        let (a, b) = (&p.factories[0], &p.factories[1]);
+        let near = |c: (f32, f32), x: f32, y: f32| (c.0 - x).abs() < 1e-3 && (c.1 - y).abs() < 1e-3;
+        let ca = centre(pole_of(1).unwrap());
+        assert!(near(ca, a.x + 320.0 + BLOCK_GAP / 2.0, a.y - BLOCK_GAP / 2.0), "top right of the plant: {ca:?}");
+        let cb = centre(pole_of(2).unwrap());
+        assert!(near(cb, b.x - BLOCK_GAP / 2.0, b.y - BLOCK_GAP / 2.0), "top left of the other: {cb:?}");
+        assert!(pole_of(3).is_none(), "the third is on a circuit of its own");
+        // Two poles are wired to each other, left to right.
+        if p.poles.len() == 2 {
+            let (l, r) = if ca.0 <= cb.0 { (pole_of(1).unwrap(), pole_of(2).unwrap()) } else { (pole_of(2).unwrap(), pole_of(1).unwrap()) };
+            assert!(p.power_links.contains(&PowerLink { from: End::Pole(l), to: End::Pole(r) }), "{:?}", p.power_links);
+        } else {
+            assert_eq!(p.poles.len(), 1, "corners that meet share a pole");
+        }
+        // It survives the file format.
+        let back = ProjectFile::parse(&p.to_json(false)).unwrap();
+        assert_eq!((back.poles, back.power_links), (p.poles.clone(), p.power_links.clone()));
+    }
+
     /// The late-game save (FB_TEST_SAVES), with the extracted map's resource
     /// nodes when FB_TEST_MAP points at a map.json.
     #[test]
@@ -608,6 +739,12 @@ mod tests {
         }
         eprintln!("left out (class: count, with a recipe set): {out:?}");
         assert!(r.factories > 10 && r.links > 10, "{r:?}");
+        eprintln!("poles {}, power wires {}", p.poles.len(), p.power_links.len());
+        let poles: BTreeSet<u32> = p.poles.iter().map(|q| q.id).collect();
+        assert!(p.power_links.iter().all(|l| [l.from, l.to].iter().all(|e| match e {
+            End::Factory(f) => *f as usize <= p.factories.len(),
+            End::Pole(q) => poles.contains(q),
+        })));
         assert_eq!(p.valid_links().count(), p.links.len());
         let names: BTreeSet<_> = p.factories.iter().map(|f| f.factory.name.clone()).collect();
         assert_eq!(names.len(), p.factories.len(), "names are unique");

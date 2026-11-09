@@ -23,8 +23,12 @@
 //! ```json
 //! { "format": "factory-builder-project", "version": 1, "name": "Main base",
 //!   "factories": [{"id": 1, "x": 0, "y": 0, "factory": { "format": "factory-builder", ... }}],
-//!   "links": [{"from": 1, "to": 2, "item": "Desc_IronIngot_C", "slot": 0}] }
+//!   "links": [{"from": 1, "to": 2, "item": "Desc_IronIngot_C", "slot": 0}],
+//!   "poles": [{"id": 1, "x": 400, "y": -40}],
+//!   "power_links": [{"from": {"factory": 1}, "to": {"pole": 1}}, {"from": {"pole": 1}, "to": {"factory": 2}}] }
 //! ```
+//!
+//! `poles` and `power_links` are the power wiring (see power_net.rs).
 
 use base64::Engine;
 use fb_model::{Objective, Target};
@@ -257,6 +261,12 @@ pub struct ProjectFile {
     /// Comment frames on the master graph.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub frames: Vec<Frame>,
+    /// Power poles on the master graph.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub poles: Vec<crate::power_net::Pole>,
+    /// Power wires between factories and poles.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub power_links: Vec<crate::power_net::PowerLink>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -285,7 +295,7 @@ pub struct Link {
 
 impl ProjectFile {
     pub fn new(name: Option<String>) -> Self {
-        Self { format: PROJECT_FORMAT.into(), version: PROJECT_VERSION, name, factories: Vec::new(), links: Vec::new(), frames: Vec::new() }
+        Self { format: PROJECT_FORMAT.into(), version: PROJECT_VERSION, name, factories: Vec::new(), links: Vec::new(), frames: Vec::new(), poles: Vec::new(), power_links: Vec::new() }
     }
 
     pub fn to_json(&self, pretty: bool) -> String {
@@ -320,6 +330,18 @@ impl ProjectFile {
         }
         if p.frames.len() > MAX_NODES || !p.frames.iter().all(Frame::valid) {
             return Err("That project has broken positions.".into());
+        }
+        if p.poles.len() > MAX_NODES || p.power_links.len() > MAX_LINKS {
+            return Err("That project is too big to open.".into());
+        }
+        let mut pole_ids = std::collections::BTreeSet::new();
+        for q in &p.poles {
+            if !pole_ids.insert(q.id) {
+                return Err("That project lists a power pole twice.".into());
+            }
+            if !q.x.is_finite() || !q.y.is_finite() {
+                return Err("That project has broken positions.".into());
+            }
         }
         let mut ids = std::collections::BTreeSet::new();
         for f in &p.factories {
