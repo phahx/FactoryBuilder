@@ -157,6 +157,8 @@ pub fn tidy(state: &mut EditorState, user: &mut UserState) {
     let wires: Vec<(InputId, OutputId)> = g
         .iter_connections()
         .filter(|(i, o)| matches!(g[*i].value, PortValue::Item(_)) && !is_router(&g[g[*o].node].user_data.kind) && !is_router(&g[g[*i].node].user_data.kind))
+        // Not belts: extractors take straight from the resource.
+        .filter(|(i, o)| !crate::extractors::from_the_ground(g, *o, *i))
         .collect();
     let mut parent: Vec<usize> = (0..wires.len()).collect();
     fn find(p: &mut [usize], mut x: usize) -> usize {

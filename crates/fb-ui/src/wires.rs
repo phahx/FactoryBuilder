@@ -44,6 +44,10 @@ pub fn paint_labels(app: &mut FactoryApp, ui: &egui::Ui, wires: &[(InputId, Outp
     let mut placed: Vec<Rect> = Vec::new();
     for (input, output, points) in wires {
         let Some(&flow) = app.wire_flow.get(&(*input, *output)) else { continue };
+        // No belt between a resource node and the extractor standing on it.
+        if crate::extractors::from_the_ground(&app.state.graph, *output, *input) {
+            continue;
+        }
         let Some(item) = app.state.graph.try_get_output(*output).map(|o| o.typ.0.clone()) else { continue };
         let fluid = game.item_form(&item).is_fluid();
         let Some(c) = game.extraction.carrier(fluid, flow) else { continue };

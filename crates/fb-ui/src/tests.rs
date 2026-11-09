@@ -2503,6 +2503,29 @@ fn extractors_and_pumps_are_buildings_with_power() {
     frames(&ctx, &mut app, 2);
     assert!(matches!(app.graph()[miner].user_data.kind, NodeKind::Extractor { purity: fb_model::Purity::Pure, .. }));
     assert!(app.power() != power_before, "the extractor's power follows its building");
+    // The resource's wire into the miner isn't a belt: no belt label on it,
+    // and the resource takes more extractors without a splitter.
+    let g = app.graph();
+    let ore = g.iter_nodes().find(|n| matches!(g[*n].user_data.kind, NodeKind::Resource { .. })).unwrap();
+    let out = g[ore].outputs[0].1;
+    let into_miner = g.output_connections(out)[0];
+    assert!(crate::extractors::from_the_ground(g, out, into_miner));
+    let after_miner = g.output_connections(g[miner].outputs[0].1)[0];
+    assert!(!crate::extractors::from_the_ground(g, g[miner].outputs[0].1, after_miner), "what it puts out is a belt");
+    {
+        use egui_node_graph2::{AnyParameterId as P, NodeDataTrait};
+        let data = app.state.graph[ore].user_data.clone();
+        assert!(data.accepts_wire(ore, P::Output(out), &app.state.graph, &mut app.user));
+    }
+    app.request_frame_all();
+    frames(&ctx, &mut app, 2);
+    let flow = app.wire_flow[&(into_miner, out)];
+    let belt = game.extraction.carrier(false, flow).unwrap().kind.name.clone();
+    let short = belt.rsplit(' ').next().unwrap().to_string();
+    let labels = app.wire_label_texts.clone();
+    let belt_out = app.wire_flow[&(after_miner, app.graph()[miner].outputs[0].1)];
+    eprintln!("ore {flow} needs {short}; labels {labels:?}; out of the miner {belt_out}");
+    assert_eq!(labels.len(), app.graph().iter_connections().count() - 1, "every wire but the resource's has a label: {labels:?}");
     assert!((app.outputs()[0].1 - 60.0).abs() < 1e-6, "it still extracts all the ore needed");
 
     // A Pipeline Pump: water passes through, and it draws the Docs' power.

@@ -75,6 +75,14 @@ pub fn footer(ui: &mut Ui, s: &mut UserState, graph: &FactoryGraph, node_id: Nod
     });
 }
 
+/// A resource node's wire into an extractor: not a belt or pipe, as the
+/// extractor stands on the resource node and takes from it directly. Only
+/// what it puts out goes on a conveyor.
+pub fn from_the_ground(g: &FactoryGraph, output: egui_node_graph2::OutputId, input: egui_node_graph2::InputId) -> bool {
+    let (Some(o), Some(i)) = (g.try_get_output(output), g.try_get_input(input)) else { return false };
+    matches!(g[o.node].user_data.kind, NodeKind::Resource { .. }) && matches!(g[i.node].user_data.kind, NodeKind::Extractor { .. })
+}
+
 /// MW per unit per minute of each raw resource, extracted as the settings
 /// say: what the solver counts for extractors' power.
 pub fn mw_per_unit(game: &GameData, settings: &ExtractionSettings) -> std::collections::BTreeMap<String, f64> {

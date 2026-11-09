@@ -680,6 +680,9 @@ impl NodeDataTrait for NodeData {
             NodeKind::Pole { id } => crate::power_net::wire_count(graph, node_id) < crate::power_net::max_wires(s.pole_tiers.get(id).copied().unwrap_or(1)),
             // A whole factory's block takes any number of links.
             NodeKind::Factory { .. } => true,
+            // A resource is the ground, not a belt: any number of extractors
+            // can stand on it.
+            NodeKind::Resource { .. } if matches!(port, AnyParameterId::Output(_)) => true,
             // A building's belt or pipe port takes one, as in game: more
             // goes through a merger or splitter.
             NodeKind::Recipe { .. } | NodeKind::Resource { .. } | NodeKind::Input { .. } | NodeKind::Output { .. } | NodeKind::Sink { .. } | NodeKind::Extractor { .. } => wires < 1,
