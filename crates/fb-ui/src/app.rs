@@ -1806,6 +1806,15 @@ impl FactoryApp {
         if ctx.input(|i| i.key_pressed(Key::F2)) {
             self.start_rename();
         }
+        // Enter opens the selected factory block, as a double-click does.
+        let menus_open = self.finder.is_some() || self.context_menu.is_some() || self.master_menu.is_some() || self.factory_menu.is_some();
+        if !menus_open && self.on_master() && ctx.input(|i| i.key_pressed(Key::Enter) && i.modifiers.is_none()) {
+            if let [one] = self.state.selected_nodes[..] {
+                if let Some(f) = crate::project::factory_of(&self.state.graph, one) {
+                    self.switch_to = Some(f);
+                }
+            }
+        }
         if ctx.input(|i| i.key_pressed(Key::C) && i.modifiers.is_none()) && self.has_selection() {
             self.add_frame_around_selection();
         }

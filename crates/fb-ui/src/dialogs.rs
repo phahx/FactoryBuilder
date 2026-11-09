@@ -79,6 +79,9 @@ pub(crate) fn modal(
     body: impl FnOnce(&mut egui::Ui),
     buttons: &[(&str, bool)],
 ) -> Option<usize> {
+    // Enter takes the action (the last button), as dialogs do; a field
+    // that takes Enter itself (it had focus coming in) keeps it.
+    let enter = ctx.memory(|m| m.focused().is_none()) && ctx.input(|i| i.key_pressed(egui::Key::Enter) && i.modifiers.is_none());
     // Dim the app and swallow clicks behind the dialog.
     let screen = ctx.screen_rect();
     egui::Area::new(egui::Id::new("modal_backdrop"))
@@ -125,6 +128,9 @@ pub(crate) fn modal(
                     }
                 });
         });
+    if clicked.is_none() && enter {
+        clicked = buttons.iter().rposition(|_| true).filter(|i| buttons[*i].1);
+    }
     clicked
 }
 
@@ -618,7 +624,7 @@ pub fn show(app: &mut FactoryApp, ctx: &egui::Context) {
         Dialog::Saves(d) => crate::progress_ui::show(app, ctx, d),
         Dialog::Shortcuts => {
             let rows = [
-                ("New factory", "Ctrl+N"),
+                ("New project (it starts with the HUB)", "Ctrl+N"),
                 ("Open", "Ctrl+O"),
                 ("Save / Save as", "Ctrl+S / Ctrl+Shift+S"),
                 ("Undo / Redo", "Ctrl+Z / Ctrl+Y"),
@@ -629,6 +635,8 @@ pub fn show(app: &mut FactoryApp, ctx: &egui::Context) {
                 ("Select all", "Ctrl+A"),
                 ("Duplicate / Delete", "Ctrl+D / Del"),
                 ("Rename a node or frame", "F2"),
+                ("Open the selected factory (master graph)", "Enter, or double-click"),
+                ("A dialog's action / Cancel", "Enter / Esc"),
                 ("Comment frame around selection", "C"),
                 ("Find", "Ctrl+F"),
                 ("Pan", "Middle-drag, or Ctrl+drag"),

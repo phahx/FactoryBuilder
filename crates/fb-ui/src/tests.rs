@@ -3425,3 +3425,38 @@ fn a_new_project_starts_with_the_hub_and_its_two_burners() {
     let hubs = app.factory_ids().into_iter().filter(|id| app.is_hub(*id)).count();
     assert_eq!(hubs, 1);
 }
+
+#[test]
+fn enter_opens_the_selected_factory_and_confirms_a_dialog() {
+    use crate::project::{block_of, MASTER};
+    let Some((ctx, mut app, _)) = harness() else { return };
+    frames(&ctx, &mut app, 2);
+    let first = app.active;
+    let second = app.add_factory("Rods", None);
+    app.activate(MASTER);
+    frames(&ctx, &mut app, 2);
+    // Select a block, Enter: it opens, as a double-click does.
+    app.state.selected_nodes = vec![block_of(&app.state.graph, second).unwrap()];
+    press_key(&ctx, &mut app, egui::Key::Enter);
+    frames(&ctx, &mut app, 1);
+    assert_eq!(app.active, second);
+    // Select one, Delete, Enter: deleted, as with the dialog's Delete button.
+    app.activate(MASTER);
+    frames(&ctx, &mut app, 2);
+    app.state.selected_nodes = vec![block_of(&app.state.graph, second).unwrap()];
+    press_key(&ctx, &mut app, egui::Key::Delete);
+    frames(&ctx, &mut app, 1);
+    assert!(matches!(app.dialog, crate::dialogs::Dialog::DeleteFactories { .. }));
+    press_key(&ctx, &mut app, egui::Key::Enter);
+    frames(&ctx, &mut app, 1);
+    assert!(matches!(app.dialog, crate::dialogs::Dialog::None));
+    assert_eq!(app.factory_ids(), vec![first]);
+    assert_eq!(app.active, MASTER, "deleting doesn't open anything");
+    // Escape still cancels.
+    app.state.selected_nodes = vec![block_of(&app.state.graph, first).unwrap()];
+    press_key(&ctx, &mut app, egui::Key::Delete);
+    frames(&ctx, &mut app, 1);
+    press_key(&ctx, &mut app, egui::Key::Escape);
+    frames(&ctx, &mut app, 1);
+    assert_eq!(app.factory_ids(), vec![first]);
+}
