@@ -6,7 +6,7 @@ and edit the resulting node graph by hand. Rates, machine counts and power updat
 It reads recipes from your own install (`CommunityResources/Docs/en-US.json`) and uses the
 game's own icons, font and colours, extracted locally. Nothing from the game is bundled.
 
-![A planned factory: the plan settings on the left, the node graph in the middle, totals on the right](docs/screenshots/plan.png)
+![A Motor factory as Plan factory lays it out: the plan settings on the left, the node graph in the middle, totals on the right](docs/screenshots/plan.png)
 
 ## Download
 
@@ -14,7 +14,7 @@ Get `FactoryBuilder-<version>.zip` from the [latest release](https://github.com/
 (built from `main` on every push). Unzip it and run `Factory Builder.exe`; the first launch
 installs it (see [First launch](#first-launch)). Windows only, and it needs Satisfactory
 installed. The exe isn't code-signed, so Windows SmartScreen may warn the first time:
-**More info › Run anyway**.
+**More info â€º Run anyway**.
 
 ## Screenshots
 
@@ -24,7 +24,12 @@ Every node shows its machines, clock speed, Somersloops and what flows in and ou
 
 Let go of a wire on empty canvas and Add node lists only what fits it:
 
-![Add node, filtered to what takes Iron Plate](docs/screenshots/add-node.png)
+![Add node, filtered to what takes Iron Rod](docs/screenshots/add-node.png)
+
+Open a room and others plan with you live: everyone's cursor, what they have selected,
+pings and short messages (see [Rooms](#rooms)):
+
+![A room with two others: their cursors, selections, a ping and messages](docs/screenshots/room.png)
 
 The Map tab shows a save on the game map: resource nodes, every machine, belts and power.
 Drag to select machines and import them into the planner as a factory:
