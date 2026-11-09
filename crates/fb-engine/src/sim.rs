@@ -148,8 +148,16 @@ pub fn simulate(nodes: &[SimNode], links: &[SimLink]) -> SimResult {
             res.received[i][p] = if n.sink { (s - pull).max(0.0) } else { d * speed[i] };
         }
         for (p, &s) in n.outputs.iter().enumerate() {
-            if connected[out_base[i] + p] {
-                res.shipped[i][p] = s * speed[i];
+            let port = out_base[i] + p;
+            if connected[port] {
+                // Without a sink, what's shipped is what's taken: the hair
+                // of slack the balance allows (see BALANCE_TOLERANCE) isn't
+                // reported as more going out than comes in (5.0007 for 5).
+                let root = uf.find(port);
+                let (supply, pull) = totals.get(&root).copied().unwrap_or((0.0, 0.0));
+                let sink = manifolds.get(&root).is_some_and(|m| m.has_sink);
+                let fit = if !sink && supply > pull && supply > 0.0 { pull / supply } else { 1.0 };
+                res.shipped[i][p] = s * speed[i] * fit;
             }
         }
     }

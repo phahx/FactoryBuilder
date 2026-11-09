@@ -236,6 +236,9 @@ pub struct UserState {
     /// Power pole tiers (pole id -> 1 to 3), from the master graph's plan.
     #[serde(skip)]
     pub pole_tiers: HashMap<u32, u8>,
+    /// Resource nodes with extractors on them: what those extract.
+    #[serde(skip)]
+    pub ground: HashMap<NodeId, f64>,
 }
 
 impl UserState {
@@ -530,8 +533,25 @@ impl WidgetValueTrait for PortValue {
         node_id: NodeId,
         ui: &mut Ui,
         s: &mut UserState,
-        _d: &NodeData,
+        d: &NodeData,
     ) -> Vec<Resp> {
+        // A resource node with extractors on it gives what they extract:
+        // its rate is theirs to set, so it's shown, not edited.
+        if let (PortValue::Number { suffix, .. }, NodeKind::Resource { .. }, Some(&got)) = (&*self, &d.kind, s.ground.get(&node_id)) {
+            if name == RATE {
+                let suffix = suffix.clone();
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Extracted").color(TEXT_DIM));
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        ui.label(RichText::new(suffix).color(TEXT_DIM));
+                        ui.label(RichText::new(fmt_num(got)).color(TEXT));
+                    });
+                })
+                .response
+                .on_hover_text("What the extractors on this resource take. Set their machines and clock speed to change it.");
+                return vec![];
+            }
+        }
         match self {
             PortValue::Number {
                 value,

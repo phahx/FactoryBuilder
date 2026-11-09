@@ -2554,6 +2554,47 @@ fn extractors_and_pumps_are_buildings_with_power() {
 }
 
 #[test]
+fn extractors_extract_by_themselves_and_their_resource_shows_it() {
+    use crate::graph::{NodeKind, Template, MACHINES, RATE};
+    let Some((ctx, mut app, _)) = harness() else { return };
+    frames(&ctx, &mut app, 2);
+    let (ore, item) = (app.add_test_node(Template::Resource("Desc_OreIron_C".into()), egui::pos2(0.0, 0.0)), "Desc_OreIron_C");
+    let miner = app.add_test_node(Template::Extractor { item: item.into(), class: "Build_MinerMk1_C".into(), purity: fb_model::Purity::Normal }, egui::pos2(350.0, 0.0));
+    let out = app.add_test_node(Template::Output(item.into()), egui::pos2(750.0, 0.0));
+    let set = |app: &mut FactoryApp, n: egui_node_graph2::NodeId, name: &str, v: f64| {
+        let i = app.state.graph[n].get_input(name).unwrap();
+        app.state.graph[i].value.set_number(v);
+    };
+    set(&mut app, ore, RATE, 30.0);
+    set(&mut app, miner, MACHINES, 1.0);
+    set(&mut app, out, RATE, 5.0);
+    let (ground, _) = connect(&mut app, ore, miner, item);
+    connect(&mut app, miner, out, item);
+    frames(&ctx, &mut app, 2);
+    // What comes after takes 5: the miner extracts 5 (backed up, as in
+    // game), not starved by its resource node.
+    let stat = |app: &FactoryApp, n, name: &str| app.user.ports[&(n, name.to_string())];
+    let port = app.graph()[miner].inputs.iter().find(|(_, i)| *i == ground).map(|(n, _)| n.clone()).unwrap();
+    let s = stat(&app, miner, &port);
+    assert!((s.have - 5.0).abs() < 1e-6 && (s.want - 5.0).abs() < 1e-6, "takes what it extracts: {s:?}");
+    assert!((app.user.ground[&ore] - 5.0).abs() < 1e-6, "the resource shows what's extracted");
+    let miner_mk1 = crate::extractors::per_machine(&app.user.game, "Build_MinerMk1_C", fb_model::Purity::Normal);
+    assert_eq!(miner_mk1, 60.0, "a Miner Mk.1 on a Normal node: 60 per minute (Docs)");
+    assert!((app.user.nodes[&miner].efficiency - 5.0 / 60.0).abs() < 1e-4);
+    let texts = drawn_texts(&ctx, &mut app);
+    assert!(texts.iter().any(|t| t == "Extracted"), "the resource's rate is shown, not edited");
+    // The resource node's old Rate doesn't limit anything.
+    set(&mut app, ore, RATE, 1.0);
+    set(&mut app, out, RATE, 90.0);
+    app.changed();
+    frames(&ctx, &mut app, 2);
+    let got = app.outputs().iter().find(|o| o.0 == item).map(|o| o.1).unwrap();
+    assert!((got - 60.0).abs() < 1e-6, "one Miner Mk.1 makes its 60, whatever the resource said: {got}");
+    assert!((app.summary.resources[item] - 60.0).abs() < 1e-6, "Raw resources counts what's extracted");
+    assert!(matches!(app.graph()[miner].user_data.kind, NodeKind::Extractor { .. }));
+}
+
+#[test]
 fn a_wire_dropped_on_a_node_connects_to_the_port_that_fits() {
     use crate::graph::Template;
     use egui_node_graph2::AnyParameterId;

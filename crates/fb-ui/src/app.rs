@@ -1102,6 +1102,7 @@ impl FactoryApp {
         self.wire_flow = e.wire_flow;
         self.user.ports = e.ports;
         self.user.nodes = e.nodes;
+        self.user.ground = e.ground;
         self.summary = e.summary;
     }
 
@@ -2716,6 +2717,8 @@ pub(crate) struct Evaluation {
     pub ports: std::collections::HashMap<(NodeId, String), PortStat>,
     pub nodes: std::collections::HashMap<NodeId, NodeStat>,
     pub wire_flow: std::collections::HashMap<(egui_node_graph2::InputId, egui_node_graph2::OutputId), f64>,
+    /// Resource nodes with extractors on them: what those extract, per minute.
+    pub ground: std::collections::HashMap<NodeId, f64>,
 }
 
 /// Runs the flow simulation over a factory graph (or the master graph of
@@ -2741,8 +2744,9 @@ pub(crate) fn evaluate_graph(game: &GameData, g: &FactoryGraph, cache: &mut SimC
             continue;
         }
         for output in outputs {
-            // Wires through mergers and splitters go in below, joined up.
-            if router(g[output].node) || router(g[input].node) {
+            // Wires through mergers and splitters go in below, joined up;
+            // an extractor takes from its resource node directly (no belt).
+            if router(g[output].node) || router(g[input].node) || crate::extractors::from_the_ground(g, output, input) {
                 continue;
             }
             if let Some(l) = sim_link(output, input) {
@@ -2771,10 +2775,13 @@ pub(crate) fn evaluate_graph(game: &GameData, g: &FactoryGraph, cache: &mut SimC
     for (i, &id) in ids.iter().enumerate() {
         let (ins, outs) = node_rates(game, g, id);
         let factory = matches!(g[id].user_data.kind, NodeKind::Factory { .. });
+        // An extractor stands on its resource node: it needs nothing brought
+        // in, only somewhere for what it extracts to go.
+        let extractor = matches!(g[id].user_data.kind, NodeKind::Extractor { .. });
         sim_nodes.push(SimNode {
             // A factory block's unlinked inputs come from outside the
             // project, so they never hold it up.
-            inputs: ins.iter().enumerate().map(|(p, x)| if factory && !connected_in.contains(&(i, p)) { 0.0 } else { x.1 }).collect(),
+            inputs: ins.iter().enumerate().map(|(p, x)| if extractor || (factory && !connected_in.contains(&(i, p))) { 0.0 } else { x.1 }).collect(),
             outputs: outs.iter().map(|x| x.1).collect(),
             throttles: matches!(g[id].user_data.kind, NodeKind::Recipe { .. } | NodeKind::Extractor { .. }),
             sink: matches!(g[id].user_data.kind, NodeKind::Sink { .. }),
@@ -2853,6 +2860,7 @@ pub(crate) fn evaluate_graph(game: &GameData, g: &FactoryGraph, cache: &mut SimC
                     }
                 }
             }
+            // With extractors on it, what they extract counts instead.
             NodeKind::Resource { item } => *sum.resources.entry(item.clone()).or_default() += result.shipped[i].iter().sum::<f64>(),
             NodeKind::Input { item } => *sum.inputs.entry(item.clone()).or_default() += result.shipped[i].iter().sum::<f64>(),
             NodeKind::Output { item } => {
@@ -2879,6 +2887,7 @@ pub(crate) fn evaluate_graph(game: &GameData, g: &FactoryGraph, cache: &mut SimC
                     e.1 += input_number(g, id, MACHINES);
                     sum.power_shards += setup.shards();
                     sum.extracted.entry(item.clone()).or_default().push(crate::extractors::line(game, class, *purity, &setup));
+                    *sum.resources.entry(item.clone()).or_default() += result.shipped[i].iter().sum::<f64>();
                     if eff < 0.995 {
                         sum.issues.push((id, format!("{} runs at {:.0}%", ex.name, eff * 100.0)));
                     }
@@ -2899,6 +2908,25 @@ pub(crate) fn evaluate_graph(game: &GameData, g: &FactoryGraph, cache: &mut SimC
             *sum.generation.get_or_insert(0.0) += mw;
         }
         e.nodes.insert(id, NodeStat { efficiency: eff, power_mw: power });
+    }
+    // Resource nodes and the extractors on them: what each extractor
+    // extracts, which its resource node shows as its total.
+    for (input, output) in g.iter_connections() {
+        if !crate::extractors::from_the_ground(g, output, input) {
+            continue;
+        }
+        let (r, x) = (g[output].node, g[input].node);
+        let got: f64 = result.shipped[index[&x]].iter().sum();
+        e.wire_flow.insert((input, output), got);
+        *e.ground.entry(r).or_default() += got;
+        if let Some((name, _)) = g[x].inputs.iter().find(|(_, i)| *i == input) {
+            e.ports.insert((x, name.clone()), PortStat { have: got, want: got, connected: true });
+        }
+    }
+    for (&r, &total) in &e.ground {
+        if let Some((name, _)) = g[r].outputs.first() {
+            e.ports.insert((r, name.clone()), PortStat { have: total, want: total, connected: true });
+        }
     }
     crate::power_net::evaluate(g, &mut e.ports, &mut sum.issues);
     e.summary = sum;
