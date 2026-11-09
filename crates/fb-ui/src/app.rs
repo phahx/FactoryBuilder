@@ -45,6 +45,10 @@ pub struct Planner {
     /// The master graph's power grids (only the master graph has any).
     #[serde(default, skip_serializing_if = "crate::power_net::PowerNet::is_empty")]
     pub power_net: crate::power_net::PowerNet,
+    /// Belts (and pipes) chosen for wires; the rest take the slowest that
+    /// carries their flow.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub belts: Vec<crate::wires::BeltChoice>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -175,6 +179,8 @@ pub struct FactoryApp {
     /// The master graph's right-click menu on empty canvas: where it opened
     /// (screen) and where a factory added from it goes (unzoomed graph).
     pub(crate) master_menu: Option<(egui::Pos2, egui::Pos2)>,
+    /// A wire's belt menu (its label was clicked): the wire and where.
+    pub(crate) belt_menu: Option<(egui_node_graph2::InputId, egui_node_graph2::OutputId, egui::Pos2)>,
     /// A factory being added from that menu (via a file or share code) goes
     /// here, and the master graph stays open.
     pub(crate) block_spot: Option<egui::Pos2>,
@@ -293,6 +299,7 @@ impl FactoryApp {
             power_links: true,
             flow_arrows: true,
             master_menu: None,
+            belt_menu: None,
             block_spot: None,
             factory_menu: None,
             node_rename: None,
@@ -1103,7 +1110,7 @@ impl FactoryApp {
     /// the nodes and the overview show.
     fn evaluate(&mut self) {
         let game = self.user.game.clone();
-        let e = evaluate_graph(&game, &self.state.graph, &mut self.sim_cache, &self.planner.targets);
+        let e = evaluate_graph(&game, &self.state.graph, &mut self.sim_cache, &self.planner.targets, &self.planner.belts);
         self.wire_flow = e.wire_flow;
         self.user.ports = e.ports;
         self.user.nodes = e.nodes;
@@ -1179,6 +1186,7 @@ impl FactoryApp {
                 }
             });
         self.node_menu(ctx);
+        crate::wires::belt_menu(self, ctx);
         self.node_title_editor(ctx);
         self.frame_menu(ctx);
         crate::project_ui::master_canvas_menu(self, ctx);
@@ -2741,7 +2749,7 @@ pub(crate) struct Evaluation {
 /// Runs the flow simulation over a factory graph (or the master graph of
 /// factory blocks) and works out the stats the nodes and overview show.
 /// `cache` skips the simulation when nothing that affects it changed.
-pub(crate) fn evaluate_graph(game: &GameData, g: &FactoryGraph, cache: &mut SimCache, targets: &[Target]) -> Evaluation {
+pub(crate) fn evaluate_graph(game: &GameData, g: &FactoryGraph, cache: &mut SimCache, targets: &[Target], belts: &[crate::wires::BeltChoice]) -> Evaluation {
     let ids: Vec<NodeId> = g.iter_nodes().collect();
     let index: BTreeMap<NodeId, usize> = ids.iter().enumerate().map(|(i, id)| (*id, i)).collect();
     let item_inputs = |id: NodeId| -> Vec<egui_node_graph2::InputId> {
@@ -2803,8 +2811,38 @@ pub(crate) fn evaluate_graph(game: &GameData, g: &FactoryGraph, cache: &mut SimC
             throttles: matches!(g[id].user_data.kind, NodeKind::Recipe { .. } | NodeKind::Extractor { .. }),
             // Outputs take whatever arrives, like sinks.
             sink: matches!(g[id].user_data.kind, NodeKind::Sink { .. } | NodeKind::Output { .. }),
+            ..Default::default()
         });
         rates.push((ins, outs));
+    }
+    // A chosen belt or pipe carries at most its speed: the machine port at
+    // each end of the wire (not mergers and splitters) is held to it.
+    for b in belts {
+        let (Some(o), Some(inp)) = (g.try_get_output(b.output), g.try_get_input(b.input)) else { continue };
+        if !g.connections(b.input).contains(&b.output) {
+            continue;
+        }
+        let Some(cap) = crate::wires::speed(game, game.item_form(&o.typ.0).is_fluid(), b.tier) else { continue };
+        if !router(o.node) {
+            let i = index[&o.node];
+            if let Some(p) = g[o.node].outputs.iter().position(|(_, x)| *x == b.output) {
+                let caps = &mut sim_nodes[i].out_caps;
+                caps.resize(rates[i].1.len().max(caps.len()), f64::INFINITY);
+                if p < caps.len() {
+                    caps[p] = caps[p].min(cap);
+                }
+            }
+        }
+        if !router(inp.node) && !crate::extractors::from_the_ground(g, b.output, b.input) {
+            let i = index[&inp.node];
+            if let Some(p) = item_inputs(inp.node).iter().position(|x| *x == b.input) {
+                let caps = &mut sim_nodes[i].in_caps;
+                caps.resize(rates[i].0.len().max(caps.len()), f64::INFINITY);
+                if p < caps.len() {
+                    caps[p] = caps[p].min(cap);
+                }
+            }
+        }
     }
     // A factory's surplus goes to its own storage: each linked output gets
     // an overflow, so sending more than the others take never slows it.
@@ -2814,7 +2852,7 @@ pub(crate) fn evaluate_graph(game: &GameData, g: &FactoryGraph, cache: &mut SimC
             for p in 0..rates[i].1.len() {
                 if connected_out.contains(&(i, p)) {
                     sim_links.push(SimLink { from_node: i, from_port: p, to_node: sim_nodes.len(), to_port: 0 });
-                    sim_nodes.push(SimNode { inputs: vec![0.0], outputs: vec![], throttles: false, sink: true });
+                    sim_nodes.push(SimNode { inputs: vec![0.0], outputs: vec![], throttles: false, sink: true, ..Default::default() });
                 }
             }
         }

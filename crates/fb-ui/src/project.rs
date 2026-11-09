@@ -388,6 +388,7 @@ impl FactoryApp {
         self.state.pan_zoom.started = false;
         self.frames = Default::default();
         self.master_menu = None;
+        self.belt_menu = None;
         self.block_spot = None;
         self.node_rename = None;
         self.snap_raw.clear();
@@ -435,7 +436,7 @@ impl FactoryApp {
         let Some(d) = self.doc_mut(id) else { return FactoryInfo::default() };
         if d.info.is_none() {
             if let Some(b) = &d.body {
-                let e = evaluate_graph(&game, &b.state.graph, &mut None, &b.planner.targets);
+                let e = evaluate_graph(&game, &b.state.graph, &mut None, &b.planner.targets, &b.planner.belts);
                 d.info = Some(FactoryInfo::from_summary(&name, &e.summary));
             }
         }
@@ -850,7 +851,7 @@ impl FactoryApp {
             row += 160.0;
             for (_, i, _) in list {
                 if let (Some(to), Some(input)) = (file_pos(g[*i].node), item_input_index(*i)) {
-                    f.wires.push(Wire { from: at, output: 0, to, input, slot: 0 });
+                    f.wires.push(Wire { from: at, output: 0, to, input, slot: 0, belt: None });
                 }
             }
         }
@@ -861,7 +862,7 @@ impl FactoryApp {
             row += 160.0;
             for (o, _, _) in list {
                 if let (Some(from), Some(output)) = (file_pos(g[*o].node), output_index(*o)) {
-                    f.wires.push(Wire { from, output, to: at, input: 0, slot: 0 });
+                    f.wires.push(Wire { from, output, to: at, input: 0, slot: 0, belt: None });
                 }
             }
         }
@@ -971,7 +972,7 @@ impl FactoryApp {
             node(Kind::Recipe, "Recipe_IngotIron_C", Some(2.0), None, 400.0),
             node(Kind::Output, "Desc_IronIngot_C", None, Some(60.0), 800.0),
         ];
-        a.wires = vec![Wire { from: 0, output: 0, to: 1, input: 0, slot: 0 }, Wire { from: 1, output: 0, to: 2, input: 0, slot: 0 }];
+        a.wires = vec![Wire { from: 0, output: 0, to: 1, input: 0, slot: 0, belt: None }, Wire { from: 1, output: 0, to: 2, input: 0, slot: 0, belt: None }];
         let mut b = FactoryFile::new(Some("Iron Rods".into()));
         b.nodes = vec![
             node(Kind::Input, "Desc_IronIngot_C", None, Some(90.0), 0.0),

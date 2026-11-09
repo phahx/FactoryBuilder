@@ -262,7 +262,7 @@ fn import_with(world: &World, selected: &BTreeSet<u32>, game: &GameData, map: Op
     let mut slots: BTreeMap<(usize, usize), usize> = BTreeMap::new();
     for (from, output, to, input) in wires {
         let slot = slots.entry((from, output)).or_default();
-        f.wires.push(Wire { from, output, to, input, slot: *slot });
+        f.wires.push(Wire { from, output, to, input, slot: *slot, belt: None });
         *slot += 1;
     }
     report.nodes = f.nodes.len();

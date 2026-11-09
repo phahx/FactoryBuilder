@@ -1776,13 +1776,15 @@ fn wires_name_the_belt_they_need() {
     let Some((ctx, mut app, _)) = harness() else { return };
     frames(&ctx, &mut app, 2);
     plan_plates(&ctx, &mut app, 60.0);
-    // 90 ore/min needs a Mk.2 (120); 60 plates/min fit a Mk.1 (60).
+    // 90 ingots/min need a Mk.2 (120); 60 plates/min fit a Mk.1 (60). Each
+    // label gives the belt's speed under it.
     let texts = app.wire_label_texts.clone();
-    assert!(texts.contains(&"Mk.2".to_string()), "{texts:?}");
-    assert!(texts.contains(&"Mk.1".to_string()), "{texts:?}");
+    assert!(texts.contains(&"Mk.2\n120/min".to_string()), "{texts:?}");
+    assert!(texts.contains(&"Mk.1\n60/min".to_string()), "{texts:?}");
     plan_plates(&ctx, &mut app, 3000.0);
-    // 4500 ore/min is more than one Mk.6 (1200) carries: 4 in parallel.
-    assert!(app.wire_label_texts.contains(&"4× Mk.6".to_string()), "{:?}", app.wire_label_texts);
+    // 4500 ingots/min is more than one Mk.6 (1200) carries: 4 in parallel
+    // (zoomed out this far, the label has room for the tier only).
+    assert!(app.wire_label_texts.iter().any(|t| t.starts_with("4× Mk.6")), "{:?}", app.wire_label_texts);
     app.wire_labels = false;
     frames(&ctx, &mut app, 1);
     assert!(app.wire_label_texts.is_empty() || !app.wire_labels);
@@ -1993,8 +1995,8 @@ fn ingot_factory(name: &str, smelters: f64) -> crate::portable::FactoryFile {
     f.nodes.push(node(Kind::Resource, "Desc_OreIron_C", None, Some(30.0 * smelters), 0.0));
     f.nodes.push(node(Kind::Recipe, "Recipe_IngotIron_C", Some(smelters), None, 400.0));
     f.nodes.push(node(Kind::Output, "Desc_IronIngot_C", None, Some(30.0 * smelters), 800.0));
-    f.wires.push(Wire { from: 0, output: 0, to: 1, input: 0, slot: 0 });
-    f.wires.push(Wire { from: 1, output: 0, to: 2, input: 0, slot: 0 });
+    f.wires.push(Wire { from: 0, output: 0, to: 1, input: 0, slot: 0, belt: None });
+    f.wires.push(Wire { from: 1, output: 0, to: 2, input: 0, slot: 0, belt: None });
     f
 }
 
@@ -2006,8 +2008,8 @@ fn rod_factory(name: &str) -> crate::portable::FactoryFile {
     f.nodes.push(node(Kind::Input, "Desc_IronIngot_C", None, Some(60.0), 0.0));
     f.nodes.push(node(Kind::Recipe, "Recipe_IronRod_C", Some(4.0), None, 400.0));
     f.nodes.push(node(Kind::Output, "Desc_IronRod_C", None, Some(60.0), 800.0));
-    f.wires.push(Wire { from: 0, output: 0, to: 1, input: 0, slot: 0 });
-    f.wires.push(Wire { from: 1, output: 0, to: 2, input: 0, slot: 0 });
+    f.wires.push(Wire { from: 0, output: 0, to: 1, input: 0, slot: 0, belt: None });
+    f.wires.push(Wire { from: 1, output: 0, to: 2, input: 0, slot: 0, belt: None });
     f
 }
 
@@ -2112,7 +2114,7 @@ fn power_plant(app: &FactoryApp, name: &str, machines: f64) -> crate::portable::
     f.nodes.push(Node { kind: Kind::Recipe, class: gen.into(), machines: Some(machines), clock: Some(100.0), sloops: None, rate: None, name: None, color: None, item: None, purity: None, x: 400.0, y: 0.0 });
     for (k, a) in r.ingredients.iter().enumerate() {
         f.nodes.push(Node { kind: Kind::Input, class: a.item.clone(), machines: None, clock: None, sloops: None, rate: Some(r.per_min(a) * machines), name: None, color: None, item: None, purity: None, x: 0.0, y: 200.0 * k as f32 });
-        f.wires.push(Wire { from: k + 1, output: 0, to: 0, input: k, slot: 0 });
+        f.wires.push(Wire { from: k + 1, output: 0, to: 0, input: k, slot: 0, belt: None });
     }
     f
 }
@@ -2603,6 +2605,56 @@ fn extractors_extract_by_themselves_and_their_resource_shows_it() {
 }
 
 #[test]
+fn a_chosen_belt_limits_its_wire() {
+    use crate::graph::{Template, MACHINES};
+    let Some((ctx, mut app, _)) = harness() else { return };
+    frames(&ctx, &mut app, 2);
+    app.minimap = false;
+    let item = "Desc_OreIron_C";
+    let at = |app: &FactoryApp, x: f32, y: f32| app.screen_to_graph(egui::pos2(x, y));
+    let p = at(&app, 380.0, 200.0);
+    let miner = app.add_test_node(Template::Extractor { item: item.into(), class: "Build_MinerMk1_C".into(), purity: fb_model::Purity::Normal }, p);
+    let p = at(&app, 850.0, 200.0);
+    let smelter = app.add_test_node(Template::Recipe("Recipe_IngotIron_C".into()), p);
+    for (n, v) in [(miner, 2.0), (smelter, 4.0)] {
+        let i = app.state.graph[n].get_input(MACHINES).unwrap();
+        app.state.graph[i].value.set_number(v);
+    }
+    let wire = connect(&mut app, miner, smelter, item);
+    frames(&ctx, &mut app, 3);
+    // 2 Miners Mk.1 (60 each): 120 a minute, on the slowest belt that
+    // carries it, a Mk.2 (120).
+    assert!((app.wire_flow[&wire] - 120.0).abs() < 1e-6);
+    assert!(app.wire_label_texts.contains(&"Mk.2\n120/min".to_string()), "{:?}", app.wire_label_texts);
+    // Its menu: a Mk.1 (60) instead, which holds the line to 60.
+    app.belt_menu = Some((wire.0, wire.1, egui::pos2(600.0, 300.0)));
+    frames(&ctx, &mut app, 1);
+    press(&ctx, &mut app, "    Conveyor Belt Mk.1");
+    frames(&ctx, &mut app, 3);
+    assert_eq!(crate::wires::chosen(&app.planner.belts, wire.0, wire.1), Some(1));
+    assert!((app.wire_flow[&wire] - 60.0).abs() < 1e-6, "{}", app.wire_flow[&wire]);
+    assert!((app.user.nodes[&smelter].efficiency - 0.5).abs() < 1e-6, "the smelters get half their ore");
+    assert!(app.wire_label_texts.contains(&"Mk.1\n60/min".to_string()), "{:?}", app.wire_label_texts);
+    // Kept in the factory file, and it limits there too.
+    let json = app.to_portable().to_json(false);
+    let f = crate::portable::FactoryFile::parse(&json).unwrap();
+    assert_eq!(f.wires.iter().filter_map(|w| w.belt).collect::<Vec<_>>(), vec![1]);
+    let (ctx2, mut other, _) = harness().unwrap();
+    frames(&ctx2, &mut other, 2);
+    other.open_factory(&ctx2, f, None);
+    frames(&ctx2, &mut other, 3);
+    assert_eq!(other.planner.belts.len(), 1);
+    assert!(other.wire_flow.values().any(|v| (v - 60.0).abs() < 1e-6), "{:?}", other.wire_flow);
+    // Automatic again: back to 120.
+    app.belt_menu = Some((wire.0, wire.1, egui::pos2(600.0, 300.0)));
+    frames(&ctx, &mut app, 1);
+    press(&ctx, &mut app, "    Automatic");
+    frames(&ctx, &mut app, 3);
+    assert!(app.planner.belts.is_empty());
+    assert!((app.wire_flow[&wire] - 120.0).abs() < 1e-6);
+}
+
+#[test]
 fn a_wire_dropped_on_a_node_connects_to_the_port_that_fits() {
     use crate::graph::Template;
     use egui_node_graph2::AnyParameterId;
@@ -2749,7 +2801,7 @@ fn moving_a_selection_to_a_new_factory_keeps_the_totals() {
         node(Kind::Recipe, "Recipe_IronRod_C", Some(2.0), None, 800.0),
         node(Kind::Output, "Desc_IronRod_C", None, Some(30.0), 1200.0),
     ];
-    f.wires = (0..3).map(|k| Wire { from: k, output: 0, to: k + 1, input: 0, slot: 0 }).collect();
+    f.wires = (0..3).map(|k| Wire { from: k, output: 0, to: k + 1, input: 0, slot: 0, belt: None }).collect();
     app.add_factory_file(&ctx, &f);
     let here = app.active;
     frames(&ctx, &mut app, 2);

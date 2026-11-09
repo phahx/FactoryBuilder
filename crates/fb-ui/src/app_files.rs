@@ -185,7 +185,8 @@ impl FactoryApp {
                     let from_node = g[out].node;
                     let (Some(&from), Some(output)) = (index.get(&from_node), g[from_node].outputs.iter().position(|(_, o)| *o == out)) else { continue };
                     let slot = g.output_connections(out).iter().position(|i| *i == iid).unwrap_or(0);
-                    f.wires.push(portable::Wire { from, output, to, input, slot });
+                    let belt = crate::wires::chosen(&planner.belts, iid, out);
+                    f.wires.push(portable::Wire { from, output, to, input, slot, belt });
                 }
             }
         }
@@ -236,6 +237,8 @@ impl FactoryApp {
             frames: Vec::new(),
             // Only the master graph has power grids (load_project_file).
             power_net: Default::default(),
+            // Belts come with the wires (insert_portable).
+            belts: Vec::new(),
             power: PowerSettings {
                 mode: if plan.generate_power { PowerMode::Generate } else { PowerMode::Grid },
                 generators: match &plan.generators {
@@ -310,8 +313,12 @@ impl FactoryApp {
                 continue; // a different item: the recipe changed between game versions
             }
             let pos = g.connections(iid).len();
+            let fluid = game.item_form(&g[oid].typ.0).is_fluid();
             self.state.graph.add_connection(oid, iid, pos);
             slots.entry(oid).or_default().push((w.slot, iid));
+            if let Some(tier) = w.belt.filter(|t| crate::wires::speed(&game, fluid, *t).is_some()) {
+                self.planner.belts.push(crate::wires::BeltChoice { input: iid, output: oid, tier });
+            }
         }
         for (oid, mut list) in slots {
             list.sort_by_key(|(slot, _)| *slot);

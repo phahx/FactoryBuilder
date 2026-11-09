@@ -28,6 +28,10 @@ pub struct SimNode {
     pub throttles: bool,
     /// Takes any amount on its inputs (AWESOME Sink / storage).
     pub sink: bool,
+    /// Most per minute each input / output port carries (its belt or pipe);
+    /// missing or infinite: no limit.
+    pub in_caps: Vec<f64>,
+    pub out_caps: Vec<f64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -199,7 +203,7 @@ fn progressive_fill(nodes: &[SimNode], manifolds: &BTreeMap<usize, Manifold>, bl
             break;
         }
         // Highest common floor for the free nodes.
-        let Some(z) = solve_floor(n, manifolds, &fixed, &free, None) else { break };
+        let Some(z) = solve_floor(nodes, n, manifolds, &fixed, &free, None) else { break };
         if z >= 1.0 - TOL {
             for i in free {
                 fixed[i] = Some(1.0);
@@ -210,7 +214,7 @@ fn progressive_fill(nodes: &[SimNode], manifolds: &BTreeMap<usize, Manifold>, bl
         let mut froze_any = false;
         let mut stuck = Vec::new();
         for &i in &free {
-            match solve_floor(n, manifolds, &fixed, &free, Some((i, z))) {
+            match solve_floor(nodes, n, manifolds, &fixed, &free, Some((i, z))) {
                 Some(best) if best > z + 1e-6 => {}
                 _ => stuck.push(i),
             }
@@ -232,6 +236,7 @@ fn progressive_fill(nodes: &[SimNode], manifolds: &BTreeMap<usize, Manifold>, bl
 /// With `probe = None`: maximise z such that every free node runs at >= z.
 /// With `probe = Some((i, z))`: keep every free node at >= z and maximise t_i.
 fn solve_floor(
+    nodes: &[SimNode],
     n: usize,
     manifolds: &BTreeMap<usize, Manifold>,
     fixed: &[Option<f64>],
@@ -278,6 +283,15 @@ fn solve_floor(
             Some((_, floor)) => problem.add_constraint(Expression::from(t[i]).geq(floor - 1e-9)),
         };
     }
+    // A port's belt or pipe carries at most its speed: rate x t <= cap.
+    for (i, n) in nodes.iter().enumerate() {
+        let caps = n.inputs.iter().zip(n.in_caps.iter()).chain(n.outputs.iter().zip(n.out_caps.iter()));
+        for (&rate, &cap) in caps {
+            if rate > TOL && cap.is_finite() {
+                problem.add_constraint((rate * t[i]).leq(cap.max(0.0)));
+            }
+        }
+    }
     let sol = problem.solve().ok()?;
     Some(match probe {
         None => sol.value(z),
@@ -293,7 +307,7 @@ mod tests {
         SimNode { outputs: vec![rate], ..Default::default() }
     }
     fn machine(input: f64, output: f64) -> SimNode {
-        SimNode { inputs: vec![input], outputs: vec![output], throttles: true, sink: false }
+        SimNode { inputs: vec![input], outputs: vec![output], throttles: true, ..Default::default() }
     }
     fn out(rate: f64) -> SimNode {
         SimNode { inputs: vec![rate], ..Default::default() }
@@ -341,13 +355,24 @@ mod tests {
     fn two_consumers_share_and_one_recovers() {
         // A machine limited by its other input leaves the rest of the shared
         // belt to its neighbour, like a splitter backing up in game.
-        let starved = SimNode { inputs: vec![10.0, 10.0], outputs: vec![], throttles: true, sink: false };
+        let starved = SimNode { inputs: vec![10.0, 10.0], outputs: vec![], throttles: true, ..Default::default() };
         let r = simulate(
             &[src(10.0), machine(10.0, 10.0), starved, src(1.0), out(10.0)],
             &[link(0, 1), link(0, 2), SimLink { from_node: 3, from_port: 0, to_node: 2, to_port: 1 }, link(1, 4)],
         );
         assert!(close(r.efficiency[2], 0.1), "{:?}", r.efficiency);
         assert!(close(r.efficiency[1], 0.9), "{:?}", r.efficiency);
+    }
+
+    #[test]
+    fn a_slow_belt_holds_a_machine_back() {
+        // A source of 120 into a machine taking 120, on a belt of 60.
+        let mut m = machine(120.0, 120.0);
+        m.in_caps = vec![60.0];
+        let r = simulate(&[src(120.0), m, out(120.0)], &[link(0, 1), link(1, 2)]);
+        assert!(close(r.efficiency[1], 0.5), "{:?}", r.efficiency);
+        assert!(close(r.received[1][0], 60.0));
+        assert!(close(r.received[2][0], 60.0));
     }
 
     #[test]
@@ -359,8 +384,8 @@ mod tests {
     #[test]
     fn recycling_loop_runs_full() {
         // A <-> B loop: A makes 10 x, needs 5 y + 10 ore; B makes 5 y + 10 out, needs 10 x.
-        let a = SimNode { inputs: vec![5.0, 10.0], outputs: vec![10.0], throttles: true, sink: false };
-        let b = SimNode { inputs: vec![10.0], outputs: vec![5.0, 10.0], throttles: true, sink: false };
+        let a = SimNode { inputs: vec![5.0, 10.0], outputs: vec![10.0], throttles: true, ..Default::default() };
+        let b = SimNode { inputs: vec![10.0], outputs: vec![5.0, 10.0], throttles: true, ..Default::default() };
         let nodes = [a, b, src(10.0), out(10.0)];
         let links = [
             SimLink { from_node: 0, from_port: 0, to_node: 1, to_port: 0 },
