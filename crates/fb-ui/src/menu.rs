@@ -211,14 +211,15 @@ pub fn menu_bar(app: &mut FactoryApp, ctx: &egui::Context) {
                         ui.close_menu();
                         app.dialog = Dialog::share_code(ShareMode::AddFactory);
                     }
-                    let can_move = !app.on_master() && app.has_selection();
-                    if ui.add_enabled(can_move, Button::new("Move selection to a new factory")).on_disabled_hover_text("Select nodes in a factory first.").clicked() {
+                    let can_move = !app.on_master() && !app.planner.hub && app.has_selection();
+                    let why = if app.planner.hub { "The HUB's fuel stays in the HUB." } else { "Select nodes in a factory first." };
+                    if ui.add_enabled(can_move, Button::new("Move selection to a new factory")).on_disabled_hover_text(why).clicked() {
                         ui.close_menu();
                         app.move_selection_to_new_factory(ui.ctx());
                     }
                     ui.separator();
-                    let open = (!app.on_master()).then_some(app.active);
-                    if ui.add_enabled(open.is_some(), Button::new("Rename this factory…")).clicked() {
+                    let open = (!app.on_master() && !app.planner.hub).then_some(app.active);
+                    if ui.add_enabled(open.is_some(), Button::new("Rename this factory…")).on_disabled_hover_text("Open a factory first.").clicked() {
                         ui.close_menu();
                         if let Some(id) = open {
                             app.dialog = Dialog::RenameFactory { id, name: app.doc_name(id) };

@@ -59,6 +59,10 @@ impl FactoryApp {
             NodeKind::Sink { .. } => parts.push("Sink".into()),
             NodeKind::Factory { .. } => parts.push("Factory".into()),
             NodeKind::Pole { .. } => parts.push("Power pole".into()),
+            NodeKind::Burner { fuel } => {
+                parts.push(crate::hub::BURNER_NAME.into());
+                parts.push(game.item_name(fuel).to_string());
+            }
             NodeKind::Extractor { item, class, .. } => {
                 parts.push(crate::extractors::find(game, class).map(|e| e.name.clone()).unwrap_or_default());
                 parts.push(game.item_name(item).to_string());

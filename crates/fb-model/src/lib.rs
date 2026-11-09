@@ -74,6 +74,33 @@ pub struct Recipe {
 /// are only planned when the plan generates its own power.
 pub const GENERATOR_PREFIX: &str = "Generator__";
 
+/// The HUB: its building (for its icon) and the Biomass Burners built into
+/// it. The Docs don't list those burners (`Build_GeneratorIntegratedBiomass_C`
+/// is only in saves); the wiki (satisfactory.wiki.gg/wiki/The_HUB) says the
+/// finished HUB has two, of 20 MW each, which burn fuel proportionally
+/// slower than a standalone Biomass Burner (just as energy-efficient), so a
+/// fuel lasts its energy (MJ) / 20 seconds.
+pub const HUB_BUILDING: &str = "Desc_TradingPost_C";
+pub const HUB_BURNERS: usize = 2;
+pub const HUB_BURNER_MW: f64 = 20.0;
+/// The (standalone) Biomass Burner, whose Docs entry lists the fuels.
+pub const BIOMASS_BURNER: &str = "Build_GeneratorBiomass_Automated_C";
+pub const BIOMASS_BURNER_ICON: &str = "Desc_GeneratorBiomass_Automated_C";
+
+/// A fuel a Biomass Burner burns: the item and its energy (MJ per item).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BurnerFuel {
+    pub item: ClassName,
+    pub mj: f64,
+}
+
+impl BurnerFuel {
+    /// Items per minute a HUB burner burns at full output.
+    pub fn hub_per_min(&self) -> f64 {
+        HUB_BURNER_MW / self.mj * 60.0
+    }
+}
+
 impl Recipe {
     /// Items (or m³) per minute, per machine at 100% clock.
     pub fn per_min(&self, a: &Amount) -> f64 {
@@ -209,6 +236,9 @@ pub struct GameData {
     /// Building class (`Build_*_C`) -> what the Build Gun costs to place one.
     #[serde(default)]
     pub build_costs: BTreeMap<ClassName, Vec<Amount>>,
+    /// What a Biomass Burner burns (the HUB's too), in the Docs' order.
+    #[serde(default)]
+    pub burner_fuels: Vec<BurnerFuel>,
 }
 
 /// Resource node purity.

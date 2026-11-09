@@ -116,6 +116,9 @@ pub fn generator_tooltip(ui: &mut Ui, assets: &mut Assets, game: &GameData, r: &
 /// clock x running speed x the generator's MW. Fuel use scales the same way,
 /// so this is also fuel burned x its energy.
 pub fn generated_mw(game: &GameData, graph: &FactoryGraph, id: NodeId, efficiency: f64) -> Option<f64> {
+    if matches!(graph[id].user_data.kind, NodeKind::Burner { .. }) {
+        return Some(crate::hub::burner_mw(efficiency));
+    }
     let NodeKind::Recipe { recipe } = &graph[id].user_data.kind else { return None };
     let r = game.recipes.get(recipe).filter(|r| r.is_generator())?;
     let machines = input_number(graph, id, MACHINES);

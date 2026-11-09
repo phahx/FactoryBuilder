@@ -241,6 +241,42 @@ impl Catalog {
         Self { entries, groups }
     }
 
+    /// Inside the HUB: only the fuels its burners take, by hand or from
+    /// another factory.
+    pub fn hub(game: &GameData) -> Self {
+        let mut entries = Vec::new();
+        for f in &game.burner_fuels {
+            let name = game.item_name(&f.item).to_string();
+            for (template, group, subtitle) in [
+                (Template::Resource(f.item.clone()), "By hand", "Gathered or crafted by hand"),
+                (Template::Input(f.item.clone()), "Inputs", "Brought in from another factory"),
+            ] {
+                entries.push(Entry {
+                    search: format!("{name} {subtitle}").to_lowercase(),
+                    template,
+                    title: name.clone(),
+                    subtitle: subtitle.into(),
+                    group: group.into(),
+                    icon: f.item.clone(),
+                    alternate: false,
+                    takes: vec![],
+                    makes: vec![f.item.clone()],
+                });
+            }
+        }
+        let mut groups = vec![
+            Group { name: "By hand".into(), icon: GroupIcon::Item(fb_model::BIOMASS_BURNER_ICON.into()), entries: vec![] },
+            Group { name: "Inputs".into(), icon: GroupIcon::Ui(UiIcon::Arrow), entries: vec![] },
+        ];
+        for (i, e) in entries.iter().enumerate() {
+            if let Some(g) = groups.iter_mut().find(|g| g.name == e.group) {
+                g.entries.push(i);
+            }
+        }
+        groups.retain(|g| !g.entries.is_empty());
+        Self { entries, groups }
+    }
+
     /// Ranked matches: every word must appear; title prefix matches first,
     /// standard recipes before alternates. With a wire, only what fits it.
     pub fn search(&self, query: &str, wire: Option<&WireDrop>) -> Vec<usize> {

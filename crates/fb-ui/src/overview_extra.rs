@@ -99,7 +99,8 @@ fn pick_extractor<'a>(game: &'a GameData, item: &str, form: Form, s: &Extraction
 
 /// How to extract `rate` per minute of `item`, or None if nothing can.
 pub fn plan_resource(game: &GameData, item: &str, rate: f64, s: &ExtractionSettings) -> Option<ExtractPlan> {
-    if !(rate > 0.0) || !rate.is_finite() {
+    // Only what comes out of the ground (not leaves gathered by hand).
+    if !(rate > 0.0) || !rate.is_finite() || !game.items.get(item).is_some_and(|i| i.raw) {
         return None;
     }
     let form = game.item_form(item);

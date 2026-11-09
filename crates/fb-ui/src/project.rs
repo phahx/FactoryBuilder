@@ -49,6 +49,8 @@ pub struct FactoryInfo {
     /// Extractor nodes: building class -> (whole, at 100%), and per item.
     pub extractors: BTreeMap<String, (f64, f64)>,
     pub extracted: BTreeMap<String, Vec<String>>,
+    /// The project's HUB (hub.rs), not a factory.
+    pub hub: bool,
 }
 
 impl FactoryInfo {
@@ -82,6 +84,7 @@ impl FactoryInfo {
             somersloops: s.somersloops,
             extractors: s.extractors.clone(),
             extracted: s.extracted.clone(),
+            hub: false,
         }
     }
 }
@@ -251,7 +254,10 @@ fn update_block(game: &GameData, g: &mut FactoryGraph, node: NodeId, info: &Fact
     if g[node].label != info.name {
         g[node].label = info.name.clone();
     }
-    if let NodeKind::Factory { ins, outs, uses_mw, makes_mw, .. } = &mut g[node].user_data.kind {
+    if let NodeKind::Factory { ins, outs, uses_mw, makes_mw, hub, .. } = &mut g[node].user_data.kind {
+        if *hub != info.hub {
+            *hub = info.hub;
+        }
         if *ins != info.ins {
             *ins = info.ins.clone();
         }
@@ -328,6 +334,69 @@ impl FactoryApp {
 
     pub(crate) fn on_master(&self) -> bool {
         self.active == MASTER
+    }
+
+    /// Whether document `id` is the project's HUB.
+    pub(crate) fn is_hub(&self, id: u32) -> bool {
+        if id == self.active {
+            return self.planner.hub;
+        }
+        self.doc(id).and_then(|d| d.body.as_ref()).is_some_and(|b| b.planner.hub)
+    }
+
+    /// The project's HUB, if it has one.
+    pub(crate) fn hub_id(&self) -> Option<u32> {
+        self.factory_ids().into_iter().find(|id| self.is_hub(*id))
+    }
+
+    /// Gives every HUB exactly its burners (and nothing it can't have), and
+    /// takes burners out of factories. Not an edit.
+    pub(crate) fn tidy_hubs(&mut self) {
+        if !self.game_loaded {
+            return;
+        }
+        let hub = self.planner.hub;
+        if crate::hub::tidy(&mut self.state, &mut self.user, hub) {
+            self.committed = self.project_json();
+        }
+        let mut scratch = UserState { game: self.user.game.clone(), zoom: 1.0, ..Default::default() };
+        for d in &mut self.docs {
+            if let Some(b) = d.body.as_mut() {
+                let hub = b.planner.hub;
+                crate::hub::tidy(&mut b.state, &mut scratch, hub);
+            }
+        }
+    }
+
+    /// A new project's start: the HUB on the master graph, which opens.
+    /// Expects a fresh workspace (`new_workspace`).
+    pub(crate) fn start_with_hub(&mut self) {
+        if let Some(d) = self.doc_mut(1) {
+            d.name = crate::hub::NAME.into();
+        }
+        self.planner.hub = true;
+        self.planner.targets.clear();
+        self.tidy_hubs();
+        self.activate(MASTER);
+        self.tabs.clear();
+        self.reset_history();
+        self.frame_all = true;
+    }
+
+    /// The master graph's right-click menu: the HUB at `at`, when the
+    /// project has none.
+    pub(crate) fn place_hub_at(&mut self, at: Pos2) {
+        if self.hub_id().is_some() {
+            return;
+        }
+        let mut body = DocBody::new(Planner { hub: true, ..self.default_planner() });
+        body.planner.targets.clear();
+        if self.game_loaded {
+            let mut scratch = UserState { game: self.user.game.clone(), zoom: 1.0, ..Default::default() };
+            crate::hub::tidy(&mut body.state, &mut scratch, true);
+        }
+        let id = self.add_factory(crate::hub::NAME, Some(body));
+        self.place_block(id, at);
     }
 
     pub(crate) fn doc_name(&self, id: u32) -> String {
@@ -430,7 +499,7 @@ impl FactoryApp {
     pub(crate) fn factory_info(&mut self, id: u32) -> FactoryInfo {
         let name = self.doc_name(id);
         if id == self.active {
-            return FactoryInfo::from_summary(&name, &self.summary);
+            return FactoryInfo { hub: self.planner.hub, ..FactoryInfo::from_summary(&name, &self.summary) };
         }
         let game = self.user.game.clone();
         let Some(d) = self.doc_mut(id) else { return FactoryInfo::default() };
@@ -442,6 +511,7 @@ impl FactoryApp {
         }
         let mut info = d.info.clone().unwrap_or_default();
         info.name = name;
+        info.hub = self.is_hub(id);
         info
     }
 
@@ -529,7 +599,7 @@ impl FactoryApp {
 
     pub(crate) fn rename_factory(&mut self, id: u32, name: &str) {
         let name = name.trim();
-        if name.is_empty() || id == MASTER {
+        if name.is_empty() || id == MASTER || self.is_hub(id) {
             return;
         }
         let unique = if self.doc_name(id).eq_ignore_ascii_case(name) { name.to_string() } else { self.unique_name(name) };
@@ -541,6 +611,10 @@ impl FactoryApp {
 
     /// Copies factory `id` (graph and plan, not its undo history).
     pub(crate) fn duplicate_factory(&mut self, id: u32) -> Option<u32> {
+        // One HUB per project.
+        if self.is_hub(id) {
+            return None;
+        }
         self.flush_commit();
         let body = if id == self.active {
             DocBody { state: copy_state(&self.state), planner: self.planner.clone(), ..DocBody::new(Planner::default()) }
@@ -560,8 +634,9 @@ impl FactoryApp {
         self.docs.retain(|d| d.id == MASTER || !ids.contains(&d.id));
         self.tabs.retain(|t| !ids.contains(t));
         if self.factory_count() == 0 {
-            // A project always has a factory to work in.
-            self.add_factory("Factory", None);
+            // A project always has something to work in: it starts again
+            // from the HUB.
+            self.place_hub_at(Pos2::ZERO);
         }
         self.project_changed();
     }
@@ -624,6 +699,7 @@ impl FactoryApp {
                     crate::extractors::add_to_plan(&mut b.state, &mut scratch, &settings);
                 }
             }
+            self.tidy_hubs();
             self.sync_master();
         }
     }
@@ -693,7 +769,8 @@ impl FactoryApp {
             let block = block_of(g, id);
             let pos = block.and_then(|n| master.node_positions.get(n)).map(|p| (p.to_vec2() / z).to_pos2()).unwrap_or(Pos2::ZERO);
             let color = block.and_then(|n| g[n].user_data.color).map(portable::color_to_hex);
-            p.factories.push(portable::ProjectFactory { id, x: (pos.x * 10.0).round() / 10.0, y: (pos.y * 10.0).round() / 10.0, color, factory });
+            let hub = self.is_hub(id);
+            p.factories.push(portable::ProjectFactory { id, x: (pos.x * 10.0).round() / 10.0, y: (pos.y * 10.0).round() / 10.0, color, factory, hub });
         }
         for (input, output) in g.iter_connections() {
             let (Some(from), Some(to)) = (factory_of(g, g[output].node), factory_of(g, g[input].node)) else { continue };
@@ -746,13 +823,20 @@ impl FactoryApp {
             ids.insert(f.id, id);
         }
         for f in &p.factories {
-            let (body, s) = self.body_from_file(&f.factory);
+            let (mut body, s) = self.body_from_file(&f.factory);
             skipped += s;
+            // At most one HUB.
+            body.planner.hub = f.hub && !docs.iter().any(|d| d.body.as_ref().is_some_and(|b| b.planner.hub));
+            if body.planner.hub {
+                body.planner.targets.clear();
+            }
             let name = f.factory.name.clone().filter(|n| !n.trim().is_empty()).unwrap_or_else(|| "Factory".into());
             docs.push(Doc { id: ids[&f.id], name, body: Some(Box::new(body)), info: None });
         }
         if docs.len() == 1 {
-            docs.push(Doc { id: 1, name: "Factory".into(), body: Some(Box::new(DocBody::new(self.default_planner()))), info: None });
+            // Nothing in it: the HUB, as a new project has.
+            let planner = Planner { hub: true, targets: Vec::new(), ..self.default_planner() };
+            docs.push(Doc { id: 1, name: crate::hub::NAME.into(), body: Some(Box::new(DocBody::new(planner))), info: None });
         }
         // The master graph: blocks where the file puts them, then the links.
         self.load_docs(docs, MASTER, Vec::new());

@@ -97,6 +97,18 @@ pub fn add_generators(root: &Value, data: &mut GameData) {
         };
         let ratio = num_field(g, "mSupplementalToPowerRatio").unwrap_or(0.0).max(0.0);
         let Some(fuels) = g.get("mFuel").and_then(Value::as_array) else { continue };
+        // The Biomass Burner's fuels, which the HUB's burners take too.
+        if class == fb_model::BIOMASS_BURNER {
+            data.burner_fuels = fuels
+                .iter()
+                .filter_map(|f| {
+                    let fuel = str_field(f, "mFuelClass");
+                    let item = data.items.get(fuel)?;
+                    let &mj = energy.get(fuel)?;
+                    (!item.form.is_fluid()).then(|| fb_model::BurnerFuel { item: fuel.to_string(), mj })
+                })
+                .collect();
+        }
         for f in fuels {
             let fuel = str_field(f, "mFuelClass");
             let (Some(item), Some(&e)) = (data.items.get(fuel), energy.get(fuel)) else { continue };
@@ -201,6 +213,20 @@ mod tests {
 
     fn per_min(r: &Recipe, item: &str) -> f64 {
         r.ingredients.iter().chain(&r.products).filter(|a| a.item == item).map(|a| r.per_min(a)).sum()
+    }
+
+    #[test]
+    fn biomass_burner_fuels_come_from_the_docs() {
+        let Some((_, data)) = docs() else { return };
+        let fuels: Vec<(&str, f64)> = data.burner_fuels.iter().map(|f| (f.item.as_str(), f.mj)).collect();
+        // The wiki's table (satisfactory.wiki.gg/wiki/Biomass_Burner) agrees.
+        assert_eq!(
+            fuels,
+            [("Desc_Leaves_C", 15.0), ("Desc_Wood_C", 100.0), ("Desc_Mycelia_C", 20.0), ("Desc_GenericBiomass_C", 180.0), ("Desc_Biofuel_C", 450.0), ("Desc_PackagedBiofuel_C", 750.0)]
+        );
+        // A HUB burner (20 MW) burns 80 Leaves or 2.67 Solid Biofuel a minute.
+        assert!((data.burner_fuels[0].hub_per_min() - 80.0).abs() < 1e-9);
+        assert!((data.burner_fuels[4].hub_per_min() - 8.0 / 3.0).abs() < 1e-9);
     }
 
     #[test]

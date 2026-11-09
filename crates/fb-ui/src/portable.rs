@@ -129,6 +129,8 @@ pub enum Kind {
     Extractor,
     /// A Pipeline Pump (`class`) on a pipe of `item`.
     Pump,
+    /// One of the HUB's Biomass Burners, burning `class` (an item).
+    Burner,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -297,6 +299,9 @@ pub struct ProjectFactory {
     pub color: Option<String>,
     /// The factory itself (its name is the factory's name).
     pub factory: FactoryFile,
+    /// It's the project's HUB, not a factory.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub hub: bool,
 }
 
 /// One factory's output item feeding another factory's input.
@@ -448,8 +453,8 @@ mod tests {
     #[test]
     fn projects_round_trip_and_are_checked() {
         let mut p = ProjectFile::new(Some("Base".into()));
-        p.factories.push(ProjectFactory { id: 1, x: 0.0, y: 0.0, color: None, factory: sample() });
-        p.factories.push(ProjectFactory { id: 4, x: 500.0, y: 0.0, color: Some("#FA9549".into()), factory: FactoryFile::new(Some("Rods".into())) });
+        p.factories.push(ProjectFactory { id: 1, x: 0.0, y: 0.0, color: None, factory: sample(), hub: false });
+        p.factories.push(ProjectFactory { id: 4, x: 500.0, y: 0.0, color: Some("#FA9549".into()), factory: FactoryFile::new(Some("Rods".into())), hub: false });
         p.links.push(Link { from: 1, to: 4, item: "Desc_IronIngot_C".into(), slot: 0 });
         p.links.push(Link { from: 1, to: 9, item: "Desc_IronIngot_C".into(), slot: 0 });
         assert_eq!(ProjectFile::parse(&p.to_json(true)).unwrap(), p);

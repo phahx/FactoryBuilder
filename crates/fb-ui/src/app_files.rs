@@ -153,6 +153,7 @@ impl FactoryApp {
                 NodeKind::Splitter { item } => (portable::Kind::Splitter, item.clone()),
                 NodeKind::Extractor { class, .. } => (portable::Kind::Extractor, class.clone()),
                 NodeKind::Pump { class, .. } => (portable::Kind::Pump, class.clone()),
+                NodeKind::Burner { fuel } => (portable::Kind::Burner, fuel.clone()),
                 NodeKind::Factory { .. } | NodeKind::Pole { .. } => continue, // only on the master graph
             };
             let is_recipe = matches!(kind, portable::Kind::Recipe | portable::Kind::Extractor);
@@ -239,6 +240,8 @@ impl FactoryApp {
             power_net: Default::default(),
             // Belts come with the wires (insert_portable).
             belts: Vec::new(),
+            // A project file says which is the HUB (load_project_file).
+            hub: false,
             power: PowerSettings {
                 mode: if plan.generate_power { PowerMode::Generate } else { PowerMode::Grid },
                 generators: match &plan.generators {
@@ -273,6 +276,8 @@ impl FactoryApp {
                 portable::Kind::Pump if crate::routers::PUMPS.iter().any(|p| p.0 == n.class) && n.item.as_ref().is_some_and(|i| game.items.contains_key(i)) => {
                     Template::Pump { item: n.item.clone().unwrap_or_default(), class: n.class.clone() }
                 }
+                // Only the HUB keeps them (hub::tidy).
+                portable::Kind::Burner if crate::hub::is_fuel(&game, &n.class) => Template::Burner(n.class.clone()),
                 _ => {
                     skipped += 1;
                     continue;
@@ -485,7 +490,7 @@ impl FactoryApp {
     /// What File › Save writes: a factory file while there's one factory
     /// (unless it's already a project file), a project file otherwise.
     pub(crate) fn save_kind(&self) -> SavePurpose {
-        if self.factory_count() > 1 || self.current_path.as_deref().is_some_and(is_project_path) {
+        if self.factory_count() > 1 || self.hub_id().is_some() || self.current_path.as_deref().is_some_and(is_project_path) {
             SavePurpose::Project
         } else {
             SavePurpose::Factory

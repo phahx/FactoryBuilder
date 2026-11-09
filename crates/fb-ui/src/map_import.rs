@@ -363,7 +363,7 @@ pub fn world_project(world: &World, game: &GameData, map: Option<&MapInfo>, gap_
         let cy = ms.iter().map(|m| m.y).sum::<f32>() / ms.len() as f32;
         let ports = f.nodes.iter().filter(|n| n.kind == Kind::Input).count().max(f.nodes.iter().filter(|n| n.kind == Kind::Output).count());
         boxes.push((cx, cy, 320.0, 130.0 + 34.0 * ports as f32));
-        p.factories.push(ProjectFactory { id, x: 0.0, y: 0.0, color: None, factory: f });
+        p.factories.push(ProjectFactory { id, x: 0.0, y: 0.0, color: None, factory: f, hub: false });
     }
     // Links: an item belted or piped from one factory to another, when the
     // first sends it out and the second takes it in.

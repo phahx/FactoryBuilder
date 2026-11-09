@@ -92,7 +92,10 @@ fn harness_with(
         }
     });
     let backend = Backend::native(ctx.clone(), handler);
-    let app = FactoryApp::with_backend(&ctx, backend);
+    let mut app = FactoryApp::with_backend(&ctx, backend);
+    // A new project starts with the HUB on the master graph (hub_tests);
+    // most tests work in one plain factory, as a factory file opens.
+    app.reset_to(None, None);
     Some((ctx, app, projects))
 }
 
@@ -219,7 +222,7 @@ fn projects_round_trip() {
     assert_eq!(app.recent(), vec![path.to_string()], "added to Open Recent");
     app.new_project();
     frames(&ctx, &mut app, 1);
-    assert_eq!(app.node_count(), 0);
+    assert!(app.on_master() && app.node_count() == 1, "a new project: the HUB on the master graph");
     app.open(path);
     frames(&ctx, &mut app, 3);
     assert_eq!(app.node_count(), n);
@@ -2598,6 +2601,7 @@ fn extractors_and_pumps_are_buildings_with_power() {
     let pump_mw = game.buildable_power["Build_PipelinePump_C"];
     assert!(pump_mw > 0.0);
     app.run_pending(crate::dialogs::Pending::New);
+    app.new_factory();
     frames(&ctx, &mut app, 2);
     let water = app.add_test_node(Template::Resource("Desc_Water_C".into()), egui::pos2(0.0, 0.0));
     let pump = app.add_test_node(Template::Pump { item: "Desc_Water_C".into(), class: "Build_PipelinePump_C".into() }, egui::pos2(300.0, 0.0));
@@ -3311,4 +3315,113 @@ fn an_extractor_extracts_only_on_a_resource_node() {
     let r_out = app.state.graph[ore].outputs[0].0.clone();
     let s = app.user.ports.get(&(ore, r_out)).copied().unwrap_or_default();
     assert_eq!((s.have, s.want), (0.0, 0.0), "{s:?}");
+}
+
+#[test]
+fn a_new_project_starts_with_the_hub_and_its_two_burners() {
+    use crate::graph::{NodeKind, Template, RATE};
+    use crate::project::{block_of, MASTER};
+    let Some((ctx, mut app, store)) = harness() else { return };
+    frames(&ctx, &mut app, 2);
+    app.new_project();
+    frames(&ctx, &mut app, 2);
+    // The master graph, with the HUB's block: not a factory.
+    assert!(app.on_master());
+    let hub = app.hub_id().expect("a HUB");
+    assert_eq!(app.doc_name(hub), "The HUB");
+    let b = block_of(&app.state.graph, hub).unwrap();
+    assert!(matches!(app.state.graph[b].user_data.kind, NodeKind::Factory { hub: true, .. }));
+    assert_eq!(app.state.graph[b].user_data.kind.icon_item(&app.user.game.clone()), Some(fb_model::HUB_BUILDING));
+    // One per project: no copy, no rename, no second one.
+    assert_eq!(app.duplicate_factory(hub), None);
+    app.rename_factory(hub, "Base");
+    assert_eq!(app.doc_name(hub), "The HUB");
+    app.place_hub_at(egui::pos2(400.0, 0.0));
+    assert_eq!(app.factory_count(), 1);
+
+    // Inside: its two Biomass Burners, nothing else.
+    app.activate(hub);
+    frames(&ctx, &mut app, 2);
+    let burners = |app: &FactoryApp| app.state.graph.iter_nodes().filter(|n| matches!(app.state.graph[*n].user_data.kind, NodeKind::Burner { .. })).collect::<Vec<_>>();
+    assert_eq!(burners(&app).len(), 2);
+    assert_eq!(app.state.graph.nodes.len(), 2);
+    // They stay: not deleted, not copied.
+    app.select_all();
+    app.delete_selected();
+    app.select_all();
+    app.duplicate_selected();
+    frames(&ctx, &mut app, 1);
+    assert_eq!(burners(&app).len(), 2);
+    assert_eq!(app.state.graph.nodes.len(), 2);
+    // Only their fuels can be added: by hand or from another factory.
+    let game = app.user.game.clone();
+    let catalog = app.hub_catalog.as_ref().unwrap();
+    assert_eq!(catalog.entries.len(), 2 * game.burner_fuels.len());
+    assert!(catalog.entries.iter().all(|e| matches!(&e.template, Template::Resource(i) | Template::Input(i) if crate::hub::is_fuel(&game, i))));
+    // Nothing to plan here.
+    app.planner_mut().targets = vec![Target { item: "Desc_IronIngot_C".into(), rate: 30.0 }];
+    app.press_plan();
+    frames(&ctx, &mut app, 3);
+    assert_eq!(app.state.graph.nodes.len(), 2, "no plan in the HUB");
+
+    // 80 Leaves a minute keep one burner at its 20 MW; 40 at half.
+    let [one, two] = burners(&app)[..] else { unreachable!() };
+    let leaves = app.add_test_node(Template::Resource("Desc_Leaves_C".into()), egui::pos2(-300.0, 0.0));
+    let rate = app.state.graph[leaves].get_input(RATE).unwrap();
+    app.state.graph[rate].value.set_number(80.0);
+    connect(&mut app, leaves, one, "Desc_Leaves_C");
+    frames(&ctx, &mut app, 3);
+    assert!((app.summary.generation.unwrap() - 20.0).abs() < 1e-9, "{:?}", app.summary.generation);
+    app.state.graph[rate].value.set_number(40.0);
+    app.changed();
+    frames(&ctx, &mut app, 3);
+    assert!((app.summary.generation.unwrap() - 10.0).abs() < 1e-9, "{:?}", app.summary.generation);
+    // Leaves come by hand: no miner for them, nothing to build.
+    assert!(crate::overview_extra::plan_resource(&game, "Desc_Leaves_C", 40.0, &app.planner.extraction).is_none());
+    assert!(app.summary.extractors.is_empty() && app.summary.buildings.is_empty());
+    // The other burns Solid Biofuel: 2.67 a minute for its 20 MW.
+    crate::hub::set_fuel(&game, &mut app.state.graph, two, "Desc_Biofuel_C");
+    let bio = app.add_test_node(Template::Input("Desc_Biofuel_C".into()), egui::pos2(-300.0, 200.0));
+    let rate = app.state.graph[bio].get_input(RATE).unwrap();
+    app.state.graph[rate].value.set_number(8.0 / 3.0);
+    connect(&mut app, bio, two, "Desc_Biofuel_C");
+    frames(&ctx, &mut app, 3);
+    assert!((app.summary.generation.unwrap() - 30.0).abs() < 1e-6, "{:?}", app.summary.generation);
+    // Ore isn't fuel: a recipe or an ore node pasted in goes.
+    app.add_test_node(Template::Recipe("Recipe_IngotIron_C".into()), egui::pos2(300.0, 0.0));
+    app.add_test_node(Template::Resource("Desc_OreIron_C".into()), egui::pos2(300.0, 200.0));
+    app.tidy_hubs();
+    assert_eq!(app.state.graph.nodes.len(), 4);
+
+    // On the master graph, its block makes 30 MW and takes Solid Biofuel in.
+    app.activate(MASTER);
+    frames(&ctx, &mut app, 2);
+    let b = block_of(&app.state.graph, hub).unwrap();
+    assert!(matches!(app.state.graph[b].user_data.kind, NodeKind::Factory { makes_mw, .. } if (makes_mw - 30.0).abs() < 1e-6));
+    assert!(app.state.graph[b].inputs.iter().any(|(_, i)| app.state.graph[*i].typ.0 == "Desc_Biofuel_C"));
+
+    // Saved and opened again: still the HUB, with its burners and fuel.
+    let path = "C:/Factories/Base.fbproject";
+    app.save_as(path);
+    frames(&ctx, &mut app, 2);
+    assert!(store.borrow()[path].contains("\"hub\": true"));
+    app.new_project();
+    app.open(path);
+    frames(&ctx, &mut app, 3);
+    let hub = app.hub_id().expect("the HUB again");
+    app.activate(hub);
+    frames(&ctx, &mut app, 2);
+    assert_eq!(burners(&app).len(), 2);
+    assert!((app.summary.generation.unwrap() - 30.0).abs() < 1e-6);
+
+    // Deleted, it can be placed again (once).
+    app.activate(MASTER);
+    app.place_hub_at(egui::pos2(0.0, 0.0));
+    app.new_factory_at(egui::pos2(400.0, 0.0));
+    app.delete_factories(&[hub]);
+    assert_eq!(app.hub_id(), None);
+    app.place_hub_at(egui::pos2(0.0, 0.0));
+    app.place_hub_at(egui::pos2(400.0, 0.0));
+    let hubs = app.factory_ids().into_iter().filter(|id| app.is_hub(*id)).count();
+    assert_eq!(hubs, 1);
 }

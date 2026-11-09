@@ -164,16 +164,18 @@ pub fn factory_menu(app: &mut FactoryApp, ctx: &egui::Context) {
         return;
     }
     let tabbed = app.tabs.contains(&id);
+    let hub = app.is_hub(id);
     let mut pick = None;
     let menu = crate::menus::popup(ctx, "factory_menu", pos, &app.doc_name(id), |ui| {
         use crate::menus::{item, separator};
         if item(ui, "Open", "", true).clicked() {
             pick = Some(ListAction::Open(id));
         }
-        if item(ui, "Rename…", "", true).clicked() {
+        // The HUB keeps its name, and there's one.
+        if !hub && item(ui, "Rename…", "", true).clicked() {
             pick = Some(ListAction::Rename(id));
         }
-        if item(ui, "Duplicate", "", true).clicked() {
+        if !hub && item(ui, "Duplicate", "", true).clicked() {
             pick = Some(ListAction::Duplicate(id));
         }
         if tabbed && item(ui, "Close tab", "Middle-click", true).on_hover_text("The factory stays in the project.").clicked() {
@@ -209,11 +211,16 @@ pub fn master_canvas_menu(app: &mut FactoryApp, ctx: &egui::Context) {
     }
     let mut pick = None;
     let power = app.power_links;
+    let no_hub = app.hub_id().is_none();
     let menu = crate::menus::popup(ctx, "master_menu", pos, "Add", |ui| {
         for (k, label) in ["New factory", "Add factory file…", "Add factory from a share code…"].into_iter().enumerate() {
             if crate::menus::item(ui, label, "", true).clicked() {
                 pick = Some(k);
             }
+        }
+        // One per project.
+        if no_hub && crate::menus::item(ui, "The HUB", "", true).on_hover_text("Its two Biomass Burners make up to 40 MW. A project has one.").clicked() {
+            pick = Some(4);
         }
         crate::menus::separator(ui);
         if crate::menus::item(ui, "New power pole", "", power)
@@ -238,6 +245,7 @@ pub fn master_canvas_menu(app: &mut FactoryApp, ctx: &egui::Context) {
             app.dialog = Dialog::share_code(crate::dialogs::ShareMode::AddFactory);
         }
         Some(3) => app.new_pole_at(at),
+        Some(4) => app.place_hub_at(at),
         _ => {}
     }
 }
@@ -281,6 +289,9 @@ pub fn factories_panel(app: &mut FactoryApp, ui: &mut Ui) {
             let row = widgets::list_row(ui, 44.0, |ui| {
                 ui.spacing_mut().item_spacing.x = 8.0;
                 match f.outs.first() {
+                    _ if f.hub => {
+                        assets.item(ui, fb_model::HUB_BUILDING, 28.0);
+                    }
                     Some((item, _)) => {
                         assets.item(ui, item, 28.0);
                     }
@@ -293,7 +304,12 @@ pub fn factories_panel(app: &mut FactoryApp, ui: &mut Ui) {
                     ui.add_space(4.0);
                     widgets::name_label(ui, RichText::new(&f.name).color(TEXT));
                     let n = f.machines;
-                    widgets::name_label(ui, RichText::new(format!("{n} {} · {} MW", if n == 1 { "building" } else { "buildings" }, fmt_num(f.power_mw))).small().color(TEXT_DIM));
+                    let line = if f.hub {
+                        format!("{} Biomass Burners · makes {} MW", fb_model::HUB_BURNERS, fmt_num(f.generation.unwrap_or(0.0)))
+                    } else {
+                        format!("{n} {} · {} MW", if n == 1 { "building" } else { "buildings" }, fmt_num(f.power_mw))
+                    };
+                    widgets::name_label(ui, RichText::new(line).small().color(TEXT_DIM));
                 });
             });
             #[cfg(test)]
@@ -363,7 +379,8 @@ impl FactoryApp {
     pub(crate) fn project_totals(&mut self) -> ProjectTotals {
         let mut t = ProjectTotals::default();
         for (_, f) in self.factory_infos() {
-            t.factories += 1;
+            // The HUB isn't a factory.
+            t.factories += usize::from(!f.hub);
             t.power_mw += f.power_mw;
             if let Some(mw) = f.generation {
                 *t.generation.get_or_insert(0.0) += mw;

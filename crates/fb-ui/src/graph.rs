@@ -96,6 +96,9 @@ pub enum NodeKind {
         uses_mw: f64,
         #[serde(default)]
         makes_mw: f64,
+        /// The project's HUB (hub.rs), not a factory.
+        #[serde(default)]
+        hub: bool,
     },
     /// A power pole on the master graph (power_net.rs).
     Pole {
@@ -122,6 +125,10 @@ pub enum NodeKind {
         item: String,
         class: String,
     },
+    /// One of the HUB's two Biomass Burners, burning `fuel` (hub.rs).
+    Burner {
+        fuel: String,
+    },
 }
 
 impl NodeKind {
@@ -138,6 +145,7 @@ impl NodeKind {
             NodeKind::Splitter { item } => Template::Splitter(item),
             NodeKind::Extractor { item, class, purity } => Template::Extractor { item, class, purity },
             NodeKind::Pump { item, class } => Template::Pump { item, class },
+            NodeKind::Burner { fuel } => Template::Burner(fuel),
         }
     }
 
@@ -149,8 +157,10 @@ impl NodeKind {
             | NodeKind::Input { item }
             | NodeKind::Output { item }
             | NodeKind::Sink { item } => Some(item),
+            NodeKind::Factory { hub: true, .. } => Some(fb_model::HUB_BUILDING),
             // A factory shows its first product.
             NodeKind::Factory { outs, .. } => outs.first().map(|(item, _)| item.as_str()),
+            NodeKind::Burner { .. } => Some(fb_model::BIOMASS_BURNER_ICON),
             NodeKind::Pole { .. } | NodeKind::Merger { .. } | NodeKind::Splitter { .. } | NodeKind::Pump { .. } => None,
             // The building's icon.
             NodeKind::Extractor { class, .. } => crate::extractors::find(game, class).map(|e| e.icon.as_str()),
@@ -188,6 +198,8 @@ pub enum Template {
         item: String,
         class: String,
     },
+    /// A HUB burner and its fuel.
+    Burner(String),
 }
 
 #[derive(Debug, Clone)]
@@ -346,12 +358,13 @@ impl Template {
             Template::Input(item) => NodeKind::Input { item },
             Template::Output(item) => NodeKind::Output { item },
             Template::Sink(item) => NodeKind::Sink { item },
-            Template::Factory(id) => NodeKind::Factory { id, ins: Vec::new(), outs: Vec::new(), uses_mw: 0.0, makes_mw: 0.0 },
+            Template::Factory(id) => NodeKind::Factory { id, ins: Vec::new(), outs: Vec::new(), uses_mw: 0.0, makes_mw: 0.0, hub: false },
             Template::Pole(id) => NodeKind::Pole { id },
             Template::Merger(item) => NodeKind::Merger { item },
             Template::Splitter(item) => NodeKind::Splitter { item },
             Template::Extractor { item, class, purity } => NodeKind::Extractor { item, class, purity },
             Template::Pump { item, class } => NodeKind::Pump { item, class },
+            Template::Burner(fuel) => NodeKind::Burner { fuel },
         }
     }
 }
@@ -381,7 +394,7 @@ impl NodeTemplateTrait for Template {
             Template::Output(_) => "Outputs".into(),
             Template::Sink(_) => "Sinks".into(),
             Template::Factory(_) => "Factories".into(),
-            Template::Pole(_) => "Power".into(),
+            Template::Pole(_) | Template::Burner(_) => "Power".into(),
             Template::Merger(_) | Template::Splitter(_) | Template::Pump { .. } => "Logistics".into(),
             Template::Extractor { .. } => "Extractors".into(),
         }]
@@ -403,6 +416,7 @@ impl NodeTemplateTrait for Template {
             Template::Pole(_) => "Power pole".into(),
             Template::Merger(_) | Template::Splitter(_) | Template::Pump { .. } => crate::routers::name(&s.game, &self.kind()).into(),
             Template::Extractor { class, .. } => crate::extractors::find(&s.game, class).map(|e| e.name.clone()).unwrap_or_else(|| class.clone()),
+            Template::Burner(_) => crate::hub::BURNER_NAME.into(),
         }
     }
 
@@ -410,7 +424,7 @@ impl NodeTemplateTrait for Template {
         let kind = match self {
             Template::Factory(id) => {
                 let f = s.factories.get(id).cloned().unwrap_or_default();
-                NodeKind::Factory { id: *id, ins: f.ins, outs: f.outs, uses_mw: f.power_mw, makes_mw: f.generation.unwrap_or(0.0) }
+                NodeKind::Factory { id: *id, ins: f.ins, outs: f.outs, uses_mw: f.power_mw, makes_mw: f.generation.unwrap_or(0.0), hub: f.hub }
             }
             t => t.kind(),
         };
@@ -492,6 +506,7 @@ impl NodeTemplateTrait for Template {
                 item_in(graph, item);
                 item_out(graph, item);
             }
+            Template::Burner(fuel) => item_in(graph, fuel),
             Template::Splitter(i) => {
                 // One wire in.
                 let name = game.item_name(i).to_string();
@@ -736,7 +751,7 @@ impl NodeDataTrait for NodeData {
             NodeKind::Resource { .. } if matches!(port, AnyParameterId::Output(_)) => true,
             // A building's belt or pipe port takes one, as in game: more
             // goes through a merger or splitter.
-            NodeKind::Recipe { .. } | NodeKind::Resource { .. } | NodeKind::Input { .. } | NodeKind::Output { .. } | NodeKind::Sink { .. } | NodeKind::Extractor { .. } => wires < 1,
+            NodeKind::Recipe { .. } | NodeKind::Resource { .. } | NodeKind::Input { .. } | NodeKind::Output { .. } | NodeKind::Sink { .. } | NodeKind::Extractor { .. } | NodeKind::Burner { .. } => wires < 1,
             k => crate::routers::accepts(&s.game, k, graph, node_id, port),
         }
     }
@@ -775,6 +790,13 @@ impl NodeDataTrait for NodeData {
         // The library lays this out right to left, before the title.
         {
             let caption = match &self.kind {
+                NodeKind::Factory { hub: true, .. } => None,
+                NodeKind::Burner { .. } => {
+                    let eff = s.nodes.get(&node_id).map(|n| n.efficiency).unwrap_or(1.0);
+                    ui.label(RichText::new(format!("{:.0}%", eff * 100.0)).small().color(TEXT_DIM))
+                        .on_hover_text("How much of its full output it makes: what its fuel allows.");
+                    None
+                }
                 NodeKind::Factory { .. } => {
                     let eff = s.nodes.get(&node_id).map(|n| n.efficiency).unwrap_or(1.0);
                     if eff < 0.995 {
@@ -949,6 +971,11 @@ impl NodeDataTrait for NodeData {
             }
             NodeKind::Extractor { item, class, .. } => crate::extractors::footer(ui, s, graph, node_id, item, class, crate::extractors::purity_of(graph, node_id)),
             NodeKind::Resource { item, purity } => return crate::extractors::resource_footer(ui, s, graph, node_id, item, *purity),
+            NodeKind::Burner { fuel } => crate::hub::burner_footer(ui, s, graph, node_id, fuel),
+            NodeKind::Factory { id, hub: true, .. } => {
+                let Some(f) = s.factories.get(id).cloned() else { return vec![] };
+                crate::hub::block_footer(ui, s, &f);
+            }
             NodeKind::Factory { id, .. } => {
                 let Some(f) = s.factories.get(id).cloned() else { return vec![] };
                 let (r_div, _) = ui.allocate_exact_size(vec2(ui.available_width(), 1.0), egui::Sense::hover());
@@ -1114,6 +1141,8 @@ pub fn node_rates(
         // Not in the simulation: their wires are joined up (routers.rs).
         NodeKind::Pole { .. } | NodeKind::Merger { .. } | NodeKind::Splitter { .. } | NodeKind::Pump { .. } => (vec![], vec![]),
         // What it takes from the deposit is what it puts out.
+        // Its fuel at full output.
+        NodeKind::Burner { fuel } => (item_inputs.map(|(name, _)| (name.clone(), crate::hub::fuel_per_min(game, fuel))).collect(), vec![]),
         // Nothing without a resource node to stand on.
         NodeKind::Extractor { class, .. } => {
             let purity = crate::extractors::purity_of(graph, node);

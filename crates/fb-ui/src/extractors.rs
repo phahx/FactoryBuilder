@@ -49,8 +49,10 @@ pub fn resource_footer(ui: &mut Ui, s: &mut UserState, graph: &FactoryGraph, nod
             _ => None,
         })
         .collect();
+    // Leaves and the like (the HUB's fuel) come by hand: no purity.
+    let raw = game.items.get(item).is_some_and(|i| i.raw);
     let uses = if on_it.is_empty() {
-        game.extraction.extractors.iter().any(|e| e.can_extract(item, form) && e.kind != ExtractorKind::Water)
+        raw && game.extraction.extractors.iter().any(|e| e.can_extract(item, form) && e.kind != ExtractorKind::Water)
     } else {
         on_it.iter().any(|c| has_purity(&game, c))
     };
@@ -171,7 +173,8 @@ pub fn add_to_plan(state: &mut EditorState, user: &mut UserState, settings: &Ext
         .iter_nodes()
         .filter(|n| direct(*n))
         .filter_map(|n| match &g[n].user_data.kind {
-            NodeKind::Resource { item, .. } => Some((n, item.clone(), input_number(g, n, RATE))),
+            // Only what an extractor takes (not leaves fed by hand).
+            NodeKind::Resource { item, .. } if game.items.get(item).is_some_and(|i| i.raw) && game.extraction.extractors.iter().any(|e| e.can_extract(item, game.item_form(item))) => Some((n, item.clone(), input_number(g, n, RATE))),
             _ => None,
         })
         .collect();

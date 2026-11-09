@@ -113,6 +113,15 @@ fn target_rows(
 
 pub fn planner(app: &mut FactoryApp, ui: &mut Ui) {
     ui.spacing_mut().item_spacing.y = 0.0;
+    if app.planner.hub {
+        widgets::panel_header(ui, crate::hub::NAME);
+        padded(ui, |ui| {
+            ui.label(RichText::new("Its two Biomass Burners make up to 40 MW for whatever its Power port is wired to on the master graph.").color(TEXT));
+            ui.add_space(8.0);
+            ui.label(RichText::new("Bring them fuel: right-click the canvas to add one, gathered by hand or brought in from another factory. Right-click a burner to change what it burns.").color(TEXT_DIM));
+        });
+        return;
+    }
     widgets::panel_header(ui, "Production plan");
     if !app.game_loaded {
         padded(ui, |ui| {

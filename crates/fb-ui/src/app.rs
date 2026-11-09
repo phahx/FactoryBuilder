@@ -49,6 +49,9 @@ pub struct Planner {
     /// carries their flow.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub belts: Vec<crate::wires::BeltChoice>,
+    /// This document is the project's HUB (hub.rs).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub hub: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -132,6 +135,8 @@ pub struct FactoryApp {
     pub(crate) port_hooks: egui_node_graph2::PortLocations,
     pub(crate) finder: Option<crate::finder::FinderState>,
     pub(crate) catalog: Option<crate::finder::Catalog>,
+    /// What can be added inside the HUB.
+    pub(crate) hub_catalog: Option<crate::finder::Catalog>,
     pub(crate) editor_rect: egui::Rect,
     /// Custom colour being edited in the node menu.
     pub(crate) custom_color: Option<[u8; 3]>,
@@ -277,6 +282,7 @@ impl FactoryApp {
             port_hooks: Default::default(),
             finder: None,
             catalog: None,
+            hub_catalog: None,
             editor_rect: egui::Rect::NOTHING,
             custom_color: None,
             selftest: is_selftest(),
@@ -315,6 +321,7 @@ impl FactoryApp {
             snap_raw: BTreeMap::new(),
         };
         app.new_workspace();
+        app.start_with_hub();
         app.committed = app.project_json();
         app.autosaved_rev = app.rev;
         app.backend.call("status", json!({}), Msg::Status);
@@ -335,7 +342,7 @@ impl FactoryApp {
     }
 
     pub(crate) fn title(&self) -> String {
-        let untitled = if self.factory_count() > 1 { "Untitled project" } else { "Untitled factory" };
+        let untitled = if self.factory_count() > 1 || self.hub_id().is_some() { "Untitled project" } else { "Untitled factory" };
         let name = self.project_name.as_deref().unwrap_or(untitled);
         if self.dirty {
             format!("{name}*")
@@ -487,6 +494,7 @@ impl FactoryApp {
         match p {
             Pending::New => {
                 self.reset_to(None, None);
+                self.start_with_hub();
                 self.share_doc();
             }
             Pending::OpenDialog => self.pick_open(crate::app_files::OpenPurpose::Open),
@@ -793,6 +801,7 @@ impl FactoryApp {
         self.game_error = None;
         self.templates = AllTemplates::from_game(&game);
         self.catalog = Some(crate::finder::Catalog::new(&game));
+        self.hub_catalog = Some(crate::finder::Catalog::hub(&game));
         // A project restored before the game data arrived: old recipe nodes
         // get the Somersloops field, without counting as an edit.
         let sloops = crate::graph::add_missing_sloop_inputs(&game, &mut self.state.graph);
@@ -820,9 +829,13 @@ impl FactoryApp {
         }
         self.user.game = Rc::new(game);
         self.game_loaded = true;
+        self.tidy_hubs();
         self.committed = self.project_json();
         self.sync_master();
         if self.selftest {
+            if self.on_master() || self.planner.hub {
+                self.new_factory();
+            }
             // Exercise the whole wasm path: solve -> graph -> LP flow sim -> icons.
             self.planner.targets = vec![
                 Target {
@@ -841,6 +854,10 @@ impl FactoryApp {
     }
 
     pub(crate) fn request_plan(&mut self) {
+        // The HUB has nothing to plan.
+        if self.on_master() || self.planner.hub {
+            return;
+        }
         self.plan_tries = 0;
         self.plan_extra_mw = 0.0;
         self.send_plan();
@@ -1058,7 +1075,7 @@ impl FactoryApp {
             return;
         }
         for id in std::mem::take(&mut self.state.selected_nodes) {
-            if self.state.graph.nodes.contains_key(id) {
+            if self.state.graph.nodes.contains_key(id) && !matches!(self.state.graph[id].user_data.kind, NodeKind::Burner { .. }) {
                 self.state.graph.remove_node(id);
                 self.state.node_positions.remove(id);
                 self.state.node_order.retain(|n| *n != id);
@@ -1082,7 +1099,7 @@ impl FactoryApp {
             .selected_nodes
             .iter()
             .copied()
-            .filter(|id| self.state.graph.nodes.contains_key(*id))
+            .filter(|id| self.state.graph.nodes.contains_key(*id) && !matches!(self.state.graph[*id].user_data.kind, NodeKind::Burner { .. }))
             .collect();
         if selected.is_empty() {
             return;
@@ -1557,10 +1574,46 @@ impl FactoryApp {
                     }
                 }
                 // A small factory through a splitter and a merger.
+                // A new project's HUB: one burner on Leaves by hand, the
+                // other on Solid Biofuel from another factory.
+                "hub" => {
+                    self.dialog = Dialog::None;
+                    self.dirty = false;
+                    self.run_pending(Pending::New);
+                    self.view = crate::map::View::Graph;
+                    if let Some(hub) = self.hub_id() {
+                        self.activate(hub);
+                    }
+                    let g = &self.state.graph;
+                    let burners: Vec<NodeId> = g.iter_nodes().filter(|n| matches!(g[*n].user_data.kind, NodeKind::Burner { .. })).collect();
+                    if let [one, two] = burners[..] {
+                        let game = self.user.game.clone();
+                        crate::hub::set_fuel(&game, &mut self.state.graph, two, "Desc_Biofuel_C");
+                        let z = self.state.pan_zoom.zoom;
+                        let leaves = self.add_node(Template::Resource("Desc_Leaves_C".into()), egui::pos2(-420.0 * z, 0.0));
+                        let bio = self.add_node(Template::Input("Desc_Biofuel_C".into()), egui::pos2(-420.0 * z, 200.0 * z));
+                        self.set_number(leaves, RATE, 60.0);
+                        self.set_number(bio, RATE, 8.0 / 3.0);
+                        for (a, b) in [(leaves, one), (bio, two)] {
+                            let g = &self.state.graph;
+                            if let (Some((_, o)), Some((_, i))) = (g[a].outputs.first(), g[b].inputs.first()) {
+                                let (o, i) = (*o, *i);
+                                self.state.graph.add_connection(o, i, 0);
+                            }
+                        }
+                    }
+                    self.changed();
+                    self.frame_all = true;
+                }
+                "hub_master" => {
+                    self.activate(crate::project::MASTER);
+                    self.frame_all = true;
+                }
                 "routers" => {
                     self.dialog = Dialog::None;
                     self.dirty = false;
                     self.run_pending(Pending::New);
+                    self.new_factory();
                     self.view = crate::map::View::Graph;
                     let (ore, ingot) = ("Desc_OreIron_C", "Desc_IronIngot_C");
                     let z = self.state.pan_zoom.zoom;
@@ -1597,6 +1650,7 @@ impl FactoryApp {
                     self.room.cursors.clear();
                     self.dirty = false;
                     self.run_pending(Pending::New);
+                    self.new_factory();
                     self.view = crate::map::View::Graph;
                     self.minimap = true;
                     self.planner.targets = vec![Target { item: "Desc_Motor_C".into(), rate: 5.0 }];
@@ -2096,7 +2150,10 @@ impl FactoryApp {
         let (mut do_open, mut do_rename) = (false, false);
         let mut set_tier = None;
         let mut set_extractor: Option<(String, fb_model::Purity)> = None;
+        let mut set_fuel: Option<String> = None;
         let g = &self.state.graph;
+        let burners = self.context_targets.iter().all(|n| matches!(g[*n].user_data.kind, NodeKind::Burner { .. }));
+        let in_hub = self.planner.hub;
         let title = if self.context_targets.len() > 1 { format!("{} nodes", self.context_targets.len()) } else { g[node].label.clone() };
         let factory = crate::project::factory_of(g, node);
         // Poles, mergers and splitters show no name or colour; a pole has
@@ -2118,8 +2175,22 @@ impl FactoryApp {
                 do_rename = item(ui, "Rename", "F2", true).clicked();
                 separator(ui);
             }
-            if !only_poles {
+            if !only_poles && !burners {
                 do_duplicate = item(ui, "Duplicate", "Ctrl+D", true).clicked();
+            }
+            // A HUB burner's fuel.
+            if let [one] = &self.context_targets[..] {
+                if let NodeKind::Burner { fuel } = &g[*one].user_data.kind {
+                    let game = self.user.game.clone();
+                    crate::menus::caption(ui, "Fuel");
+                    for f in &game.burner_fuels {
+                        let each = format!("{} per min", crate::fmt::fmt_num(f.hub_per_min()));
+                        if crate::menus::choice(ui, game.item_name(&f.item), &each, f.item == *fuel, true).clicked() {
+                            set_fuel = Some(f.item.clone());
+                        }
+                    }
+                    separator(ui);
+                }
             }
             // An extractor's building and node purity.
             if let [one] = &self.context_targets[..] {
@@ -2160,9 +2231,12 @@ impl FactoryApp {
                 }
                 separator(ui);
             }
-            do_delete = item(ui, "Delete", "Del", true).clicked();
+            // The HUB's burners are part of it.
+            if !burners {
+                do_delete = item(ui, "Delete", "Del", true).clicked();
+            }
             do_frame = item(ui, "Add comment frame", "C", true).clicked();
-            if !on_master {
+            if !on_master && !in_hub {
                 separator(ui);
                 do_move = item(ui, "Move to a new factory", "", true)
                     .on_hover_text("Moves these nodes into a factory of their own, linked to this one on the master graph.")
@@ -2195,13 +2269,18 @@ impl FactoryApp {
                 self.changed();
             }
         }
+        if let (Some(fuel), [one]) = (set_fuel.clone(), &self.context_targets[..]) {
+            let game = self.user.game.clone();
+            crate::hub::set_fuel(&game, &mut self.state.graph, *one, &fuel);
+            self.changed();
+        }
         if let Some((pole, t)) = set_tier {
             if let Some(p) = self.planner.power_net.poles.iter_mut().find(|p| p.id == pole) {
                 p.tier = t;
                 self.changed();
             }
         }
-        let chose = do_duplicate || do_delete || do_move || do_frame || do_open || do_rename || set_tier.is_some() || set_extractor.is_some();
+        let chose = do_duplicate || do_delete || do_move || do_frame || do_open || do_rename || set_tier.is_some() || set_extractor.is_some() || set_fuel.is_some();
         if chose || crate::menus::dismissed(ctx, &menu) {
             self.context_menu = None;
         }
@@ -2355,7 +2434,8 @@ impl FactoryApp {
 
     /// The Add node menu (right-click on empty canvas).
     fn add_node_menu(&mut self, ctx: &egui::Context) {
-        let (Some(state), Some(catalog)) = (self.finder.as_mut(), self.catalog.as_ref()) else {
+        let catalog = if self.planner.hub { self.hub_catalog.as_ref() } else { self.catalog.as_ref() };
+        let (Some(state), Some(catalog)) = (self.finder.as_mut(), catalog) else {
             return;
         };
         let assets = self.user.assets.as_mut().expect("assets");
@@ -3010,6 +3090,8 @@ pub(crate) fn evaluate_graph(game: &GameData, g: &FactoryGraph, cache: &mut SimC
             }
             NodeKind::Pole { .. } | NodeKind::Merger { .. } | NodeKind::Splitter { .. } => {}
             NodeKind::Pump { class, .. } => power = game.buildable_power.get(class).copied().unwrap_or(0.0),
+            // Part of the HUB: what it makes is counted below.
+            NodeKind::Burner { .. } => {}
             NodeKind::Extractor { item, class, .. } => {
                 if let Some(ex) = crate::extractors::find(game, class) {
                     let setup = crate::graph::machine_setup(game, g, id);
