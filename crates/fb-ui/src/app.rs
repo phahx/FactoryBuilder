@@ -873,22 +873,40 @@ impl FactoryApp {
         }
     }
 
-    fn arrange(&mut self) {
+    /// Lays the graph out, lining nodes up on the ports (`ports`, as just
+    /// drawn) their wires join, so wires run level.
+    fn arrange(&mut self, ports: &egui_node_graph2::PortLocations) {
+        use egui_node_graph2::AnyParameterId as P;
         let ids: Vec<NodeId> = self.state.graph.iter_nodes().collect();
         let index: BTreeMap<NodeId, usize> =
             ids.iter().enumerate().map(|(i, id)| (*id, i)).collect();
         let g = &self.state.graph;
-        let edges: Vec<(usize, usize)> = g
-            .iter_connections()
-            .map(|(i, o)| (index[&g[o].node], index[&g[i].node]))
-            .collect();
         let heights: Vec<f32> = ids
             .iter()
             .map(|id| self.node_heights.get(id).copied().unwrap_or(260.0))
             .collect();
-        let pos = fb_engine::layout::layered_sized(
+        // How far down its node a port's k-th wire joins (graph units).
+        let z = self.state.pan_zoom.zoom.max(0.01);
+        let port_y = |port: P, k: usize, node: NodeId| {
+            let top = self.node_rects.get(&node)?.min.y;
+            let hooks = ports.get(&port)?;
+            let at = hooks.get(k).or(hooks.last())?;
+            Some((at.y - top) / z)
+        };
+        let wires: Vec<(usize, usize, f32, f32)> = g
+            .iter_connections()
+            .map(|(i, o)| {
+                let (from, to) = (g[o].node, g[i].node);
+                let (a, b) = (index[&from], index[&to]);
+                let k = g.connections(i).iter().position(|c| *c == o).unwrap_or(0);
+                let pa = port_y(P::Output(o), 0, from).unwrap_or(heights[a] / 2.0);
+                let pb = port_y(P::Input(i), k, to).unwrap_or(heights[b] / 2.0);
+                (a, b, pa, pb)
+            })
+            .collect();
+        let pos = fb_engine::layout::layered_ports(
             ids.len(),
-            &edges,
+            &wires,
             theme::graph_style().node_width,
             &heights,
         );
@@ -1404,6 +1422,121 @@ impl FactoryApp {
                         self.dialog = Dialog::None;
                     }
                 }
+                // README: the project from the save, from its top left
+                // corner (the biggest linked groups).
+                "readme_world" => {
+                    self.frame_all = false;
+                    self.state.pan_zoom.pan = vec2(24.0, 24.0);
+                }
+                // README screenshots: a typical factory (Motors, standard
+                // recipes) in a new project, as Plan factory lays it out.
+                // The plan arrives a few frames later, so it's shot in the
+                // next view.
+                "readme_prep" => {
+                    self.dialog = Dialog::None;
+                    self.find = None;
+                    self.room.mode = crate::room::Mode::Off;
+                    self.room.peers.clear();
+                    self.room.cursors.clear();
+                    self.dirty = false;
+                    self.run_pending(Pending::New);
+                    self.view = crate::map::View::Graph;
+                    self.minimap = true;
+                    self.planner.targets = vec![Target { item: "Desc_Motor_C".into(), rate: 5.0 }];
+                    self.planner.enabled = self.user.game.recipes.values().filter(|r| !r.alternate).map(|r| r.class.clone()).collect();
+                    self.request_plan();
+                }
+                "readme_plan" => {}
+                // The same plan in a room: two others' cursors and
+                // selections, a ping and their messages.
+                "readme_room" => {
+                    use fb_model::room::{encode_code, HostInfo, Peer, RoomAddress};
+                    let addr = RoomAddress { local: "192.168.1.23".parse().unwrap(), public: Some("203.0.113.7".parse().unwrap()), port: 47860 };
+                    self.room.mode = crate::room::Mode::Hosting(HostInfo {
+                        code: encode_code(addr),
+                        local_ip: "192.168.1.23".into(),
+                        port: 47860,
+                        public_ip: Some("203.0.113.7".into()),
+                        public_source: Some("router".into()),
+                        forwarded: true,
+                        forward_problem: None,
+                        shared_address: false,
+                    });
+                    self.room.me = 0;
+                    self.room.peers.clear();
+                    for (id, name, color) in [(0, "Hoster", [0xFA, 0x95, 0x49]), (1, "Ada", [0x86, 0xC7, 0xF2]), (2, "Bo", [0xA6, 0xE0, 0x86])] {
+                        self.room.peers.insert(id, Peer { id, name: name.into(), color });
+                    }
+                    let z = self.state.pan_zoom.zoom.max(0.01);
+                    let g = |p: egui::Pos2| ((p - self.editor_rect.min - self.state.pan_zoom.pan) / z).to_pos2();
+                    // Ada on a node a quarter of the way across, Bo on one
+                    // three quarters across, each with it selected.
+                    let mut recipes: Vec<(NodeId, egui::Rect)> = self
+                        .node_rects
+                        .iter()
+                        .filter(|(id, _)| matches!(self.state.graph[**id].user_data.kind, NodeKind::Recipe { .. }))
+                        .map(|(id, r)| (*id, *r))
+                        .collect();
+                    recipes.sort_by(|a, b| a.1.min.x.total_cmp(&b.1.min.x).then(a.1.min.y.total_cmp(&b.1.min.y)));
+                    // Bo's ping below the last machine, clear of Ada's message.
+                    let picks = recipes.get(recipes.len() / 4).copied().zip(recipes.get(recipes.len() * 3 / 4).copied());
+                    let last = recipes.last().map(|r| r.1);
+                    let marks = picks.zip(last).map(|((a, b), last)| (a.0, g(a.1.center() + vec2(30.0, 8.0)), b.0, g(b.1.right_top() + vec2(-40.0, 26.0)), g(last.center_bottom() + vec2(0.0, 70.0))));
+                    let doc = self.active;
+                    let now = _ctx.input(|i| i.time);
+                    let room = &mut self.room;
+                    room.cursors.clear();
+                    room.pings.clear();
+                    room.messages.clear();
+                    room.bubbles.clear();
+                    room.selections.clear();
+                    room.views.clear();
+                    room.following = None;
+                    room.frozen = true;
+                    if let Some((a, at_a, b, at_b, ping)) = marks {
+                        room.cursors.insert(1, at_a);
+                        room.cursors.insert(2, at_b);
+                        room.cursor_doc.insert(1, doc);
+                        room.cursor_doc.insert(2, doc);
+                        room.selections.insert(1, (doc, vec![a]));
+                        room.selections.insert(2, (doc, vec![b]));
+                        room.pings.push(crate::room::PingMark { id: 2, pos: ping, doc, at: now });
+                    }
+                    self.add_message(2, "Rotors are done, I'll do the stators next.".into(), now);
+                    self.room.bubbles.remove(&2);
+                    self.add_message(1, "Should the screws come from the next factory over?".into(), now);
+                    self.dialog = Dialog::None;
+                }
+                // One recipe node up close (the Motor assembler), out of the room.
+                "readme_nodes" => {
+                    self.room.mode = crate::room::Mode::Off;
+                    self.room.peers.clear();
+                    self.room.cursors.clear();
+                    self.room.selections.clear();
+                    self.room.pings.clear();
+                    self.room.bubbles.clear();
+                    self.room.frozen = false;
+                    let motor = self.state.graph.iter_nodes().find(|id| matches!(&self.state.graph[*id].user_data.kind, NodeKind::Recipe { recipe } if self.user.game.recipes.get(recipe).is_some_and(|r| r.products.iter().any(|p| p.item == "Desc_Motor_C"))));
+                    if let Some(id) = motor {
+                        let k = 1.0 / self.state.pan_zoom.zoom;
+                        for (_, p) in self.state.node_positions.iter_mut() {
+                            *p = (p.to_vec2() * k).to_pos2();
+                        }
+                        self.state.pan_zoom.zoom(egui::Rect::EVERYTHING, &std::sync::Arc::new(_ctx.style().as_ref().clone()), k);
+                        self.focus_node = Some(id);
+                    }
+                }
+                // Add node for a wire let go from the Iron Rod output.
+                "readme_wire" => {
+                    let rods = self.state.graph.iter_nodes().find_map(|id| {
+                        let n = &self.state.graph[id];
+                        let is_recipe = matches!(n.user_data.kind, NodeKind::Recipe { .. });
+                        n.outputs.iter().find(|(_, o)| is_recipe && self.state.graph[*o].typ.0 == "Desc_IronRod_C").map(|(_, o)| (id, *o))
+                    });
+                    if let Some((n, o)) = rods {
+                        self.open_finder_for_wire(n, egui_node_graph2::AnyParameterId::Output(o), center - vec2(220.0, 260.0));
+                    }
+                }
                 _ => {}
             }
         }
@@ -1701,7 +1834,7 @@ impl FactoryApp {
             .all(|id| resp.node_rects.contains_key(&id));
         if self.relayout && measured {
             self.relayout = false;
-            self.arrange();
+            self.arrange(&resp.port_locations);
             self.frame_all = true;
             self.changed();
             ui.ctx().request_repaint();

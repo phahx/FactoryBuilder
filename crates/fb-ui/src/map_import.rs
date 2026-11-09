@@ -277,7 +277,7 @@ pub struct WorldReport {
 /// A project of the whole save: every group of machines standing within
 /// `gap_cm` of each other is a factory (as Import into planner makes it),
 /// and the belts and pipes running between groups are links on the master
-/// graph. Blocks sit where the factories are on the map.
+/// graph. Linked factories sit together (see [`arrange_blocks`]).
 pub fn world_project(world: &World, game: &GameData, map: Option<&MapInfo>, gap_cm: f32) -> (ProjectFile, WorldReport) {
     let mut report = WorldReport::default();
     let mut p = ProjectFile::new(Some(world.save.name.clone()));
@@ -308,10 +308,6 @@ pub fn world_project(world: &World, game: &GameData, map: Option<&MapInfo>, gap_
         boxes.push((cx, cy, 320.0, 130.0 + 34.0 * ports as f32));
         p.factories.push(ProjectFactory { id, x: 0.0, y: 0.0, color: None, factory: f });
     }
-    for (f, (x, y)) in p.factories.iter_mut().zip(grid(&boxes)) {
-        (f.x, f.y) = (x, y);
-    }
-
     // Links: an item belted or piped from one factory to another, when the
     // first sends it out and the second takes it in.
     let has = |id: u32, kind: Kind, item: &str| p.factories[id as usize - 1].factory.nodes.iter().any(|n| n.kind == kind && n.class == item);
@@ -327,6 +323,10 @@ pub fn world_project(world: &World, game: &GameData, map: Option<&MapInfo>, gap_
         let slot = slots.entry((from, item.clone())).or_default();
         p.links.push(Link { from, to, item, slot: *slot });
         *slot += 1;
+    }
+    let linked: Vec<(usize, usize)> = p.links.iter().map(|l| (l.from as usize - 1, l.to as usize - 1)).collect();
+    for (f, (x, y)) in p.factories.iter_mut().zip(arrange_blocks(&boxes, &linked)) {
+        (f.x, f.y) = (x, y);
     }
     report.factories = p.factories.len();
     report.links = p.links.len();
@@ -365,9 +365,130 @@ fn site_name(game: &GameData, f: &FactoryFile) -> String {
 /// keeps the map's order: rows from north to south, each from west to east.
 /// The whole world fits on screen; neighbours on the map stay near.
 /// Returns each block's top-left corner (graph units).
-fn grid(boxes: &[(f32, f32, f32, f32)]) -> Vec<(f32, f32)> {
-    const GAP: f32 = 70.0;
-    let cols = (boxes.len() as f32).sqrt().ceil().max(1.0) as usize;
+/// Space between factory blocks and between groups of them.
+const BLOCK_GAP: f32 = 70.0;
+
+/// Places factory blocks (world x, y, block width, height) on the master
+/// graph. Factories linked to each other sit together, laid out left to
+/// right like a factory's graph so their links run short and level; the
+/// groups go in rows in map order (north to south, then west to east), and
+/// factories without links follow in a grid, in map order too.
+fn arrange_blocks(boxes: &[(f32, f32, f32, f32)], links: &[(usize, usize)]) -> Vec<(f32, f32)> {
+    fn find(p: &mut [usize], mut x: usize) -> usize {
+        while p[x] != x {
+            p[x] = p[p[x]];
+            x = p[x];
+        }
+        x
+    }
+    let n = boxes.len();
+    let mut parent: Vec<usize> = (0..n).collect();
+    for &(a, b) in links {
+        if a < n && b < n {
+            let (ra, rb) = (find(&mut parent, a), find(&mut parent, b));
+            parent[ra] = rb;
+        }
+    }
+    let mut groups: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+    for i in 0..n {
+        let root = find(&mut parent, i);
+        groups.entry(root).or_default().push(i);
+    }
+    let (linked, single): (Vec<Vec<usize>>, Vec<Vec<usize>>) = groups.into_values().partition(|g| g.len() > 1);
+
+    // Each linked group laid out on its own: members' places from the
+    // group's top left, its size, and where it is on the map.
+    let mut placed: Vec<BlockGroup> = linked
+        .into_iter()
+        .map(|members| {
+            let index: HashMap<usize, usize> = members.iter().enumerate().map(|(k, &i)| (i, k)).collect();
+            let edges: Vec<(usize, usize)> = links.iter().filter_map(|(a, b)| Some((*index.get(a)?, *index.get(b)?))).collect();
+            let heights: Vec<f32> = members.iter().map(|&i| boxes[i].3).collect();
+            let width = members.iter().map(|&i| boxes[i].2).fold(0.0, f32::max);
+            let pos = fb_engine::layout::layered_sized(members.len(), &edges, width, &heights);
+            let left = pos.iter().map(|p| p[0]).fold(f32::INFINITY, f32::min);
+            let top = pos.iter().map(|p| p[1]).fold(f32::INFINITY, f32::min);
+            let at: Vec<(f32, f32)> = pos.iter().map(|p| (p[0] - left, p[1] - top)).collect();
+            let w = members.iter().zip(&at).map(|(&i, a)| a.0 + boxes[i].2).fold(0.0, f32::max);
+            let h = members.iter().zip(&at).map(|(&i, a)| a.1 + boxes[i].3).fold(0.0, f32::max);
+            let count = members.len() as f32;
+            let x = members.iter().map(|&i| boxes[i].0).sum::<f32>() / count;
+            let y = members.iter().map(|&i| boxes[i].1).sum::<f32>() / count;
+            BlockGroup { members, at, w, h, x, y }
+        })
+        .collect();
+
+    // Try a few row widths and keep the layout whose longer side is
+    // shortest: it frames at the largest zoom.
+    let area: f32 = placed.iter().map(|g| (g.w + BLOCK_GAP) * (g.h + BLOCK_GAP)).sum::<f32>()
+        + single.iter().flatten().map(|&i| (boxes[i].2 + BLOCK_GAP) * (boxes[i].3 + BLOCK_GAP)).sum::<f32>();
+    let widest = placed.iter().map(|g| g.w).fold(0.0, f32::max);
+    let single: Vec<usize> = single.into_iter().flatten().collect();
+    placed.sort_by(|a, b| a.y.total_cmp(&b.y));
+    [1.0, 1.25, 1.5, 2.0, 2.5, 3.0]
+        .iter()
+        .map(|k| pack(boxes, &placed, &single, (area.sqrt() * k).max(widest)))
+        .min_by(|a, b| a.1.total_cmp(&b.1))
+        .map(|(out, _)| out)
+        .unwrap_or_default()
+}
+
+/// A linked group of factory blocks, laid out on its own.
+struct BlockGroup {
+    members: Vec<usize>,
+    /// Each member's place from the group's top left.
+    at: Vec<(f32, f32)>,
+    w: f32,
+    h: f32,
+    /// Where the group is on the map.
+    x: f32,
+    y: f32,
+}
+
+/// Packs the groups (north to south) into rows up to `row_width` wide, each
+/// row west to east, then the unlinked blocks in a grid below. Returns
+/// every block's place and the longer side of the whole.
+fn pack(boxes: &[(f32, f32, f32, f32)], groups: &[BlockGroup], single: &[usize], row_width: f32) -> (Vec<(f32, f32)>, f32) {
+    let mut out = vec![(0.0, 0.0); boxes.len()];
+    let mut top = 0.0;
+    let mut right: f32 = 0.0;
+    let mut rest: Vec<&BlockGroup> = groups.iter().collect();
+    while !rest.is_empty() {
+        let mut take = 1;
+        let mut used = rest[0].w;
+        while take < rest.len() && used + BLOCK_GAP + rest[take].w <= row_width {
+            used += BLOCK_GAP + rest[take].w;
+            take += 1;
+        }
+        let mut row: Vec<&BlockGroup> = rest.drain(..take).collect();
+        row.sort_by(|a, b| a.x.total_cmp(&b.x));
+        let mut left = 0.0;
+        for g in &row {
+            for (&i, a) in g.members.iter().zip(&g.at) {
+                out[i] = (left + a.0, top + a.1);
+            }
+            left += g.w + BLOCK_GAP;
+        }
+        right = right.max(left - BLOCK_GAP);
+        top += row.iter().map(|g| g.h).fold(0.0, f32::max) + BLOCK_GAP;
+    }
+    let block_w = single.iter().map(|&i| boxes[i].2).fold(1.0, f32::max);
+    let cols = ((row_width + BLOCK_GAP) / (block_w + BLOCK_GAP)).floor().max(1.0) as usize;
+    let sub: Vec<(f32, f32, f32, f32)> = single.iter().map(|&i| boxes[i]).collect();
+    let mut bottom: f32 = top - BLOCK_GAP;
+    for ((&i, (x, y)), b) in single.iter().zip(grid(&sub, cols)).zip(&sub) {
+        out[i] = (x, top + y);
+        right = right.max(x + b.2);
+        bottom = bottom.max(top + y + b.3);
+    }
+    (out, right.max(bottom))
+}
+
+/// Blocks in a grid of `cols` columns, in map order: rows north to south,
+/// each row west to east.
+fn grid(boxes: &[(f32, f32, f32, f32)], cols: usize) -> Vec<(f32, f32)> {
+    const GAP: f32 = BLOCK_GAP;
+    let cols = cols.max(1);
     let mut order: Vec<usize> = (0..boxes.len()).collect();
     order.sort_by(|a, b| boxes[*a].1.total_cmp(&boxes[*b].1));
     let mut out = vec![(0.0, 0.0); boxes.len()];
@@ -406,8 +527,21 @@ mod tests {
     fn blocks_keep_the_maps_order() {
         // Four factories: two in the north (west, east), two in the south.
         let b = [(900.0, 10.0, 300.0, 200.0), (-500.0, 0.0, 300.0, 150.0), (100.0, 5000.0, 300.0, 200.0), (-900.0, 4000.0, 300.0, 200.0)];
-        let at = grid(&b);
+        let at = grid(&b, 2);
         assert_eq!(at, vec![(370.0, 0.0), (0.0, 0.0), (370.0, 270.0), (0.0, 270.0)]);
+    }
+
+    #[test]
+    fn linked_factories_sit_together() {
+        // 0 -> 2 linked though far apart on the map; 1 and 3 have no links.
+        let b = [(0.0, 0.0, 300.0, 200.0), (500.0, 100.0, 300.0, 200.0), (90_000.0, 90_000.0, 300.0, 200.0), (1000.0, 200.0, 300.0, 200.0)];
+        let at = arrange_blocks(&b, &[(0, 2)]);
+        // Side by side, level, the supplier on the left.
+        assert_eq!(at[0].1, at[2].1, "{at:?}");
+        assert!(at[2].0 > at[0].0 && at[2].0 - at[0].0 < 300.0 + 200.0, "{at:?}");
+        // The others below them, apart from each other.
+        assert!(at[1].1 >= at[0].1 + 200.0 && at[3].1 >= at[0].1 + 200.0, "{at:?}");
+        assert_ne!(at[1], at[3]);
     }
 
     #[test]
