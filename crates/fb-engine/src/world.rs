@@ -867,7 +867,7 @@ fn read_toc(s: &mut Stream, lv: i32, classes: &Classes, stats: &mut Stats) -> Re
                     let xf = Xf::from_toc(&f);
                     let [x, y, z] = xf.pos;
                     if let (Some(x), Some(y), Some(z)) = (finite(x), finite(y), finite(z)) {
-                        stats.players.push(fb_model::world::PlayerSpot { name: None, x, y, z, yaw: finite(xf.yaw()).unwrap_or(0.0) });
+                        stats.players.push(fb_model::world::PlayerSpot { name: None, x, y, z, yaw: finite(xf.yaw()).unwrap_or(0.0), online: None });
                     }
                 }
                 classes.entity(class).map(|(role, mark)| Box::new(Head::Entity { role, mark, class: class.to_string(), name, xf: Xf::from_toc(&f) }))

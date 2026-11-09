@@ -21,6 +21,7 @@ use std::sync::Mutex;
 use tauri::{ipc::Response, AppHandle, Manager, State};
 
 mod files;
+mod live;
 mod install;
 mod room;
 mod saves;
@@ -48,6 +49,11 @@ struct AppState {
     data_dir: PathBuf,
     identity: install::Identity,
     extract: setup::Progress,
+    /// Live map: the certificate the dedicated server last showed that
+    /// isn't trusted yet (only that one can be trusted), and the server
+    /// save downloaded last (name, play time).
+    live_seen: Mutex<Option<String>>,
+    live_save: Mutex<Option<(String, i64)>>,
 }
 
 impl AppState {
@@ -86,6 +92,17 @@ fn load_settings(data_dir: &Path) -> Settings {
         s.icons_dir = data_dir.join("icons").to_string_lossy().into_owned();
     }
     s
+}
+
+/// The window's settings, with what only the backend sets kept: the icon
+/// folder and stamp, and the trusted server certificate (live_server_trust),
+/// which another server address or port clears.
+fn keep_backend_owned(old: &Settings, mut new: Settings) -> Settings {
+    new.icons_stamp = old.icons_stamp.clone();
+    new.icons_dir = old.icons_dir.clone();
+    let same_server = old.live.server_host.trim().eq_ignore_ascii_case(new.live.server_host.trim()) && old.live.server_port == new.live.server_port;
+    new.live.server_cert = if same_server { old.live.server_cert.clone() } else { None };
+    new
 }
 
 fn save_settings(data_dir: &Path, settings: &Settings) -> CmdResult<()> {
@@ -142,13 +159,7 @@ fn status(state: State<AppState>) -> CmdResult<Status> {
 #[tauri::command]
 fn set_settings(state: State<AppState>, settings: Settings) -> CmdResult<Status> {
     state.log("set_settings");
-    let mut settings = settings;
-    {
-        let old = state.settings.lock().unwrap();
-        // Owned by the backend: the window's copy may be stale.
-        settings.icons_stamp = old.icons_stamp.clone();
-        settings.icons_dir = old.icons_dir.clone();
-    }
+    let settings = keep_backend_owned(&state.settings.lock().unwrap(), settings);
     save_settings(&state.data_dir, &settings)?;
     let changed_game = state.settings.lock().unwrap().game_dir != settings.game_dir;
     *state.settings.lock().unwrap() = settings;
@@ -670,6 +681,141 @@ async fn world_latest(app: AppHandle, session: String) -> CmdResult<Option<fb_mo
     .map_err(|e| e.to_string())
 }
 
+// ------------------------------------------------------------- live map
+
+/// The Live map add-on's settings, or why it can't run.
+fn live_settings(state: &AppState) -> CmdResult<fb_model::LiveSettings> {
+    let l = state.settings.lock().unwrap().live.clone();
+    if !l.enabled {
+        return Err("The Live map add-on is off (File › Settings).".into());
+    }
+    Ok(l)
+}
+
+fn live_error(f: live::Fail) -> String {
+    match f {
+        live::Fail::Untrusted(_) => "The server's certificate isn't the one you trusted. Check the server in Live map and confirm it again.".into(),
+        live::Fail::Other(e) => e,
+    }
+}
+
+/// Is the dedicated server there, is its certificate trusted, does it take
+/// the token, and what's it running.
+#[tauri::command]
+async fn live_server_check(state: State<'_, AppState>) -> CmdResult<fb_model::ServerCheck> {
+    state.log("live_server_check");
+    let l = live_settings(&state)?;
+    if l.server_host.trim().is_empty() {
+        return Err("Enter the server's address first.".into());
+    }
+    let host = l.server_host.trim().to_string();
+    let token = live::load_token(&state.data_dir);
+    let mut out = fb_model::ServerCheck { token_set: token.is_some(), ..Default::default() };
+    match live::call(&host, l.server_port, l.server_cert.as_deref(), None, "HealthCheck", serde_json::json!({ "ClientCustomData": "" })).await {
+        Ok(v) => {
+            out.reachable = true;
+            out.health = v.get("Health").and_then(|h| h.as_str()).map(|h| h.chars().take(32).collect());
+        }
+        Err(live::Fail::Untrusted(fp)) => {
+            out.reachable = true;
+            out.untrusted_cert = fp.clone();
+            *state.live_seen.lock().unwrap() = fp;
+            return Ok(out);
+        }
+        Err(live::Fail::Other(e)) => {
+            out.error = Some(e);
+            return Ok(out);
+        }
+    }
+    if let (Some(t), Some(pin)) = (token, l.server_cert.as_deref()) {
+        match live::call(&host, l.server_port, Some(pin), Some(&t), "QueryServerState", serde_json::json!({})).await {
+            Ok(v) => {
+                let g = v.get("ServerGameState").cloned().unwrap_or_default();
+                out.token_ok = Some(true);
+                out.session = g.get("ActiveSessionName").and_then(|s| s.as_str()).map(|s| s.chars().take(64).collect());
+                out.players = g.get("NumConnectedPlayers").and_then(|n| n.as_i64());
+                out.player_limit = g.get("PlayerLimit").and_then(|n| n.as_i64());
+            }
+            Err(f) => {
+                out.token_ok = Some(false);
+                out.error = Some(live_error(f));
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Trusts the certificate the server just showed (and only that one).
+#[tauri::command]
+fn live_server_trust(state: State<AppState>, fingerprint: String) -> CmdResult<Status> {
+    state.log("live_server_trust");
+    let seen = state.live_seen.lock().unwrap().clone();
+    if seen.as_deref() != Some(fingerprint.as_str()) {
+        return Err("That isn't the certificate the server showed. Check the server again.".into());
+    }
+    let settings = {
+        let mut s = state.settings.lock().unwrap();
+        s.live.server_cert = Some(fingerprint);
+        s.clone()
+    };
+    save_settings(&state.data_dir, &settings)?;
+    *state.live_seen.lock().unwrap() = None;
+    make_status(&state)
+}
+
+/// Keeps (or with None, forgets) the server's API token, encrypted.
+#[tauri::command]
+fn live_server_token(state: State<AppState>, token: Option<String>) -> CmdResult<()> {
+    state.log("live_server_token");
+    match token {
+        Some(t) => live::save_token(&state.data_dir, t.trim()),
+        None => {
+            live::forget_token(&state.data_dir);
+            Ok(())
+        }
+    }
+}
+
+/// The server's newest save (of the session it's running), downloaded
+/// when it's changed. The Map tab then reads it like any save.
+#[tauri::command]
+async fn live_server_sync(state: State<'_, AppState>) -> CmdResult<Option<fb_model::saves::SaveSummary>> {
+    state.log("live_server_sync");
+    let l = live_settings(&state)?;
+    let host = l.server_host.trim().to_string();
+    let pin = l.server_cert.clone().ok_or("Check the server in Live map and trust its certificate first.")?;
+    let token = live::load_token(&state.data_dir).ok_or("Add the server's API token in Live map first.")?;
+    let sessions = live::call(&host, l.server_port, Some(&pin), Some(&token), "EnumerateSessions", serde_json::json!({})).await.map_err(live_error)?;
+    let Some((name, played)) = live::newest_save(&sessions) else { return Ok(None) };
+    let dir = state.data_dir.join("live");
+    let path = dir.join("server.sav");
+    let fresh = state.live_save.lock().unwrap().as_ref() == Some(&(name.clone(), played)) && path.exists();
+    if !fresh {
+        let bytes = live::download(&host, l.server_port, &pin, &token, &name).await.map_err(live_error)?;
+        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        let tmp = dir.join("server.sav.part");
+        std::fs::write(&tmp, &bytes).map_err(|e| format!("Couldn't keep the server's save: {e}"))?;
+        std::fs::rename(&tmp, &path).map_err(|e| format!("Couldn't keep the server's save: {e}"))?;
+        *state.live_save.lock().unwrap() = Some((name, played));
+    }
+    state.allowed.allow(&path);
+    Ok(saves::summary_of(&path))
+}
+
+/// Players now, from the Ficsit Remote Monitoring mod.
+#[tauri::command]
+async fn live_players(state: State<'_, AppState>) -> CmdResult<Vec<fb_model::world::PlayerSpot>> {
+    let l = live_settings(&state)?;
+    if !l.frm {
+        return Err("Ficsit Remote Monitoring isn't turned on in Live map.".into());
+    }
+    let v = match (l.server_host.trim(), l.server_cert.as_deref()) {
+        (h, Some(pin)) if !h.is_empty() => live::frm_via_server(h, l.server_port, pin, "getPlayer").await.map_err(live_error)?,
+        _ => live::frm_direct(l.frm_host.trim(), l.frm_port, "getPlayer").await?,
+    };
+    Ok(live::players(&v))
+}
+
 // --------------------------------------------------------------------- rooms
 
 /// Tells the window something arrived, so it fetches it right away instead
@@ -771,6 +917,8 @@ fn main() {
                 data_dir,
                 identity: identity.clone(),
                 extract: Default::default(),
+                live_seen: Mutex::new(None),
+                live_save: Mutex::new(None),
             });
             let mut window = tauri::WebviewWindowBuilder::new(app, "main", tauri::WebviewUrl::App("index.html".into()))
                 .title(if test_profile.is_some() { "Factory Builder (Test)" } else { "Factory Builder" })
@@ -791,6 +939,11 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             status,
             set_settings,
+            live_server_check,
+            live_server_trust,
+            live_server_token,
+            live_server_sync,
+            live_players,
             load_game,
             icon,
             ui_asset,
@@ -835,6 +988,23 @@ fn main() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running Factory Builder");
+}
+
+#[cfg(test)]
+mod settings_tests {
+    use super::*;
+
+    #[test]
+    fn the_window_cant_set_the_trusted_certificate() {
+        let mut old = Settings::default();
+        old.live.server_host = "10.0.0.5".into();
+        old.live.server_cert = Some("AA:BB".into());
+        let mut new = old.clone();
+        new.live.server_cert = Some("EVIL".into());
+        assert_eq!(keep_backend_owned(&old, new.clone()).live.server_cert.as_deref(), Some("AA:BB"));
+        new.live.server_host = "10.0.0.6".into();
+        assert_eq!(keep_backend_owned(&old, new).live.server_cert, None, "another server: confirm again");
+    }
 }
 
 #[cfg(test)]

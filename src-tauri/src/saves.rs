@@ -17,6 +17,11 @@ pub fn saves_root() -> Option<PathBuf> {
     std::env::var_os("LOCALAPPDATA").map(|d| PathBuf::from(d).join(r"FactoryGame\Saved\SaveGames"))
 }
 
+/// A save's summary from its header.
+pub(crate) fn summary_of(path: &Path) -> Option<SaveSummary> {
+    summary(path)
+}
+
 fn summary(path: &Path) -> Option<SaveSummary> {
     let mut head = Vec::new();
     std::fs::File::open(path).ok()?.take(HEADER_BYTES).read_to_end(&mut head).ok()?;

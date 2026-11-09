@@ -572,13 +572,49 @@ pub struct LiveSettings {
     /// different certificate is refused until confirmed again.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub server_cert: Option<String>,
+    /// Live players and buildings from the Ficsit Remote Monitoring mod:
+    /// through the dedicated server when there is one, otherwise from its
+    /// web server at `frm_host:frm_port` (its default port is 8080).
+    #[serde(default)]
+    pub frm: bool,
+    #[serde(default = "default_frm_host")]
+    pub frm_host: String,
+    #[serde(default = "default_frm_port")]
+    pub frm_port: u16,
+}
+
+/// What checking the dedicated server found.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct ServerCheck {
+    pub reachable: bool,
+    /// The certificate it showed (SHA-256), when it isn't the trusted one.
+    pub untrusted_cert: Option<String>,
+    /// "healthy" or "slow" (HealthCheck).
+    pub health: Option<String>,
+    pub token_set: bool,
+    /// Whether the server accepted the token (None: not tried).
+    pub token_ok: Option<bool>,
+    pub session: Option<String>,
+    pub players: Option<i64>,
+    pub player_limit: Option<i64>,
+    pub error: Option<String>,
+}
+
+fn default_frm_host() -> String {
+    "localhost".into()
+}
+
+pub const DEFAULT_FRM_PORT: u16 = 8080;
+
+fn default_frm_port() -> u16 {
+    DEFAULT_FRM_PORT
 }
 
 pub const DEFAULT_SERVER_PORT: u16 = 7777;
 
 impl Default for LiveSettings {
     fn default() -> Self {
-        LiveSettings { enabled: false, server_host: String::new(), server_port: DEFAULT_SERVER_PORT, server_cert: None }
+        LiveSettings { enabled: false, server_host: String::new(), server_port: DEFAULT_SERVER_PORT, server_cert: None, frm: false, frm_host: default_frm_host(), frm_port: DEFAULT_FRM_PORT }
     }
 }
 
@@ -767,6 +803,9 @@ pub mod world {
         pub z: f32,
         /// Facing, degrees, as `Machine::yaw`.
         pub yaw: f32,
+        /// Live only: whether they're in the game now.
+        #[serde(default)]
+        pub online: Option<bool>,
     }
 
     /// One building's power: MW drawn now, drawn running at its clock

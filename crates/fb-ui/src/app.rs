@@ -159,6 +159,8 @@ pub struct FactoryApp {
     /// Fit the view to the selected nodes on the next frame.
     pub(crate) frame_selected: bool,
     pub(crate) map: crate::map::MapState,
+    /// The Live map add-on's state (live.rs).
+    pub(crate) live: crate::live::LiveState,
     #[cfg(test)]
     pub(crate) wire_label_texts: Vec<String>,
     /// "Not now" on the icons notice, for this session.
@@ -298,6 +300,7 @@ impl FactoryApp {
             view: Default::default(),
             frame_selected: false,
             map: Default::default(),
+            live: Default::default(),
             #[cfg(test)]
             wire_label_texts: Vec::new(),
             docs: Vec::new(),
@@ -647,6 +650,7 @@ impl FactoryApp {
                 | Msg::DevDone(_)) => self.on_setup_msg(ctx, m),
                 m @ (Msg::Saves(_) | Msg::PickedSaveGame(_) | Msg::SaveUnlocks(_)) => self.on_progress_msg(ctx, m),
                 m @ (Msg::MapInfo(_) | Msg::WorldSessions(_) | Msg::WorldLoaded { .. } | Msg::WorldLatest(_) | Msg::SelftestSave(_) | Msg::MapSprites(_)) => self.on_map_msg(m),
+                m @ (Msg::LiveSaved { .. } | Msg::LiveCheck(_) | Msg::LiveTrusted(_) | Msg::LiveToken(_) | Msg::LivePlayers(_) | Msg::LiveServerSave(_)) => self.on_live_msg(m),
                 Msg::Solved(r) => {
                     self.solving = false;
                     match r {

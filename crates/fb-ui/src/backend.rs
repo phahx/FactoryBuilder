@@ -87,6 +87,16 @@ pub enum Msg {
     MapSprites(Result<fb_model::world::Sprites, String>),
     /// Self-test: the sample save to show on the Map tab.
     SelftestSave(Result<Option<String>, String>),
+    /// Live map add-on (live.rs).
+    LiveSaved {
+        result: Result<Status, String>,
+        then_check: bool,
+    },
+    LiveCheck(Result<fb_model::ServerCheck, String>),
+    LiveTrusted(Result<Status, String>),
+    LiveToken(Result<(), String>),
+    LivePlayers(Result<Vec<fb_model::world::PlayerSpot>, String>),
+    LiveServerSave(Result<Option<fb_model::saves::SaveSummary>, String>),
 }
 
 #[cfg(not(target_arch = "wasm32"))]

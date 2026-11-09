@@ -15,17 +15,26 @@ serde.workspace = true
 serde_json.workspace = true
 # custom-protocol: production mode (normally added by the Tauri CLI, which we don't use).
 tauri = { version = "2.12.5", features = ["custom-protocol"] }
-tokio = { version = "1.54.1", features = ["net", "sync", "macros", "rt-multi-thread", "time"] }
+tokio = { version = "1.54.1", features = ["net", "sync", "macros", "rt-multi-thread", "time", "io-util"] }
 tokio-tungstenite = "0.30.0"
 futures-util = "0.3.34"
 igd-next = { version = "0.18.0", features = ["aio_tokio"] }
 tauri-plugin-dialog = "2"
 base64 = "0.23.1"
+# Live map add-on: a dedicated server's HTTPS API (pinned self-signed
+# certificate) and the Ficsit Remote Monitoring mod's web API.
+hyper = { version = "1.12.0", features = ["client", "http1"] }
+hyper-util = { version = "0.1.21", features = ["tokio"] }
+http-body-util = "0.1.5"
+bytes = "1.12.1"
+rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
+tokio-rustls = { version = "0.26.6", default-features = false, features = ["ring", "tls12"] }
+sha2 = "0.10.9"
 
 [target.'cfg(windows)'.dependencies]
 windows-registry = "0.6.1"
 # Already built for tao/wry with these features; used for shortcuts and dialogs.
-windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_System_Com", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
+windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_System_Com", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging", "Win32_Security_Cryptography"] }
 # The version Tauri's webview already uses: turns off the browser's own shortcuts.
 webview2-com = "0.39.1"
 

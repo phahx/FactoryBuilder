@@ -54,6 +54,8 @@ pub enum Dialog {
     Saves(crate::progress_ui::SavesDialog),
     /// Make a project of every factory in the save on the Map tab.
     WorldProject(WorldProject),
+    /// The Live map add-on's sources (live.rs).
+    Live { draft: fb_model::LiveSettings },
 }
 
 /// The Make project from save dialog: how close machines stand to be one
@@ -268,6 +270,12 @@ pub fn show(app: &mut FactoryApp, ctx: &egui::Context) {
                     app.delete_factories(&ids);
                 }
                 _ => {}
+            }
+        }
+        Dialog::Live { mut draft } => {
+            let open = crate::live::dialog(app, ctx, &mut draft);
+            if matches!(app.dialog, Dialog::Live { .. }) {
+                app.dialog = if open { Dialog::Live { draft } } else { Dialog::None };
             }
         }
         Dialog::WorldProject(mut d) => {

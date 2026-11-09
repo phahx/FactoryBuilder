@@ -3465,7 +3465,7 @@ fn enter_opens_the_selected_factory_and_confirms_a_dialog() {
 fn the_live_map_add_on_shows_players_only_when_turned_on() {
     let (mut world, map) = sample_world();
     let m = world.machines[0].clone();
-    world.players = vec![fb_model::world::PlayerSpot { name: None, x: m.x, y: m.y + 500.0, z: m.z, yaw: 90.0 }];
+    world.players = vec![fb_model::world::PlayerSpot { name: None, x: m.x, y: m.y + 500.0, z: m.z, yaw: 90.0, online: None }];
     let hook: RoomHook = Rc::new(move |cmd: &str, _args: &Value| match cmd {
         "map_info" => Some(Ok(serde_json::to_value(&map).unwrap())),
         "map_tile" => Some(Err("no tiles in tests".into())),
@@ -3488,4 +3488,84 @@ fn the_live_map_add_on_shows_players_only_when_turned_on() {
     // Several are numbered; a name (from a mod, later) is used as is.
     let two = vec![fb_model::world::PlayerSpot::default(), fb_model::world::PlayerSpot { name: Some("Ada".into()), ..Default::default() }];
     assert_eq!((crate::live::label(&two, 0), crate::live::label(&two, 1)), ("Player 1".to_string(), "Ada".to_string()));
+}
+
+#[test]
+fn live_map_follows_a_dedicated_server_after_its_certificate_is_trusted() {
+    let (mut world, map) = sample_world();
+    world.save.path = r"C:\data\live\server.sav".into();
+    world.save.name = "Base_autosave_2".into();
+    let fp = "AB:CD:EF:01";
+    let calls: Calls = Default::default();
+    let log = calls.clone();
+    let trusted = Rc::new(RefCell::new(false));
+    let t = trusted.clone();
+    let save = world.save.clone();
+    let hook: RoomHook = Rc::new(move |cmd: &str, args: &Value| {
+        log.borrow_mut().push((cmd.to_string(), args.clone()));
+        match cmd {
+            "status" => {
+                let mut s = Settings { setup_done: true, ..Default::default() };
+                s.live.enabled = true;
+                Some(Ok(serde_json::to_value(Status { icons_found: 747, ui_assets_found: 17, map_found: true, settings: s, ..Default::default() }).unwrap()))
+            }
+            "map_info" => Some(Ok(serde_json::to_value(&map).unwrap())),
+            "map_tile" => Some(Err("no tiles in tests".into())),
+            "world_sessions" => Some(Ok(json!([]))),
+            "world_load" => Some(Ok(serde_json::to_value(&world).unwrap())),
+            "live_server_check" => Some(Ok(if *t.borrow() {
+                json!({ "reachable": true, "health": "healthy", "token_set": true, "token_ok": true, "session": "Base", "players": 2, "player_limit": 4 })
+            } else {
+                json!({ "reachable": true, "untrusted_cert": fp, "token_set": true })
+            })),
+            "live_server_trust" => {
+                assert_eq!(args["fingerprint"], fp, "only what the server showed");
+                *t.borrow_mut() = true;
+                let mut s = Settings { setup_done: true, ..Default::default() };
+                s.live.enabled = true;
+                s.live.server_host = "10.0.0.5".into();
+                s.live.server_cert = Some(fp.into());
+                Some(Ok(serde_json::to_value(Status { settings: s, ..Default::default() }).unwrap()))
+            }
+            "live_server_sync" => Some(Ok(serde_json::to_value(&save).unwrap())),
+            "live_players" => Some(Ok(json!([{ "name": "Ada", "x": 0.0, "y": 0.0, "z": 0.0, "yaw": 0.0, "online": true }]))),
+            _ => None,
+        }
+    });
+    let Some((ctx, mut app, _)) = harness_with(Some(hook)) else { return };
+    frames(&ctx, &mut app, 2);
+    press(&ctx, &mut app, "Map");
+    frames(&ctx, &mut app, 2);
+    // The add-on's own button; its dialog: an address, then Check server.
+    press(&ctx, &mut app, "Live map…");
+    frames(&ctx, &mut app, 1);
+    if let crate::dialogs::Dialog::Live { draft } = &mut app.dialog {
+        draft.server_host = "10.0.0.5".into();
+    }
+    frames(&ctx, &mut app, 1);
+    frames(&ctx, &mut app, 2);
+    press(&ctx, &mut app, "Check server");
+    frames(&ctx, &mut app, 3);
+    // Unknown certificate: shown to compare, trusted only on request.
+    let texts = drawn_texts(&ctx, &mut app);
+    assert!(texts.iter().any(|t| t.contains(fp)), "the fingerprint is shown");
+    assert!(!calls.borrow().iter().any(|(c, _)| c == "live_server_trust"));
+    press(&ctx, &mut app, "Trust this certificate");
+    frames(&ctx, &mut app, 3);
+    let texts = drawn_texts(&ctx, &mut app);
+    assert!(texts.iter().any(|t| t.contains("Running “Base”, 2 of 4 players on")), "{:?}", texts.iter().filter(|t| t.contains("Base")).collect::<Vec<_>>());
+    press(&ctx, &mut app, "Close");
+    frames(&ctx, &mut app, 1);
+    assert!(matches!(app.dialog, crate::dialogs::Dialog::None));
+    // Following it: its newest save loads.
+    app.choose_session(crate::live::SERVER_SESSION.into());
+    frames(&ctx, &mut app, 4);
+    assert!(calls.borrow().iter().any(|(c, _)| c == "live_server_sync"));
+    assert_eq!(app.map.world.as_ref().map(|w| w.save.name.clone()).as_deref(), Some("Base_autosave_2"));
+    // Live players from the mod, once it's turned on: named.
+    if let Some(s) = app.status.as_mut() {
+        s.settings.live.frm = true;
+    }
+    frames(&ctx, &mut app, 3);
+    assert!(drawn_texts(&ctx, &mut app).iter().any(|t| t == "Ada"));
 }

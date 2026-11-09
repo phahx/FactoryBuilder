@@ -102,14 +102,22 @@ impl FactoryApp {
         self.backend.call("world_sessions", json!({}), Msg::WorldSessions);
     }
 
-    fn load_world(&mut self, path: String) {
+    pub(crate) fn load_world(&mut self, path: String) {
         self.map.loading = Some(path.clone());
         self.map.world_error = None;
         let p = path.clone();
         self.backend.call("world_load", json!({ "path": path }), move |r| Msg::WorldLoaded { path: p, result: r });
     }
 
-    fn choose_session(&mut self, session: String) {
+    pub(crate) fn choose_session(&mut self, session: String) {
+        // Live map add-on: the dedicated server's newest save, fetched now.
+        if session == crate::live::SERVER_SESSION {
+            self.map.session = Some(session);
+            self.map.selected.clear();
+            self.map.world_error = None;
+            self.live.next_server = 0.0;
+            return;
+        }
         let newest = self.map.sessions.as_ref().and_then(|l| l.iter().find(|s| s.session == session)).and_then(|s| s.saves.first()).map(|s| s.path.clone());
         self.map.session = Some(session);
         self.map.selected.clear();
@@ -164,6 +172,13 @@ impl FactoryApp {
     fn map_follow(&mut self, ctx: &egui::Context) {
         let now = ctx.input(|i| i.time);
         let Some(session) = self.map.session.clone() else { return };
+        if session == crate::live::SERVER_SESSION {
+            if self.live_server() {
+                self.live_server_follow(now);
+                ctx.request_repaint_after(std::time::Duration::from_secs_f64(crate::live::SERVER_SECONDS));
+            }
+            return;
+        }
         if now >= self.map.next_follow {
             self.map.next_follow = now + FOLLOW_SECONDS;
             if self.map.world.is_some() {
@@ -208,6 +223,8 @@ pub fn map_ui(app: &mut FactoryApp, ui: &mut egui::Ui) {
     app.map_start();
     let ctx = ui.ctx().clone();
     app.map_follow(&ctx);
+    app.live_poll(&ctx);
+    let live_server = app.live_server();
     let assets_ready = app.status.as_ref().is_some_and(|s| s.icons_found > 0);
 
     // Toolbar: session, what's shown, and the import action.
@@ -217,6 +234,7 @@ pub fn map_ui(app: &mut FactoryApp, ui: &mut egui::Ui) {
     let mut clear = false;
     let mut extract = false;
     let mut layers_changed = false;
+    let mut open_live = false;
     let (bar, _) = ui.allocate_exact_size(vec2(ui.available_width(), 40.0), Sense::hover());
     ui.painter().rect_filled(bar, 0.0, HEADER);
     let mut child = ui.new_child(egui::UiBuilder::new().max_rect(bar.shrink2(vec2(10.0, 0.0))).layout(egui::Layout::left_to_right(egui::Align::Center)));
@@ -225,6 +243,13 @@ pub fn map_ui(app: &mut FactoryApp, ui: &mut egui::Ui) {
         ui.label(RichText::new("Save").color(TEXT_DIM));
         let current = app.map.session.clone().unwrap_or_else(|| "None".into());
         egui::ComboBox::from_id_salt("map_session").selected_text(current).width(200.0).show_ui(ui, |ui| {
+            if live_server {
+                let host = app.live_settings().server_host;
+                let on = app.map.session.as_deref() == Some(crate::live::SERVER_SESSION);
+                if ui.selectable_label(on, format!("{}  ·  {}", crate::live::SERVER_SESSION, host.trim())).clicked() {
+                    pick = Some(crate::live::SERVER_SESSION.to_string());
+                }
+            }
             for s in app.map.sessions.iter().flatten() {
                 let when = s.saves.first().map(|x| date(x.saved_unix)).unwrap_or_default();
                 if ui.selectable_label(app.map.session.as_deref() == Some(s.session.as_str()), format!("{}  ·  {when}", s.session)).clicked() {
@@ -253,7 +278,8 @@ pub fn map_ui(app: &mut FactoryApp, ui: &mut egui::Ui) {
         } else if let Some(e) = &app.map.world_error {
             e.clone()
         } else if let Some(w) = &app.map.world {
-            format!("{} · saved {} · follows the newest save", w.save.name, date(w.save.saved_unix))
+            let follows = if app.map.session.as_deref() == Some(crate::live::SERVER_SESSION) { "follows the dedicated server" } else { "follows the newest save" };
+            format!("{} · saved {} · {follows}", w.save.name, date(w.save.saved_unix))
         } else if app.map.sessions.as_ref().is_some_and(|l| l.is_empty()) {
             "No saves found in the game's save folder.".to_string()
         } else {
@@ -263,6 +289,9 @@ pub fn map_ui(app: &mut FactoryApp, ui: &mut egui::Ui) {
         // Right-hand controls first; the status takes what's left and
         // truncates (full text on hover) instead of running under them.
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if app.live_on() && widgets::button(ui, "Live map…").on_hover_text("Follow a dedicated server, and live players from the Ficsit Remote Monitoring mod.").clicked() {
+                open_live = true;
+            }
             let n = app.map.selected.len();
             import = widgets::button_enabled(ui, "Import into planner", n > 0).on_hover_text("Adds the selected machines to the project as a new factory, one node per recipe.").clicked();
             let tip = "A new project of every factory in the save, linked on the master graph by the belts and pipes between them.";
@@ -280,6 +309,13 @@ pub fn map_ui(app: &mut FactoryApp, ui: &mut egui::Ui) {
     }
     if let Some(s) = pick {
         app.choose_session(s);
+    }
+    if open_live {
+        app.dialog = crate::dialogs::Dialog::Live { draft: app.live_settings() };
+        if app.live_server() && app.live.check.is_none() && !app.live.checking {
+            app.live.checking = true;
+            app.backend.call("live_server_check", json!({}), Msg::LiveCheck);
+        }
     }
     if layers_changed {
         app.save_view_settings();
@@ -613,7 +649,7 @@ pub fn map_ui(app: &mut FactoryApp, ui: &mut egui::Ui) {
     }
 
     // Live map add-on: the players.
-    let players = app.live_players();
+    let (players, live_players) = app.live_players();
     let player_hover = crate::live::draw_players(&painter, &view, &players, pointer);
 
     // Box selection.
@@ -641,7 +677,7 @@ pub fn map_ui(app: &mut FactoryApp, ui: &mut egui::Ui) {
     }
     if let Some(i) = player_hover {
         let saved = app.map.world.as_ref().map(|w| date(w.save.saved_unix)).unwrap_or_default();
-        egui::show_tooltip_at_pointer(&ctx, ui.layer_id(), egui::Id::new("map_player"), |ui| crate::live::player_tip(ui, &players, i, &format!("saved {saved}")));
+        egui::show_tooltip_at_pointer(&ctx, ui.layer_id(), egui::Id::new("map_player"), |ui| crate::live::player_tip(ui, &players, i, live_players, &format!("saved {saved}")));
     } else if let Some((title, icon, detail, extra)) = hover {
         let assets = app.user.assets.as_mut();
         egui::show_tooltip_at_pointer(&ctx, ui.layer_id(), egui::Id::new("map_hover"), |ui| {
