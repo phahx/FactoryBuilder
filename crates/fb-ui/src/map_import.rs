@@ -46,6 +46,7 @@ fn per_min(r: &fb_model::Recipe, item: &str, list: &[fb_model::Amount]) -> f64 {
 }
 
 /// Items per minute an extractor produces on its node.
+#[cfg(test)]
 fn extractor_rate(game: &GameData, map: Option<&MapInfo>, world: &World, m: &Machine) -> Option<(String, f64)> {
     extractor_info(game, map, world, m).map(|(r, _, rate)| (r, rate))
 }

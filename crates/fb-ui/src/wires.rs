@@ -104,6 +104,7 @@ pub fn paint_labels(app: &mut FactoryApp, ui: &egui::Ui, wires: &[(InputId, Outp
             let at = [0.5, 0.4, 0.6, 0.3, 0.7].into_iter().map(|t| point(points, t)).find(|p| free(*p, size))?;
             Some((text, galley, Rect::from_center_size(at, size)))
         });
+        #[cfg_attr(not(test), allow(unused_variables))]
         let Some((text, galley, rect)) = spot else { continue };
         placed.push(rect);
         let id = ui.id().with(("wire_label", *input, *output));

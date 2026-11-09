@@ -832,7 +832,7 @@ impl NodeDataTrait for NodeData {
 
     /// A factory block that needs power and gets none (or not enough); an
     /// Input no other factory (enough of) brings in.
-    fn warning(&self, node_id: NodeId, _graph: &FactoryGraph, s: &mut UserState) -> Option<(Color32, String)> {
+    fn warning(&self, node_id: NodeId, graph: &FactoryGraph, s: &mut UserState) -> Option<(Color32, String)> {
         match &self.kind {
             NodeKind::Input { item } => {
                 let name = s.game.item_name(item).to_string();
@@ -855,6 +855,10 @@ impl NodeDataTrait for NodeData {
                     "Not getting power: its Power input isn't wired to a pole or a power plant.".to_string()
                 };
                 Some((DANGER, text))
+            }
+            NodeKind::Extractor { item, .. } if !crate::extractors::on_resource(graph, node_id) => {
+                let name = s.game.item_name(item).to_string();
+                Some((DANGER, format!("Not on a resource node: it extracts nothing until a {name} resource node is wired into it.")))
             }
             _ => None,
         }
@@ -1081,7 +1085,10 @@ pub fn node_rates(
             (ins, outs)
         }
         NodeKind::Resource { .. } | NodeKind::Input { .. } => {
-            let rate = input_number(graph, node, RATE);
+            // A deposit gives only what's taken from it: by its extractors
+            // (worked out from them), or straight by machines (its rate).
+            let direct = || n.outputs.iter().any(|(_, o)| graph.output_connections(*o).iter().any(|i| !crate::extractors::from_the_ground(graph, *o, *i)));
+            let rate = if matches!(n.user_data.kind, NodeKind::Resource { .. }) && !direct() { 0.0 } else { input_number(graph, node, RATE) };
             (
                 vec![],
                 n.outputs
@@ -1107,9 +1114,11 @@ pub fn node_rates(
         // Not in the simulation: their wires are joined up (routers.rs).
         NodeKind::Pole { .. } | NodeKind::Merger { .. } | NodeKind::Splitter { .. } | NodeKind::Pump { .. } => (vec![], vec![]),
         // What it takes from the deposit is what it puts out.
+        // Nothing without a resource node to stand on.
         NodeKind::Extractor { class, .. } => {
             let purity = crate::extractors::purity_of(graph, node);
-            let rate = crate::extractors::per_machine(game, class, purity) * input_number(graph, node, MACHINES) * input_number(graph, node, CLOCK) / 100.0;
+            let on = if crate::extractors::on_resource(graph, node) { 1.0 } else { 0.0 };
+            let rate = on * crate::extractors::per_machine(game, class, purity) * input_number(graph, node, MACHINES) * input_number(graph, node, CLOCK) / 100.0;
             (item_inputs.map(|(name, _)| (name.clone(), rate)).collect(), n.outputs.iter().map(|(name, _)| (name.clone(), rate)).collect())
         }
     }

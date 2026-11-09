@@ -2748,6 +2748,10 @@ fn a_chosen_belt_limits_its_wire() {
         let i = app.state.graph[n].get_input(MACHINES).unwrap();
         app.state.graph[i].value.set_number(v);
     }
+    // Standing on a Normal node.
+    let p = at(&app, 380.0, 520.0);
+    let ore = app.add_test_node(Template::Resource(item.into()), p);
+    connect(&mut app, ore, miner, item);
     let wire = connect(&mut app, miner, smelter, item);
     frames(&ctx, &mut app, 3);
     // 2 Miners Mk.1 (60 each): 120 a minute, on the slowest belt that
@@ -3271,4 +3275,40 @@ fn power_sections_name_their_ends_and_what_crosses() {
     assert_eq!(crossing([side(1000.0, 200.0), side(100.0, 400.0)]), Some((300.0, true)));
     assert_eq!(crossing([side(0.0, 50.0), side(500.0, 10.0)]), Some((50.0, false)));
     assert_eq!(crossing([side(100.0, 50.0), side(500.0, 10.0)]), None, "each side covers itself");
+}
+
+#[test]
+fn an_extractor_extracts_only_on_a_resource_node() {
+    use crate::graph::NodeKind;
+    use egui_node_graph2::NodeDataTrait;
+    let Some((ctx, mut app, _)) = harness() else { return };
+    frames(&ctx, &mut app, 2);
+    app.planner_mut().targets = vec![Target { item: "Desc_IronIngot_C".into(), rate: 30.0 }];
+    app.press_plan();
+    frames(&ctx, &mut app, 4);
+    let g = app.graph();
+    let miner = g.iter_nodes().find(|n| matches!(g[*n].user_data.kind, NodeKind::Extractor { .. })).unwrap();
+    let ore = g.iter_nodes().find(|n| matches!(g[*n].user_data.kind, NodeKind::Resource { .. })).unwrap();
+    let warning = |app: &mut FactoryApp| {
+        let data = app.state.graph[miner].user_data.clone();
+        data.warning(miner, &app.state.graph, &mut app.user).map(|w| w.1)
+    };
+    assert_eq!(warning(&mut app), None);
+    assert!((app.summary.resources["Desc_OreIron_C"] - 30.0).abs() < 1e-6);
+    // Take the miner off its node: nothing comes out, and it says why.
+    let g = &app.state.graph;
+    let on = g[miner].inputs.iter().map(|x| x.1).find(|x| !g.connections(*x).is_empty()).unwrap();
+    for o in g.connections(on) {
+        app.state.graph.remove_connection(on, o);
+    }
+    app.changed();
+    frames(&ctx, &mut app, 3);
+    assert_eq!(app.summary.resources.get("Desc_OreIron_C").copied().unwrap_or(0.0), 0.0, "{:?}", app.summary.resources);
+    let out = app.state.graph[miner].outputs[0].0.clone();
+    assert_eq!(app.user.ports[&(miner, out)].have, 0.0, "the miner puts nothing out");
+    assert_eq!(warning(&mut app).as_deref(), Some("Not on a resource node: it extracts nothing until a Iron Ore resource node is wired into it."));
+    // The deposit, with nothing on it, gives nothing either.
+    let r_out = app.state.graph[ore].outputs[0].0.clone();
+    let s = app.user.ports.get(&(ore, r_out)).copied().unwrap_or_default();
+    assert_eq!((s.have, s.want), (0.0, 0.0), "{s:?}");
 }
