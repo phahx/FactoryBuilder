@@ -612,6 +612,10 @@ pub fn map_ui(app: &mut FactoryApp, ui: &mut egui::Ui) {
         }
     }
 
+    // Live map add-on: the players.
+    let players = app.live_players();
+    let player_hover = crate::live::draw_players(&painter, &view, &players, pointer);
+
     // Box selection.
     let state = &mut app.map;
     if let Some(d) = drag_rect {
@@ -635,7 +639,10 @@ pub fn map_ui(app: &mut FactoryApp, ui: &mut egui::Ui) {
     if resp.clicked() && !ui.input(|i| i.modifiers.shift) {
         state.selected.clear();
     }
-    if let Some((title, icon, detail, extra)) = hover {
+    if let Some(i) = player_hover {
+        let saved = app.map.world.as_ref().map(|w| date(w.save.saved_unix)).unwrap_or_default();
+        egui::show_tooltip_at_pointer(&ctx, ui.layer_id(), egui::Id::new("map_player"), |ui| crate::live::player_tip(ui, &players, i, &format!("saved {saved}")));
+    } else if let Some((title, icon, detail, extra)) = hover {
         let assets = app.user.assets.as_mut();
         egui::show_tooltip_at_pointer(&ctx, ui.layer_id(), egui::Id::new("map_hover"), |ui| {
             widgets::tooltip_title(ui, &title);

@@ -550,6 +550,40 @@ pub struct Settings {
     /// The View menu's toggles.
     #[serde(default)]
     pub view: ViewSettings,
+    /// The Live map add-on (off until turned on).
+    #[serde(default)]
+    pub live: LiveSettings,
+}
+
+/// The Live map add-on: on the Map tab, where players are, a dedicated
+/// server's saves, and live updates from the Ficsit Remote Monitoring mod.
+/// Off by default; while off, none of it runs.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct LiveSettings {
+    #[serde(default)]
+    pub enabled: bool,
+    /// A dedicated server to follow (empty: none), and its port (the
+    /// game's, normally 7777; its HTTPS API shares it).
+    #[serde(default)]
+    pub server_host: String,
+    #[serde(default = "default_server_port")]
+    pub server_port: u16,
+    /// SHA-256 (hex) of the server certificate the user confirmed. A
+    /// different certificate is refused until confirmed again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_cert: Option<String>,
+}
+
+pub const DEFAULT_SERVER_PORT: u16 = 7777;
+
+impl Default for LiveSettings {
+    fn default() -> Self {
+        LiveSettings { enabled: false, server_host: String::new(), server_port: DEFAULT_SERVER_PORT, server_cert: None }
+    }
+}
+
+fn default_server_port() -> u16 {
+    DEFAULT_SERVER_PORT
 }
 
 /// The View menu's toggles, remembered between sessions.
@@ -620,6 +654,7 @@ impl Default for Settings {
             setup_done: false,
             icons_stamp: None,
             view: ViewSettings::default(),
+            live: LiveSettings::default(),
         }
     }
 }
@@ -716,6 +751,22 @@ pub mod world {
         /// What each powered machine draws or makes (machine id -> power).
         #[serde(default)]
         pub machine_power: std::collections::BTreeMap<u32, PowerUse>,
+        /// Player characters where the save left them.
+        #[serde(default)]
+        pub players: Vec<PlayerSpot>,
+    }
+
+    /// A player on the map: from a save (no name: saves keep only an
+    /// account id) or reported live by a mod.
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+    pub struct PlayerSpot {
+        #[serde(default)]
+        pub name: Option<String>,
+        pub x: f32,
+        pub y: f32,
+        pub z: f32,
+        /// Facing, degrees, as `Machine::yaw`.
+        pub yaw: f32,
     }
 
     /// One building's power: MW drawn now, drawn running at its clock

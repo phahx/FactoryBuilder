@@ -760,6 +760,8 @@ pub(crate) struct Stats {
     /// Objects read with complete / legacy property tags.
     pub complete_tags: usize,
     pub legacy_tags: usize,
+    /// Player characters (`Char_Player_C`): only their place is read.
+    pub players: Vec<fb_model::world::PlayerSpot>,
 }
 
 #[derive(Default)]
@@ -833,6 +835,9 @@ fn read_object(payload: &[u8], entity: bool, complete: bool) -> R<Info> {
     Ok(info)
 }
 
+/// A player's character actor.
+const PLAYER_CLASS: &str = "Char_Player_C";
+
 /// Reads a level's TOC (`lv` = the level's save version).
 fn read_toc(s: &mut Stream, lv: i32, classes: &Classes, stats: &mut Stats) -> Result<Vec<Option<Box<Head>>>, WorldError> {
     let count = s.count(MAX_OBJECTS)?;
@@ -857,6 +862,13 @@ fn read_toc(s: &mut Stream, lv: i32, classes: &Classes, stats: &mut Stats) -> Re
                 s.take(4)?; // placed in level
                 if class.starts_with("Build_") {
                     stats.buildables += 1;
+                }
+                if class == PLAYER_CLASS {
+                    let xf = Xf::from_toc(&f);
+                    let [x, y, z] = xf.pos;
+                    if let (Some(x), Some(y), Some(z)) = (finite(x), finite(y), finite(z)) {
+                        stats.players.push(fb_model::world::PlayerSpot { name: None, x, y, z, yaw: finite(xf.yaw()).unwrap_or(0.0) });
+                    }
                 }
                 classes.entity(class).map(|(role, mark)| Box::new(Head::Entity { role, mark, class: class.to_string(), name, xf: Xf::from_toc(&f) }))
             }
@@ -1128,7 +1140,7 @@ pub(crate) fn read_world_stats(bytes: &[u8], game: &GameData) -> Result<(World, 
     let Acc { ents, conns, power, overrides, skipped, stats } = acc;
     let resource_of: HashMap<&str, &str> = overrides.iter().filter_map(|o| Some((o.id.as_str(), o.resource.as_deref()?))).collect();
 
-    let mut world = World { save, skipped, ..Default::default() };
+    let mut world = World { save, skipped, players: stats.players.clone(), ..Default::default() };
 
     // Machines (ids in order), carriers and marks.
     let mut machine_of: Vec<Option<u32>> = vec![None; ents.len()];

@@ -3460,3 +3460,32 @@ fn enter_opens_the_selected_factory_and_confirms_a_dialog() {
     frames(&ctx, &mut app, 1);
     assert_eq!(app.factory_ids(), vec![first]);
 }
+
+#[test]
+fn the_live_map_add_on_shows_players_only_when_turned_on() {
+    let (mut world, map) = sample_world();
+    let m = world.machines[0].clone();
+    world.players = vec![fb_model::world::PlayerSpot { name: None, x: m.x, y: m.y + 500.0, z: m.z, yaw: 90.0 }];
+    let hook: RoomHook = Rc::new(move |cmd: &str, _args: &Value| match cmd {
+        "map_info" => Some(Ok(serde_json::to_value(&map).unwrap())),
+        "map_tile" => Some(Err("no tiles in tests".into())),
+        "world_sessions" => Some(Ok(json!([{ "session": "Test", "saves": [world.save.clone()] }]))),
+        "world_load" => Some(Ok(serde_json::to_value(&world).unwrap())),
+        "world_latest" => Some(Ok(serde_json::to_value(&world.save).unwrap())),
+        _ => None,
+    });
+    let Some((ctx, mut app, _)) = harness_with(Some(hook)) else { return };
+    frames(&ctx, &mut app, 2);
+    press(&ctx, &mut app, "Map");
+    frames(&ctx, &mut app, 3);
+    // Off by default: nothing new on the map.
+    assert!(!app.live_on());
+    assert!(!drawn_texts(&ctx, &mut app).iter().any(|t| t == "Player"));
+    // On: the save's player, where it left them.
+    app.status.as_mut().unwrap().settings.live.enabled = true;
+    frames(&ctx, &mut app, 1);
+    assert!(drawn_texts(&ctx, &mut app).iter().any(|t| t == "Player"));
+    // Several are numbered; a name (from a mod, later) is used as is.
+    let two = vec![fb_model::world::PlayerSpot::default(), fb_model::world::PlayerSpot { name: Some("Ada".into()), ..Default::default() }];
+    assert_eq!((crate::live::label(&two, 0), crate::live::label(&two, 1)), ("Player 1".to_string(), "Ada".to_string()));
+}

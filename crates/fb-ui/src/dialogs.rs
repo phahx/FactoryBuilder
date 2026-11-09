@@ -423,6 +423,7 @@ pub fn show(app: &mut FactoryApp, ctx: &egui::Context) {
                             draft.room_port = v.clamp(1024.0, 65535.0) as u16;
                         }
                     });
+                    crate::live::settings_section(ui, assets, &mut draft);
                     if status.setup.dev {
                         widgets::divider(ui);
                         ui.label(RichText::new("Developer").font(theme::semibold(14.0)).color(ACCENT));

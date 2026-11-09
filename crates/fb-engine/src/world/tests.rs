@@ -865,6 +865,10 @@ fn real_save_power() {
     let Some(game) = real_game() else { return };
     let Ok(bytes) = std::fs::read(std::path::Path::new(&dir).join("late.sav")) else { return };
     let w = read_world(&bytes, &game).unwrap();
+    // The one player character in it, where the save says (cm).
+    assert_eq!(w.players.len(), 1);
+    let p = &w.players[0];
+    assert!((p.x - 215681.33).abs() < 0.1 && (p.y + 61037.68).abs() < 0.1 && (p.z - 7678.14).abs() < 0.1, "{p:?}");
     eprintln!("power lines {}, circuits {}, powered machines {}", w.power_lines.len(), w.circuits.len(), w.machine_circuit.len());
     for (i, c) in w.circuits.iter().enumerate() {
         eprintln!(
