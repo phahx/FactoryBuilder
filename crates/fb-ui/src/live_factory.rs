@@ -45,9 +45,11 @@ pub struct LiveNode {
     pub buildings: usize,
     /// "11 of 12 producing · 87%", and whether it wants attention.
     pub status: Option<(String, bool)>,
-    /// What they hold now, by item (machines: their slots; storage: its
-    /// contents).
+    /// What machines hold now in their slots, by item (shown on the item
+    /// icons of their ports).
     pub held: Vec<(String, f32)>,
+    /// Storage: what's in it (shown under it, as an inventory).
+    pub contents: Vec<(String, f32)>,
     /// MW now: drawn, or made (generators).
     pub mw: Option<f32>,
     pub makes_mw: Option<f32>,
@@ -247,6 +249,10 @@ pub struct LiveView {
     generated: HashMap<u32, HashSet<(InputId, OutputId)>>,
     /// A live factory to open once the project is built (by name).
     pub open_name: Option<String>,
+    /// Live factories arranged (by name) since the app started: the first
+    /// time one is shown without a saved layout, its nodes are arranged by
+    /// their drawn heights (the importer's are a guess).
+    arranged: std::collections::HashSet<String>,
 }
 
 /// The built part of a graph: its nodes, their settings and its wires as
@@ -673,6 +679,13 @@ impl FactoryApp {
                     self.activate(id);
                 }
             }
+            if self.active != MASTER {
+                let name = self.doc_name(self.active);
+                let saved = self.live_settings().layouts.contains_key(&self.layout_key(&name));
+                if !saved && self.live_view.arranged.insert(name) {
+                    self.relayout = true;
+                }
+            }
             self.live_lines(&world);
             self.live_view.seen = self.refresh_key();
         }
@@ -811,12 +824,12 @@ impl FactoryApp {
                     l.buildings = ks.len();
                     let st: Vec<&fb_model::LiveStructure> = ks.iter().filter_map(|k| self.live.structure_status.get(*k as usize).and_then(|s| s.as_ref())).collect();
                     if !st.is_empty() {
-                        l.held = add_up(st.iter().map(|s| &s.items));
+                        l.contents = add_up(st.iter().map(|s| &s.items));
                         let tanks: Vec<&(Option<String>, f32, f32)> = st.iter().filter_map(|s| s.fluid.as_ref()).collect();
                         if !tanks.is_empty() {
                             let (have, cap) = tanks.iter().fold((0.0f32, 0.0f32), |a, (_, c, m)| (a.0 + c, a.1 + m));
                             if let Some(f) = tanks.iter().find_map(|(f, c, _)| f.clone().filter(|_| *c > 0.0)) {
-                                l.held = vec![(f, have)];
+                                l.contents = vec![(f, have)];
                             }
                             l.fill = Some((format!("{} of {} m³", num(have as f64), num(cap as f64)), cap > 0.0 && have >= cap * 0.999));
                         } else {

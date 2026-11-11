@@ -452,6 +452,15 @@ pub fn sites(world: &World, gap_cm: f32) -> Vec<Vec<u32>> {
     groups.into_values().collect()
 }
 
+/// About how tall a factory's block on the master graph is: a row per item
+/// it takes in, per item it sends out (storage counts) and for its power,
+/// stacked, under its header and above its footer.
+fn block_height(f: &FactoryFile) -> f32 {
+    let items = |kinds: &[Kind]| f.nodes.iter().filter(|n| kinds.contains(&n.kind)).map(|n| n.item.clone().unwrap_or_else(|| n.class.clone())).collect::<BTreeSet<_>>().len();
+    let rows = items(&[Kind::Input]) + items(&[Kind::Output, Kind::Storage]) + 1;
+    110.0 + 36.0 * rows as f32
+}
+
 /// What came out of making a project from a save.
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct WorldReport {
@@ -499,8 +508,7 @@ pub fn world_project(world: &World, game: &GameData, map: Option<&MapInfo>, gap_
         let ms: Vec<&Machine> = site.iter().filter_map(|m| world.machines.get(*m as usize)).collect();
         let cx = ms.iter().map(|m| m.x).sum::<f32>() / ms.len() as f32;
         let cy = ms.iter().map(|m| m.y).sum::<f32>() / ms.len() as f32;
-        let ports = f.nodes.iter().filter(|n| n.kind == Kind::Input).count().max(f.nodes.iter().filter(|n| n.kind == Kind::Output).count());
-        boxes.push((cx, cy, 320.0, 130.0 + 34.0 * ports as f32));
+        boxes.push((cx, cy, 320.0, block_height(&f)));
         p.factories.push(ProjectFactory { id, x: 0.0, y: 0.0, color: None, factory: f, hub: false });
     }
     // Links: an item belted or piped from one factory to another, when the
@@ -582,8 +590,7 @@ pub fn region_project(world: &World, defs: &[fb_model::LiveFactoryDef], holds: &
         };
         let n = pts.len().max(1) as f32;
         let (cx, cy) = (pts.iter().map(|p| p[0]).sum::<f32>() / n, pts.iter().map(|p| p[1]).sum::<f32>() / n);
-        let ports = f.nodes.iter().filter(|n| n.kind == Kind::Input).count().max(f.nodes.iter().filter(|n| n.kind == Kind::Output).count());
-        boxes.push((cx, cy, 320.0, 130.0 + 34.0 * ports as f32));
+        boxes.push((cx, cy, 320.0, block_height(&f)));
         members_of.insert(id, members);
         p.factories.push(ProjectFactory { id, x: 0.0, y: 0.0, color: def.color.map(crate::portable::color_to_hex), factory: f, hub: false });
     }

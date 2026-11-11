@@ -62,18 +62,18 @@ pub fn footer(ui: &mut Ui, s: &mut UserState, node_id: NodeId, _item: &str, clas
             }
         });
     });
-    let Some(l) = live.filter(|l| !l.held.is_empty()) else { return };
+    let Some(l) = live.filter(|l| !l.contents.is_empty()) else { return };
     ui.add_space(2.0);
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
-        for (item, n) in l.held.iter().take(16) {
+        for (item, n) in l.contents.iter().take(16) {
             let fluid = game.item_form(item).is_fluid();
             let text = crate::live_factory::count_text(*n, fluid);
             let unit = if fluid { " m³" } else { "" };
             s.item_icon_count(ui, item, 30.0, Some(&text)).on_hover_text(format!("{} {}{unit}", crate::fmt::fmt_num((*n as f64 * 10.0).round() / 10.0), game.item_name(item)));
         }
     });
-    if l.held.len() > 16 {
-        widgets::name_label(ui, RichText::new(format!("and {} more", l.held.len() - 16)).small().color(TEXT_DIM));
+    if l.contents.len() > 16 {
+        widgets::name_label(ui, RichText::new(format!("and {} more", l.contents.len() - 16)).small().color(TEXT_DIM));
     }
 }

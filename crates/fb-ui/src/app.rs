@@ -158,6 +158,8 @@ pub struct FactoryApp {
     pub(crate) view: crate::map::View,
     /// Fit the view to the selected nodes on the next frame.
     pub(crate) frame_selected: bool,
+    /// Frame these nodes (without selecting them) on the next draw.
+    pub(crate) frame_nodes: Option<Vec<NodeId>>,
     pub(crate) map: crate::map::MapState,
     /// The Live map add-on's state (live.rs).
     pub(crate) live: crate::live::LiveState,
@@ -315,6 +317,7 @@ impl FactoryApp {
             wire_labels: true,
             view: Default::default(),
             frame_selected: false,
+            frame_nodes: None,
             map: Default::default(),
             live: Default::default(),
             live_view: Default::default(),
@@ -434,7 +437,8 @@ impl FactoryApp {
             self.undo.remove(0);
         }
         self.redo.clear();
-        self.dirty = true;
+        // The Live view's project is never saved, so never unsaved.
+        self.dirty = !self.live_view.on;
         self.rev += 1;
         self.share_doc();
         true
@@ -1834,6 +1838,70 @@ impl FactoryApp {
                         self.open_finder_for_wire(n, egui_node_graph2::AnyParameterId::Output(o), center - vec2(220.0, 260.0));
                     }
                 }
+                // README: the Live view, from a generated example world
+                // (demo.rs; in memory only).
+                "readme_live_map" => {
+                    self.dialog = Dialog::None;
+                    self.leave_live();
+                    self.map.selected.clear();
+                    self.live_map.selected_stores.clear();
+                    self.view = crate::map::View::Map;
+                    self.map.selftest_zoom = None;
+                    self.map.selftest_zoomed = false;
+                    self.load_demo();
+                    // Every region in view.
+                    let pts: Vec<[f32; 2]> = self.world_defs().iter().flat_map(|d| d.region.clone()).collect();
+                    if !pts.is_empty() {
+                        let b = pts.iter().fold([f32::MAX, f32::MAX, f32::MIN, f32::MIN], |b, p| [b[0].min(p[0]), b[1].min(p[1]), b[2].max(p[0]), b[3].max(p[1])]);
+                        let size = self.map.rect.map(|r| r.size()).unwrap_or(vec2(1300.0, 860.0));
+                        let scale = (size.x as f64 / (b[2] - b[0]) as f64).min(size.y as f64 / (b[3] - b[1]) as f64) * 0.82;
+                        self.map.look_at(((b[0] + b[2]) / 2.0) as f64, ((b[1] + b[3]) / 2.0) as f64, scale);
+                    }
+                    self.live_outlines_refresh();
+                }
+                // The map toolbar with a selection (everything still fits).
+                "live_map_selected" => {
+                    self.leave_live();
+                    self.view = crate::map::View::Map;
+                    self.map.selected = (0..2).collect();
+                }
+                "readme_live_master" | "readme_live_factory" => {
+                    self.dialog = Dialog::None;
+                    if self.map.world.as_ref().is_none_or(|w| w.save.session != crate::demo::SESSION) {
+                        self.load_demo();
+                    }
+                    let factory = view == "readme_live_factory";
+                    // One planned piece in Iron Works: a Reinforced Iron
+                    // Plate assembler taking plates from its storage.
+                    if let Some(s) = self.status.as_mut() {
+                        if let Some(d) = s.settings.live.factories.iter_mut().find(|d| d.name == "Iron Works") {
+                            d.plan = json!({
+                                "nodes": [{ "kind": "recipe", "class": "Recipe_IronPlateReinforced_C", "machines": 1.0, "clock": 100.0, "x": 1900.0, "y": -40.0, "planned": true }],
+                                "wires": [{ "from": { "Built": { "kind": "storage", "class": "Build_StorageContainerMk1_C", "item": "Desc_IronPlate_C" } }, "output": 0, "to": { "Planned": 0 }, "input": 0, "slot": 0 }]
+                            })
+                            .to_string();
+                        }
+                    }
+                    self.enter_live();
+                    self.live_view.planning = factory;
+                    self.live_view.open_name = factory.then(|| "Iron Works".to_string());
+                    self.set_planning(factory);
+                    self.live_view.open_name = factory.then(|| "Iron Works".to_string());
+                    self.live_refresh();
+                    if !factory {
+                        self.activate(crate::project::MASTER);
+                        self.live_refresh();
+                        self.frame_all = true;
+                    } else {
+                        // The smelters through to storage and the planned piece.
+                        let g = &self.state.graph;
+                        let nodes: Vec<NodeId> = g
+                            .iter_nodes()
+                            .filter(|n| g[*n].user_data.planned || matches!(&g[*n].user_data.kind, NodeKind::Storage { .. } | NodeKind::Recipe { .. } | NodeKind::Output { .. }))
+                            .collect();
+                        self.frame_nodes = Some(nodes);
+                    }
+                }
                 _ => {}
             }
         }
@@ -2068,6 +2136,12 @@ impl FactoryApp {
             self.frame_selected = false;
             self.fit_view(ui, true);
         }
+        // (After any arrange waiting for a draw, so it frames where they end up.)
+        if let Some(nodes) = self.frame_nodes.take_if(|_| !self.relayout) {
+            let keep = std::mem::replace(&mut self.state.selected_nodes, nodes);
+            self.fit_view(ui, true);
+            self.state.selected_nodes = keep;
+        }
         if let Some(node) = self.focus_node.take() {
             if let Some(pos) = self.state.node_positions.get(node).copied() {
                 let z = self.state.pan_zoom.zoom;
@@ -2228,7 +2302,7 @@ impl FactoryApp {
         if self.relayout && measured {
             self.relayout = false;
             self.arrange(&resp.port_locations);
-            self.frame_all = true;
+            self.frame_all = self.frame_nodes.is_none();
             self.changed();
             ui.ctx().request_repaint();
         }

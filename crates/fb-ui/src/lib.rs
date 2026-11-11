@@ -13,6 +13,7 @@ pub mod navigate;
 pub mod live;
 pub mod live_factory;
 pub mod live_map;
+pub mod demo;
 pub mod storage;
 pub mod map;
 pub mod map_draw;

@@ -45,6 +45,21 @@ and pipes running between them:
 
 ![A project made from a save, with 138 factories](docs/screenshots/project-from-save.png)
 
+With the Live map add-on, draw regions on the map: each is a live factory, kept up to date
+from the save or the game itself (see [Live view](#live-view)):
+
+![Three live factory regions on the map](docs/screenshots/live-map.png)
+
+The Live tab links them on a master graph of their own, by the belts, power and storage
+between them, with the HUB:
+
+![The Live view's master graph: three factories and the HUB](docs/screenshots/live-master.png)
+
+Inside one, what's built shows its live figures: what's in each machine and container, how
+many are producing. Planning mode adds planned pieces beside it:
+
+![A live factory: live figures on every node, and a planned Reinforced Iron Plate assembler](docs/screenshots/live-factory.png)
+
 ## Build
 
 Needs Rust with the `wasm32-unknown-unknown` target, a `wasm-bindgen-cli` that matches the

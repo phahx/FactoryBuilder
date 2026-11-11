@@ -283,7 +283,7 @@ pub fn map_ui(app: &mut FactoryApp, ui: &mut egui::Ui) {
         } else {
             ui.label(RichText::new("Save").color(TEXT_DIM));
             let current = app.map.session.clone().unwrap_or_else(|| "None".into());
-            egui::ComboBox::from_id_salt("map_session").selected_text(current).width(200.0).show_ui(ui, |ui| {
+            egui::ComboBox::from_id_salt("map_session").selected_text(current).width(170.0).show_ui(ui, |ui| {
                 for s in app.map.sessions.iter().flatten() {
                     let when = s.saves.first().map(|x| date(x.saved_unix)).unwrap_or_default();
                     if ui.selectable_label(app.map.session.as_deref() == Some(s.session.as_str()), format!("{}  ·  {when}", s.session)).clicked() {
@@ -349,17 +349,20 @@ pub fn map_ui(app: &mut FactoryApp, ui: &mut egui::Ui) {
             }
             import = widgets::button_enabled(ui, "Import into planner", n > 0).on_hover_text("Adds the selected machines to the project as a new factory, one node per recipe.").clicked();
             let tip = "A new project of every factory in the save, linked on the master graph by the belts and pipes between them.";
-            // Live mode builds live factories from the map instead.
-            let live = app.live_on();
-            whole = widgets::button_enabled(ui, "Make project from save…", app.map.world.is_some() && !live)
-                .on_hover_text(tip)
-                .on_disabled_hover_text(if live { "Not while the Live map add-on is on (Settings › Add-ons)." } else { tip })
-                .clicked()
-                && !live;
+            // Not while the Live map add-on is on: live factories come from
+            // regions instead (and the toolbar has no room for a dead button).
+            if !app.live_on() {
+                whole = widgets::button_enabled(ui, "Make project from save…", app.map.world.is_some()).on_hover_text(tip).clicked();
+            }
             if n > 0 {
                 clear = widgets::button(ui, &format!("Clear selection ({n})")).clicked();
             } else if app.map.world.is_some() {
-                ui.label(RichText::new("Drag on the map to select machines").small().color(TEXT_DIM));
+                // Only where it fits (it would run under the controls to its left).
+                let hint = RichText::new("Drag on the map to select machines and storage").small().color(TEXT_DIM);
+                let width = egui::WidgetText::from(hint.clone()).into_galley(ui, Some(egui::TextWrapMode::Extend), f32::INFINITY, egui::TextStyle::Small).size().x;
+                if ui.available_width() > width + 16.0 {
+                    ui.label(hint);
+                }
             }
             ui.add_space(12.0);
             ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
