@@ -185,9 +185,9 @@ fn import_with(world: &World, selected: &BTreeSet<u32>, stores: &BTreeSet<u32>, 
                     report.mixed_sloops += 1;
                 }
                 let common = counts.iter().max_by_key(|(_, n)| **n).map(|(s, _)| *s).unwrap_or(0);
-                Node { kind: Kind::Recipe, class: r.clone(), machines: Some(count), clock: Some((clock * 100.0 * 1000.0).round() / 1000.0), sloops: Some(common).filter(|s| *s > 0), rate: None, name: None, color: None, item: None, purity: None, x: 0.0, y: 0.0, planned: false }
+                Node { kind: Kind::Recipe, class: r.clone(), machines: Some(count), clock: Some((clock * 100.0 * 1000.0).round() / 1000.0), sloops: Some(common).filter(|s| *s > 0), rate: None, name: None, color: None, item: None, purity: None, x: 0.0, y: 0.0, planned: false, router: None }
             }
-            Group::Resource(res, p) => Node { kind: Kind::Resource, class: res.clone(), machines: None, clock: None, sloops: None, rate: Some((resource_rate[&(res.clone(), *p)] * 1000.0).round() / 1000.0), name: None, color: None, item: None, purity: Purity::ALL.get(*p as usize).copied(), x: 0.0, y: 0.0, planned: false },
+            Group::Resource(res, p) => Node { kind: Kind::Resource, class: res.clone(), machines: None, clock: None, sloops: None, rate: Some((resource_rate[&(res.clone(), *p)] * 1000.0).round() / 1000.0), name: None, color: None, item: None, purity: Purity::ALL.get(*p as usize).copied(), x: 0.0, y: 0.0, planned: false, router: None },
             Group::Extractor(res, class, p) => {
                 let count = ms.len() as f64;
                 let clock = ms.iter().map(|m| m.clock as f64).sum::<f64>() / count;
@@ -205,10 +205,11 @@ fn import_with(world: &World, selected: &BTreeSet<u32>, stores: &BTreeSet<u32>, 
                     x: 0.0,
                     y: 0.0,
                     planned: false,
+                    router: None,
                 }
             }
             // Its supply rate is set below, from what it feeds.
-            Group::Storage(class, item) => Node { kind: Kind::Storage, class: class.clone(), machines: None, clock: None, sloops: None, rate: Some(0.0), name: None, color: None, item: Some(item.clone()), purity: None, x: 0.0, y: 0.0, planned: false },
+            Group::Storage(class, item) => Node { kind: Kind::Storage, class: class.clone(), machines: None, clock: None, sloops: None, rate: None, name: None, color: None, item: Some(item.clone()), purity: None, x: 0.0, y: 0.0, planned: false, router: None },
         };
         index.insert(g.clone(), f.nodes.len());
         f.nodes.push(node);
@@ -344,24 +345,24 @@ fn import_with(world: &World, selected: &BTreeSet<u32>, stores: &BTreeSet<u32>, 
         if let Some(i) = in_port(g, item) {
             let kind = if !from_factories && game.items.get(item).is_some_and(|it| it.raw) { Kind::Resource } else { Kind::Input };
             let r = rate(g, item, true);
-            extra.push((Node { kind, class: item.clone(), machines: None, clock: None, sloops: None, rate: Some((r * 1000.0).round() / 1000.0), name: None, color: None, item: None, purity: None, x: 0.0, y: 0.0, planned: false }, Some((index[g], i, true))));
+            extra.push((Node { kind, class: item.clone(), machines: None, clock: None, sloops: None, rate: Some((r * 1000.0).round() / 1000.0), name: None, color: None, item: None, purity: None, x: 0.0, y: 0.0, planned: false, router: None }, Some((index[g], i, true))));
         }
     }
     for (g, item) in &to_outside {
         if let Some(o) = out_port(g, item) {
             let r = rate(g, item, false);
-            extra.push((Node { kind: Kind::Output, class: item.clone(), machines: None, clock: None, sloops: None, rate: Some((r * 1000.0).round() / 1000.0), name: None, color: None, item: None, purity: None, x: 0.0, y: 0.0, planned: false }, Some((index[g], o, false))));
+            extra.push((Node { kind: Kind::Output, class: item.clone(), machines: None, clock: None, sloops: None, rate: Some((r * 1000.0).round() / 1000.0), name: None, color: None, item: None, purity: None, x: 0.0, y: 0.0, planned: false, router: None }, Some((index[g], o, false))));
         }
     }
     for (g, r) in &store_from_outside {
         if let Group::Storage(_, item) = g {
-            extra.push((Node { kind: Kind::Input, class: item.clone(), machines: None, clock: None, sloops: None, rate: Some((r * 1000.0).round() / 1000.0), name: None, color: None, item: None, purity: None, x: 0.0, y: 0.0, planned: false }, Some((index[g], 0, true))));
+            extra.push((Node { kind: Kind::Input, class: item.clone(), machines: None, clock: None, sloops: None, rate: Some((r * 1000.0).round() / 1000.0), name: None, color: None, item: None, purity: None, x: 0.0, y: 0.0, planned: false, router: None }, Some((index[g], 0, true))));
         }
     }
     for (g, r) in &store_to_outside {
         if let Group::Storage(_, item) = g {
             *supply.entry(g.clone()).or_default() += r;
-            extra.push((Node { kind: Kind::Output, class: item.clone(), machines: None, clock: None, sloops: None, rate: Some((r * 1000.0).round() / 1000.0), name: None, color: None, item: None, purity: None, x: 0.0, y: 0.0, planned: false }, Some((index[g], 0, false))));
+            extra.push((Node { kind: Kind::Output, class: item.clone(), machines: None, clock: None, sloops: None, rate: Some((r * 1000.0).round() / 1000.0), name: None, color: None, item: None, purity: None, x: 0.0, y: 0.0, planned: false, router: None }, Some((index[g], 0, false))));
         }
     }
     for (node, link) in extra {
@@ -611,13 +612,13 @@ pub fn region_project(world: &World, defs: &[fb_model::LiveFactoryDef], holds: &
             let Some(fuel) = burning.clone().or_else(|| crate::hub::default_fuel(game)) else { continue };
             let y = k as f32 * 260.0;
             let at = f.nodes.len();
-            f.nodes.push(Node { kind: Kind::Burner, class: fuel.clone(), machines: None, clock: None, sloops: None, rate: None, name: None, color: None, item: None, purity: None, x: 420.0, y, planned: false });
+            f.nodes.push(Node { kind: Kind::Burner, class: fuel.clone(), machines: None, clock: None, sloops: None, rate: None, name: None, color: None, item: None, purity: None, x: 420.0, y, planned: false, router: None });
             members.push(Members::Burner(k));
             // Its output follows demand from moment to moment; the live
             // figures show that. Here: fuelled, it can make its full output.
             let share = if burning.is_some() { 1.0 } else { 0.0 };
             let rate = crate::hub::fuel_per_min(game, &fuel) * share;
-            f.nodes.push(Node { kind: Kind::Input, class: fuel, machines: None, clock: None, sloops: None, rate: Some((rate * 1000.0).round() / 1000.0), name: None, color: None, item: None, purity: None, x: 0.0, y, planned: false });
+            f.nodes.push(Node { kind: Kind::Input, class: fuel, machines: None, clock: None, sloops: None, rate: Some((rate * 1000.0).round() / 1000.0), name: None, color: None, item: None, purity: None, x: 0.0, y, planned: false, router: None });
             members.push(Members::None);
             f.wires.push(Wire { from: at + 1, output: 0, to: at, input: 0, slot: 0, belt: None });
         }

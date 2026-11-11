@@ -133,6 +133,26 @@ pub enum Kind {
     Burner,
     /// Storage (`class`, the building) of `item`.
     Storage,
+    /// A Smart Splitter of `class` (an item), with `router.rules`.
+    SmartSplitter,
+    /// A Programmable Splitter of `class`, with `router.rules`.
+    ProgrammableSplitter,
+    /// A Priority Merger of `class`, with `router.priorities`.
+    PriorityMerger,
+    /// A Valve on a pipe of `class`; `rate` is its Valve Limit.
+    Valve,
+}
+
+/// A Smart or Programmable Splitter's rules, a Priority Merger's priorities.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct RouterSettings {
+    /// Per output (Left, Center, Right): its rules, each "none", "any",
+    /// "any_undefined", "overflow" or an item class.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rules: Vec<Vec<String>>,
+    /// Per input (Left, Center, Right): "high", "medium" or "low".
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub priorities: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -168,6 +188,9 @@ pub struct Node {
     /// A planned piece of a live factory (live_factory.rs).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub planned: bool,
+    /// Smart and Programmable Splitters, Priority Mergers: their settings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub router: Option<RouterSettings>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -424,8 +447,8 @@ mod tests {
     fn sample() -> FactoryFile {
         let mut f = FactoryFile::new(Some("Steel".into()));
         f.plan.products.push(Target { item: "Desc_SteelPlate_C".into(), rate: 20.0 });
-        f.nodes.push(Node { kind: Kind::Resource, class: "Desc_OreIron_C".into(), machines: None, clock: None, sloops: None, rate: Some(60.0), name: None, color: None, item: None, purity: None, x: 0.0, y: 0.0, planned: false });
-        f.nodes.push(Node { kind: Kind::Recipe, class: "Recipe_IngotIron_C".into(), machines: Some(2.0), clock: Some(100.0), sloops: Some(1), rate: None, name: None, color: Some("#FA9549".into()), item: None, purity: None, x: 380.0, y: 0.0, planned: false });
+        f.nodes.push(Node { kind: Kind::Resource, class: "Desc_OreIron_C".into(), machines: None, clock: None, sloops: None, rate: Some(60.0), name: None, color: None, item: None, purity: None, x: 0.0, y: 0.0, planned: false, router: None });
+        f.nodes.push(Node { kind: Kind::Recipe, class: "Recipe_IngotIron_C".into(), machines: Some(2.0), clock: Some(100.0), sloops: Some(1), rate: None, name: None, color: Some("#FA9549".into()), item: None, purity: None, x: 380.0, y: 0.0, planned: false, router: None });
         f.wires.push(Wire { from: 0, output: 0, to: 1, input: 0, slot: 0, belt: None });
         f
     }

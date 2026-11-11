@@ -1563,13 +1563,15 @@ pub mod room {
     }
 
     /// Version 2 added pings, messages, views and selections; version 3
-    /// where people are (`Place`). Older builds would drop those silently
-    /// (half a room seeing them), so the host turns away other versions
-    /// instead.
-    pub const PROTOCOL_VERSION: u32 = 3;
+    /// where people are (`Place`); version 4 Smart and Programmable
+    /// Splitters, Priority Mergers and Valves in shared factories. Older
+    /// builds would drop those silently (half a room seeing them), so the
+    /// host turns away other versions instead.
+    pub const PROTOCOL_VERSION: u32 = 4;
 
-    /// Longest message, in characters.
-    pub const MAX_CHAT: usize = 200;
+    /// Longest message, in characters: a few lines, wrapped, in the
+    /// overview's list.
+    pub const MAX_CHAT: usize = 120;
     /// Most nodes in one `Selection`.
     pub const MAX_SELECTION: usize = 500;
     /// The node editor's zoom limits; a `View` outside them is refused.

@@ -12,6 +12,10 @@ use egui::{vec2, RichText, Ui};
 use egui_node_graph2::NodeId;
 use fb_model::GameData;
 
+/// Its ports' names.
+pub const INPUT: &str = "Input";
+pub const OUTPUT: &str = "Output";
+
 /// Fluid buffers hold fluids; the rest hold items.
 const FLUID_STORAGE: &[&str] = &["Build_IndustrialTank", "Build_PipeStorageTank"];
 

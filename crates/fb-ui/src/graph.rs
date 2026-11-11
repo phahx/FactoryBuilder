@@ -119,6 +119,23 @@ pub enum NodeKind {
     Splitter {
         item: String,
     },
+    /// A Smart Splitter (or Programmable: several rules per output): each of
+    /// its Left, Center and Right Outputs takes what its rules let through.
+    SmartSplitter {
+        item: String,
+        #[serde(default)]
+        programmable: bool,
+        rules: Vec<Vec<crate::routers::Rule>>,
+    },
+    /// A Priority Merger: its Left, Center and Right Inputs, by priority.
+    PriorityMerger {
+        item: String,
+        priority: Vec<crate::routers::Priority>,
+    },
+    /// A Valve on a pipe, limiting its flow (its Valve Limit field).
+    Valve {
+        item: String,
+    },
     /// An extractor building on a resource (extractors.rs): Miner, Water
     /// Extractor, Oil Extractor or Resource Well Extractor.
     Extractor {
@@ -151,6 +168,9 @@ impl NodeKind {
             NodeKind::Pole { id } => Template::Pole(id),
             NodeKind::Merger { item } => Template::Merger(item),
             NodeKind::Splitter { item } => Template::Splitter(item),
+            NodeKind::SmartSplitter { item, programmable, .. } => Template::SmartSplitter { item, programmable },
+            NodeKind::PriorityMerger { item, .. } => Template::PriorityMerger(item),
+            NodeKind::Valve { item } => Template::Valve(item),
             NodeKind::Extractor { item, class, purity } => Template::Extractor { item, class, purity },
             NodeKind::Pump { item, class } => Template::Pump { item, class },
             NodeKind::Burner { fuel } => Template::Burner(fuel),
@@ -171,6 +191,8 @@ impl NodeKind {
             NodeKind::Factory { outs, .. } => outs.first().map(|(item, _)| item.as_str()),
             NodeKind::Burner { .. } => Some(fb_model::BIOMASS_BURNER_ICON),
             NodeKind::Pole { .. } | NodeKind::Merger { .. } | NodeKind::Splitter { .. } | NodeKind::Pump { .. } => None,
+            // The building's icon.
+            k @ (NodeKind::SmartSplitter { .. } | NodeKind::PriorityMerger { .. } | NodeKind::Valve { .. }) => Some(crate::routers::icon(game, k)),
             // The building's icon.
             NodeKind::Extractor { class, .. } => crate::extractors::find(game, class).map(|e| e.icon.as_str()),
         }
@@ -207,6 +229,12 @@ pub enum Template {
     Pole(u32),
     Merger(String),
     Splitter(String),
+    SmartSplitter {
+        item: String,
+        programmable: bool,
+    },
+    PriorityMerger(String),
+    Valve(String),
     Extractor {
         item: String,
         class: String,
@@ -242,6 +270,9 @@ pub struct PortStat {
 pub struct NodeStat {
     pub efficiency: f64,
     pub power_mw: f64,
+    /// Held back by what's after it (fb_engine::sim::held_back): what its
+    /// main output ships, of what it could.
+    pub held: Option<(f64, f64)>,
 }
 
 /// Shared state the graph widgets read: game data, assets, live stats.
@@ -267,6 +298,9 @@ pub struct UserState {
     /// settings, not fields to change (planned pieces keep theirs).
     #[serde(skip)]
     pub live_view: bool,
+    /// A router setting's menu, open: (node, port, where) (routers.rs).
+    #[serde(skip)]
+    pub router_menu: Option<(NodeId, usize, egui::Pos2)>,
     /// A live factory's graph is being drawn: per node, what's live about
     /// it (live_factory.rs).
     #[serde(skip)]
@@ -408,6 +442,9 @@ impl Template {
             Template::Pole(id) => NodeKind::Pole { id },
             Template::Merger(item) => NodeKind::Merger { item },
             Template::Splitter(item) => NodeKind::Splitter { item },
+            Template::SmartSplitter { item, programmable } => NodeKind::SmartSplitter { item, programmable, rules: crate::routers::default_rules() },
+            Template::PriorityMerger(item) => NodeKind::PriorityMerger { item, priority: vec![Default::default(); 3] },
+            Template::Valve(item) => NodeKind::Valve { item },
             Template::Extractor { item, class, purity } => NodeKind::Extractor { item, class, purity },
             Template::Pump { item, class } => NodeKind::Pump { item, class },
             Template::Burner(fuel) => NodeKind::Burner { fuel },
@@ -442,7 +479,7 @@ impl NodeTemplateTrait for Template {
             Template::Storage { .. } => "Storage".into(),
             Template::Factory(_) => "Factories".into(),
             Template::Pole(_) | Template::Burner(_) => "Power".into(),
-            Template::Merger(_) | Template::Splitter(_) | Template::Pump { .. } => "Logistics".into(),
+            Template::Merger(_) | Template::Splitter(_) | Template::Pump { .. } | Template::SmartSplitter { .. } | Template::PriorityMerger(_) | Template::Valve(_) => "Logistics".into(),
             Template::Extractor { .. } => "Extractors".into(),
         }]
     }
@@ -462,7 +499,9 @@ impl NodeTemplateTrait for Template {
             Template::Storage { class, .. } => crate::storage::name(&s.game, class),
             Template::Factory(id) => s.factories.get(id).map(|f| f.name.clone()).unwrap_or_else(|| "Factory".into()),
             Template::Pole(_) => "Power pole".into(),
-            Template::Merger(_) | Template::Splitter(_) | Template::Pump { .. } => crate::routers::name(&s.game, &self.kind()).into(),
+            Template::Merger(_) | Template::Splitter(_) | Template::Pump { .. } | Template::SmartSplitter { .. } | Template::PriorityMerger(_) | Template::Valve(_) => {
+                crate::routers::name(&s.game, &self.kind()).into()
+            }
             Template::Extractor { class, .. } => crate::extractors::find(&s.game, class).map(|e| e.name.clone()).unwrap_or_else(|| class.clone()),
             Template::Burner(_) => crate::hub::BURNER_NAME.into(),
         }
@@ -530,10 +569,11 @@ impl NodeTemplateTrait for Template {
                 item_in(graph, i);
             }
             Template::Sink(i) => item_in(graph, i),
+            // Its own words for the sides, so the two ports' readings
+            // don't share a name.
             Template::Storage { item, .. } => {
-                constant(graph, RATE, number(0.0, 0.0, 1e6, unit(item)));
-                item_in(graph, item);
-                item_out(graph, item);
+                graph.add_wide_input_param(node_id, crate::storage::INPUT.into(), ItemType(item.clone()), PortValue::Item(item.clone()), InputParamKind::ConnectionOnly, None, true);
+                graph.add_output_param(node_id, crate::storage::OUTPUT.into(), ItemType(item.clone()));
             }
             Template::Factory(id) => {
                 let f = s.factories.get(id).cloned().unwrap_or_default();
@@ -565,6 +605,28 @@ impl NodeTemplateTrait for Template {
                 let name = game.item_name(i).to_string();
                 graph.add_wide_input_param(node_id, name, ItemType(i.clone()), PortValue::Item(i.clone()), InputParamKind::ConnectionOnly, std::num::NonZeroU32::new(1), true);
                 item_out(graph, i);
+            }
+            // One belt in; the game's Left, Center and Right Outputs.
+            Template::SmartSplitter { item, .. } => {
+                let name = game.item_name(item).to_string();
+                graph.add_wide_input_param(node_id, name, ItemType(item.clone()), PortValue::Item(item.clone()), InputParamKind::ConnectionOnly, std::num::NonZeroU32::new(1), true);
+                for out in crate::routers::OUTPUT_NAMES {
+                    graph.add_output_param(node_id, out.into(), ItemType(item.clone()));
+                }
+            }
+            // The game's Left, Center and Right Inputs; one belt out.
+            Template::PriorityMerger(item) => {
+                for name in crate::routers::INPUT_NAMES {
+                    graph.add_wide_input_param(node_id, name.into(), ItemType(item.clone()), PortValue::Item(item.clone()), InputParamKind::ConnectionOnly, std::num::NonZeroU32::new(1), true);
+                }
+                item_out(graph, item);
+            }
+            // Its limit starts at the fastest pipe's flow: no limit.
+            Template::Valve(item) => {
+                let most = game.extraction.pipes.iter().map(|p| p.per_min).fold(0.0, f64::max);
+                constant(graph, crate::routers::VALVE_LIMIT, number(most, 0.0, most.max(1.0), "m³/min"));
+                item_in(graph, item);
+                item_out(graph, item);
             }
         }
     }
@@ -695,7 +757,11 @@ impl WidgetValueTrait for PortValue {
             }
             PortValue::Item(item) => {
                 let item = item.clone();
+                if matches!(d.kind, NodeKind::PriorityMerger { .. }) && name != crate::routers::INPUT_NAMES[0] {
+                    crate::routers::divider(ui);
+                }
                 port_row(ui, s, node_id, name, &item, true);
+                crate::routers::input_row(ui, s, d, node_id, name);
                 vec![]
             }
             PortValue::Power => {
@@ -842,7 +908,13 @@ impl NodeDataTrait for NodeData {
             if crate::power_net::is_power(&item) {
                 crate::power_net::port_row(ui, s, node_id, name, false);
             } else {
+                // Each side of a Smart Splitter or Priority Merger in its own
+                // section, as a machine's fields are.
+                if matches!(self.kind, NodeKind::SmartSplitter { .. } | NodeKind::PriorityMerger { .. }) {
+                    crate::routers::divider(ui);
+                }
                 port_row(ui, s, node_id, name, &item, false);
+                crate::routers::output_row(ui, s, graph, node_id, name);
             }
         }
         vec![]
@@ -875,6 +947,7 @@ impl NodeDataTrait for NodeData {
                 }
                 NodeKind::Recipe { .. } => {
                     let eff = s.nodes.get(&node_id).map(|n| n.efficiency).unwrap_or(1.0);
+                    held_hint(ui, s, _graph, node_id);
                     let color = supply_color(eff, 1.0);
                     ui.label(
                         RichText::new(format!("{:.0}%", eff * 100.0))
@@ -892,8 +965,10 @@ impl NodeDataTrait for NodeData {
                 NodeKind::Sink { .. } => Some("Sink"),
                 NodeKind::Storage { .. } => Some("Storage"),
                 NodeKind::Pole { .. } | NodeKind::Merger { .. } | NodeKind::Splitter { .. } | NodeKind::Pump { .. } => None,
+                NodeKind::SmartSplitter { .. } | NodeKind::PriorityMerger { .. } | NodeKind::Valve { .. } => Some("Logistics"),
                 NodeKind::Extractor { .. } => {
                     let eff = s.nodes.get(&node_id).map(|n| n.efficiency).unwrap_or(1.0);
+                    held_hint(ui, s, _graph, node_id);
                     ui.label(RichText::new(format!("{:.0}%", eff * 100.0)).small().color(TEXT_DIM))
                         .on_hover_text("How much of what it can extract is taken; the rest backs up, as in game.");
                     None
@@ -1063,6 +1138,7 @@ impl NodeDataTrait for NodeData {
                 });
             }
             NodeKind::Storage { item, class } => crate::storage::footer(ui, s, node_id, item, class),
+            k @ (NodeKind::SmartSplitter { .. } | NodeKind::PriorityMerger { .. } | NodeKind::Valve { .. }) => crate::routers::footer(ui, s, node_id, k),
             NodeKind::Sink { item } => {
                 let got = graph[node_id]
                     .inputs
@@ -1084,6 +1160,34 @@ impl NodeDataTrait for NodeData {
         }
         vec![]
     }
+}
+
+/// A small accent "i" in the title bar of a node that's held back by what's
+/// after it, with what's going on and what would fix it.
+fn held_hint(ui: &mut Ui, s: &mut UserState, graph: &FactoryGraph, node_id: NodeId) {
+    let Some((taken, could)) = s.nodes.get(&node_id).and_then(|n| n.held) else { return };
+    let size = ui.text_style_height(&egui::TextStyle::Small) + 2.0;
+    let (rect, r) = ui.allocate_exact_size(vec2(size, size), egui::Sense::hover());
+    let p = ui.painter();
+    p.circle_filled(rect.center(), size / 2.0, ACCENT);
+    p.text(rect.center(), egui::Align2::CENTER_CENTER, "i", egui::FontId::proportional(size * 0.8), TEXT_DARK);
+    let item = graph[node_id].outputs.first().map(|(_, o)| graph[*o].typ.0.clone()).unwrap_or_default();
+    let form = s.game.item_form(&item);
+    let extractor = matches!(graph[node_id].user_data.kind, NodeKind::Extractor { .. });
+    let clock = input_number(graph, node_id, CLOCK) * if could > 0.0 { taken / could } else { 0.0 };
+    let what = if extractor { "extracts" } else { "makes" };
+    let tip = format!(
+        "It {what} {} of the {} it could, as what's after it takes no more and its belt backs up.
+
+To use the rest, add machines after it (or raise their clock speed). Or, to match, set this one to {}% clock speed.",
+        crate::fmt::fmt_rate(taken),
+        fmt_rate_unit(could, form),
+        fmt_num((clock * 100.0).round() / 100.0),
+    );
+    r.on_hover_ui(|ui| {
+        crate::widgets::tooltip_title(ui, "Backed up");
+        ui.label(RichText::new(tip).color(TEXT));
+    });
 }
 
 /// What to build, when a node's Machines isn't a whole number (older
@@ -1205,11 +1309,8 @@ pub fn node_rates(
             item_inputs.map(|(name, _)| (name.clone(), 0.0)).collect(),
             vec![],
         ),
-        // Takes whatever arrives; supplies up to its rate.
-        NodeKind::Storage { .. } => {
-            let rate = input_number(graph, node, RATE);
-            (item_inputs.map(|(name, _)| (name.clone(), 0.0)).collect(), n.outputs.iter().map(|(name, _)| (name.clone(), rate)).collect())
-        }
+        // Passes on what arrives (fb_engine::sim's stores): no rates.
+        NodeKind::Storage { .. } => (item_inputs.map(|(name, _)| (name.clone(), 0.0)).collect(), n.outputs.iter().map(|(name, _)| (name.clone(), 0.0)).collect()),
         NodeKind::Factory { ins, outs, .. } => {
             let rate = |list: &[(String, f64)], item: &str| list.iter().filter(|(i, _)| i == item).map(|(_, r)| *r).sum::<f64>();
             // Power ports come after the item ports and aren't items.
@@ -1218,8 +1319,14 @@ pub fn node_rates(
                 n.outputs.iter().filter(|(_, id)| !crate::power_net::is_power(&graph[*id].typ.0)).map(|(name, id)| (name.clone(), rate(outs, &graph[*id].typ.0))).collect(),
             )
         }
-        // Not in the simulation: their wires are joined up (routers.rs).
-        NodeKind::Pole { .. } | NodeKind::Merger { .. } | NodeKind::Splitter { .. } | NodeKind::Pump { .. } => (vec![], vec![]),
+        // Routers pass on what they get (routers.rs); poles carry power.
+        NodeKind::Pole { .. }
+        | NodeKind::Merger { .. }
+        | NodeKind::Splitter { .. }
+        | NodeKind::Pump { .. }
+        | NodeKind::SmartSplitter { .. }
+        | NodeKind::PriorityMerger { .. }
+        | NodeKind::Valve { .. } => (vec![], vec![]),
         // What it takes from the deposit is what it puts out.
         // Its fuel at full output.
         NodeKind::Burner { fuel } => (item_inputs.map(|(name, _)| (name.clone(), crate::hub::fuel_per_min(game, fuel))).collect(), vec![]),

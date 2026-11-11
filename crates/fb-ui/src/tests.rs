@@ -570,7 +570,8 @@ fn a_wire_let_go_on_the_canvas_offers_what_fits_and_connects_it() {
         let ok = match &catalog.entries[i].template {
             crate::graph::Template::Recipe(r) => game.recipes[r].ingredients.iter().any(|a| a.item == "Desc_IronIngot_C"),
             crate::graph::Template::Output(x) | crate::graph::Template::Sink(x) => x == "Desc_IronIngot_C",
-            crate::graph::Template::Merger(x) | crate::graph::Template::Splitter(x) => x == "Desc_IronIngot_C",
+            crate::graph::Template::Merger(x) | crate::graph::Template::Splitter(x) | crate::graph::Template::PriorityMerger(x) => x == "Desc_IronIngot_C",
+            crate::graph::Template::SmartSplitter { item, .. } => item == "Desc_IronIngot_C",
             crate::graph::Template::Storage { item, .. } => item == "Desc_IronIngot_C",
             _ => false,
         };
@@ -1995,7 +1996,7 @@ fn zooming_keeps_graph_coordinates_stable() {
 /// Smelter(s) making Iron Ingots from ore, delivered as an output.
 fn ingot_factory(name: &str, smelters: f64) -> crate::portable::FactoryFile {
     use crate::portable::{FactoryFile, Kind, Node, Wire};
-    let node = |kind, class: &str, machines: Option<f64>, rate: Option<f64>, x: f32| Node { kind, class: class.into(), machines, clock: machines.map(|_| 100.0), sloops: None, rate, name: None, color: None, item: None, purity: None, x, y: 0.0, planned: false };
+    let node = |kind, class: &str, machines: Option<f64>, rate: Option<f64>, x: f32| Node { kind, class: class.into(), machines, clock: machines.map(|_| 100.0), sloops: None, rate, name: None, color: None, item: None, purity: None, x, y: 0.0, planned: false, router: None };
     let mut f = FactoryFile::new(Some(name.into()));
     f.nodes.push(node(Kind::Resource, "Desc_OreIron_C", None, Some(30.0 * smelters), 0.0));
     f.nodes.push(node(Kind::Recipe, "Recipe_IngotIron_C", Some(smelters), None, 400.0));
@@ -2008,7 +2009,7 @@ fn ingot_factory(name: &str, smelters: f64) -> crate::portable::FactoryFile {
 /// Constructors turning 60 Iron Ingots from elsewhere into 60 Iron Rods.
 fn rod_factory(name: &str) -> crate::portable::FactoryFile {
     use crate::portable::{FactoryFile, Kind, Node, Wire};
-    let node = |kind, class: &str, machines: Option<f64>, rate: Option<f64>, x: f32| Node { kind, class: class.into(), machines, clock: machines.map(|_| 100.0), sloops: None, rate, name: None, color: None, item: None, purity: None, x, y: 0.0, planned: false };
+    let node = |kind, class: &str, machines: Option<f64>, rate: Option<f64>, x: f32| Node { kind, class: class.into(), machines, clock: machines.map(|_| 100.0), sloops: None, rate, name: None, color: None, item: None, purity: None, x, y: 0.0, planned: false, router: None };
     let mut f = FactoryFile::new(Some(name.into()));
     f.nodes.push(node(Kind::Input, "Desc_IronIngot_C", None, Some(60.0), 0.0));
     f.nodes.push(node(Kind::Recipe, "Recipe_IronRod_C", Some(4.0), None, 400.0));
@@ -2141,9 +2142,9 @@ fn power_plant(app: &FactoryApp, name: &str, machines: f64) -> crate::portable::
     let gen = fb_model::DEFAULT_GENERATOR;
     let r = &app.user.game.recipes[gen];
     let mut f = FactoryFile::new(Some(name.into()));
-    f.nodes.push(Node { kind: Kind::Recipe, class: gen.into(), machines: Some(machines), clock: Some(100.0), sloops: None, rate: None, name: None, color: None, item: None, purity: None, x: 400.0, y: 0.0, planned: false });
+    f.nodes.push(Node { kind: Kind::Recipe, class: gen.into(), machines: Some(machines), clock: Some(100.0), sloops: None, rate: None, name: None, color: None, item: None, purity: None, x: 400.0, y: 0.0, planned: false, router: None });
     for (k, a) in r.ingredients.iter().enumerate() {
-        f.nodes.push(Node { kind: Kind::Input, class: a.item.clone(), machines: None, clock: None, sloops: None, rate: Some(r.per_min(a) * machines), name: None, color: None, item: None, purity: None, x: 0.0, y: 200.0 * k as f32, planned: false });
+        f.nodes.push(Node { kind: Kind::Input, class: a.item.clone(), machines: None, clock: None, sloops: None, rate: Some(r.per_min(a) * machines), name: None, color: None, item: None, purity: None, x: 0.0, y: 200.0 * k as f32, planned: false, router: None });
         f.wires.push(Wire { from: k + 1, output: 0, to: 0, input: k, slot: 0, belt: None });
     }
     f
@@ -2930,7 +2931,7 @@ fn moving_a_selection_to_a_new_factory_keeps_the_totals() {
     use crate::portable::{FactoryFile, Kind, Node, Wire};
     let Some((ctx, mut app, _)) = harness() else { return };
     frames(&ctx, &mut app, 2);
-    let node = |kind, class: &str, machines: Option<f64>, rate: Option<f64>, x: f32| Node { kind, class: class.into(), machines, clock: machines.map(|_| 100.0), sloops: None, rate, name: None, color: None, item: None, purity: None, x, y: 0.0, planned: false };
+    let node = |kind, class: &str, machines: Option<f64>, rate: Option<f64>, x: f32| Node { kind, class: class.into(), machines, clock: machines.map(|_| 100.0), sloops: None, rate, name: None, color: None, item: None, purity: None, x, y: 0.0, planned: false, router: None };
     let mut f = FactoryFile::new(Some("Rods".into()));
     f.nodes = vec![
         node(Kind::Resource, "Desc_OreIron_C", None, Some(30.0), 0.0),
@@ -3134,7 +3135,7 @@ fn right_click_on_the_master_graph_adds_a_factory_there() {
 
     // From a file: the block goes to the menu's spot too, once the file is read.
     let mut f = crate::portable::FactoryFile::new(Some("Smelting".into()));
-    f.nodes.push(crate::portable::Node { kind: crate::portable::Kind::Resource, class: "Desc_OreIron_C".into(), machines: None, clock: None, sloops: None, rate: Some(60.0), name: None, color: None, item: None, purity: None, x: 0.0, y: 0.0, planned: false });
+    f.nodes.push(crate::portable::Node { kind: crate::portable::Kind::Resource, class: "Desc_OreIron_C".into(), machines: None, clock: None, sloops: None, rate: Some(60.0), name: None, color: None, item: None, purity: None, x: 0.0, y: 0.0, planned: false, router: None });
     store.borrow_mut().insert("C:/Factories/Smelting.fbfactory".into(), f.to_json(false));
     let spot2 = egui::pos2(only.right() + 150.0, only.bottom() + 200.0);
     assert!(!app.node_rects.values().any(|r| r.contains(spot2)));
@@ -3829,4 +3830,232 @@ fn an_update_is_offered_and_installed_only_when_asked() {
     frames(&ctx, &mut app, 2);
     assert_eq!(calls.borrow().iter().filter(|(c, _)| c == "update_check").count(), 1, "checked once");
     assert!(calls.borrow().iter().any(|(c, _)| c == "update_apply"), "installed when asked");
+}
+
+#[test]
+fn routers_keep_belts_apart() {
+    use crate::graph::{Template, MACHINES, RATE};
+    let Some((ctx, mut app, _)) = harness() else { return };
+    frames(&ctx, &mut app, 2);
+    let (ore, recipe) = ("Desc_OreIron_C", "Recipe_IngotIron_C");
+    let per = { let r = &app.user.game.recipes[recipe]; r.per_min(&r.ingredients[0]) };
+    // A -> splitter -> X (two smelters) and -> merger; C -> merger -> Y (one smelter).
+    // X can only ever get A's ore.
+    let a = app.add_test_node(Template::Resource(ore.into()), egui::pos2(0.0, 0.0));
+    let c = app.add_test_node(Template::Resource(ore.into()), egui::pos2(0.0, 400.0));
+    let split = app.add_test_node(Template::Splitter(ore.into()), egui::pos2(300.0, 0.0));
+    let merge = app.add_test_node(Template::Merger(ore.into()), egui::pos2(300.0, 400.0));
+    let x = app.add_test_node(Template::Recipe(recipe.into()), egui::pos2(600.0, -200.0));
+    let y = app.add_test_node(Template::Recipe(recipe.into()), egui::pos2(600.0, 400.0));
+    let set = |app: &mut FactoryApp, n: egui_node_graph2::NodeId, name: &str, v: f64| {
+        let i = app.state.graph[n].get_input(name).unwrap();
+        app.state.graph[i].value.set_number(v);
+    };
+    set(&mut app, a, RATE, per);
+    set(&mut app, c, RATE, per);
+    set(&mut app, x, MACHINES, 2.0);
+    set(&mut app, y, MACHINES, 1.0);
+    connect(&mut app, a, split, ore);
+    connect(&mut app, split, x, ore);
+    connect(&mut app, split, merge, ore);
+    connect(&mut app, c, merge, ore);
+    connect(&mut app, merge, y, ore);
+    frames(&ctx, &mut app, 2);
+    // As in game: the merger takes equally from its two inputs (15 each),
+    // so the splitter's belt to it backs up and X gets the other 15.
+    let eff = |n| app.user.nodes[&n].efficiency;
+    assert!((eff(x) - 0.25).abs() < 1e-4, "X: {:.4}", eff(x));
+    assert!((eff(y) - 1.0).abs() < 1e-4, "Y: {:.4}", eff(y));
+}
+
+/// Wires output `out` of `from` to input `inp` of `to` (by index among
+/// their item ports).
+fn connect_ports(app: &mut FactoryApp, from: egui_node_graph2::NodeId, out: usize, to: egui_node_graph2::NodeId, inp: usize) -> (egui_node_graph2::InputId, egui_node_graph2::OutputId) {
+    let g = &app.state.graph;
+    let o = g[from].outputs[out].1;
+    let items: Vec<egui_node_graph2::InputId> = g[to].inputs.iter().map(|(_, i)| *i).filter(|i| matches!(g[*i].value, crate::graph::PortValue::Item(_))).collect();
+    let i = items[inp];
+    let pos = g.connections(i).len();
+    app.state.graph.add_connection(o, i, pos);
+    app.changed();
+    (i, o)
+}
+
+#[test]
+fn smart_splitters_priority_mergers_and_valves_work_like_the_game() {
+    use crate::graph::{NodeKind, Template, MACHINES, RATE};
+    use crate::routers::{Priority, Rule};
+    let Some((ctx, mut app, _)) = harness() else { return };
+    frames(&ctx, &mut app, 2);
+    let (ore, recipe) = ("Desc_OreIron_C", "Recipe_IngotIron_C");
+    let per = { let r = &app.user.game.recipes[recipe]; r.per_min(&r.ingredients[0]) };
+    let set = |app: &mut FactoryApp, n: egui_node_graph2::NodeId, name: &str, v: f64| {
+        let i = app.state.graph[n].get_input(name).unwrap();
+        app.state.graph[i].value.set_number(v);
+    };
+    let flow = |app: &FactoryApp, w: (egui_node_graph2::InputId, egui_node_graph2::OutputId)| app.wire_flow.get(&w).copied().unwrap_or(-1.0);
+
+    // Ore (1.5 smelters' worth) -> Smart Splitter: Left to a smelter, Right
+    // to a sink. Passing everything, it shares equally, as in game.
+    let src = app.add_test_node(Template::Resource(ore.into()), egui::pos2(0.0, 0.0));
+    let smart = app.add_test_node(Template::SmartSplitter { item: ore.into(), programmable: false }, egui::pos2(300.0, 0.0));
+    let smelter = app.add_test_node(Template::Recipe(recipe.into()), egui::pos2(650.0, -200.0));
+    let sink = app.add_test_node(Template::Sink(ore.into()), egui::pos2(650.0, 200.0));
+    set(&mut app, src, RATE, 1.5 * per);
+    set(&mut app, smelter, MACHINES, 1.0);
+    connect(&mut app, src, smart, ore);
+    let left = connect_ports(&mut app, smart, 0, smelter, 0);
+    let right = connect_ports(&mut app, smart, 2, sink, 0);
+    frames(&ctx, &mut app, 2);
+    assert!((flow(&app, left) - 0.75 * per).abs() < 1e-3 && (flow(&app, right) - 0.75 * per).abs() < 1e-3, "{} {}", flow(&app, left), flow(&app, right));
+
+    // Right Output set to Overflow from its menu: the smelter gets all it
+    // takes, the sink the rest.
+    frames(&ctx, &mut app, 2);
+    press(&ctx, &mut app, "Right Output setting");
+    frames(&ctx, &mut app, 2);
+    press(&ctx, &mut app, "    Overflow");
+    frames(&ctx, &mut app, 3);
+    assert!(matches!(&app.state.graph[smart].user_data.kind, NodeKind::SmartSplitter { rules, .. } if rules[2] == vec![Rule::Overflow]));
+    assert!((flow(&app, left) - per).abs() < 1e-3 && (flow(&app, right) - 0.5 * per).abs() < 1e-3, "{} {}", flow(&app, left), flow(&app, right));
+    assert!((app.user.nodes[&smelter].efficiency - 1.0).abs() < 1e-4);
+    // None on the Left: nothing passes there; the overflow gets it all.
+    if let NodeKind::SmartSplitter { rules, .. } = &mut app.state.graph[smart].user_data.kind {
+        rules[0] = vec![Rule::None];
+    }
+    app.changed();
+    frames(&ctx, &mut app, 2);
+    assert!(flow(&app, left).abs() < 1e-6 && (flow(&app, right) - 1.5 * per).abs() < 1e-3, "{} {}", flow(&app, left), flow(&app, right));
+
+    // A Priority Merger: two sources of one smelter's worth into a smelter
+    // pair that takes 1.5 of them; High is merged before Low.
+    let a = app.add_test_node(Template::Resource(ore.into()), egui::pos2(0.0, 800.0));
+    let b = app.add_test_node(Template::Resource(ore.into()), egui::pos2(0.0, 1000.0));
+    let pm = app.add_test_node(Template::PriorityMerger(ore.into()), egui::pos2(300.0, 900.0));
+    let pair = app.add_test_node(Template::Recipe(recipe.into()), egui::pos2(650.0, 900.0));
+    set(&mut app, a, RATE, per);
+    set(&mut app, b, RATE, per);
+    set(&mut app, pair, MACHINES, 1.0);
+    set(&mut app, pair, crate::graph::CLOCK, 150.0);
+    let low = connect_ports(&mut app, a, 0, pm, 0);
+    let high = connect_ports(&mut app, b, 0, pm, 2);
+    connect(&mut app, pm, pair, ore);
+    frames(&ctx, &mut app, 2);
+    // Equal (all Low): half and half.
+    assert!((flow(&app, low) - 0.75 * per).abs() < 1e-3 && (flow(&app, high) - 0.75 * per).abs() < 1e-3, "{} {}", flow(&app, low), flow(&app, high));
+    app.frame_all = true;
+    frames(&ctx, &mut app, 3);
+    press(&ctx, &mut app, "Right Input setting");
+    frames(&ctx, &mut app, 2);
+    press(&ctx, &mut app, "    High");
+    frames(&ctx, &mut app, 3);
+    assert!(matches!(&app.state.graph[pm].user_data.kind, NodeKind::PriorityMerger { priority, .. } if priority[2] == Priority::High));
+    assert!((flow(&app, high) - per).abs() < 1e-3 && (flow(&app, low) - 0.5 * per).abs() < 1e-3, "{} {}", flow(&app, low), flow(&app, high));
+
+    // A Valve holds a pipe to its limit.
+    let water = "Desc_Water_C";
+    let w = app.add_test_node(Template::Resource(water.into()), egui::pos2(0.0, 1600.0));
+    let valve = app.add_test_node(Template::Valve(water.into()), egui::pos2(300.0, 1600.0));
+    let out = app.add_test_node(Template::Sink(water.into()), egui::pos2(650.0, 1600.0));
+    set(&mut app, w, RATE, 120.0);
+    set(&mut app, valve, crate::routers::VALVE_LIMIT, 50.0);
+    connect(&mut app, w, valve, water);
+    let piped = connect(&mut app, valve, out, water);
+    frames(&ctx, &mut app, 2);
+    assert!((flow(&app, piped) - 50.0).abs() < 1e-3, "{}", flow(&app, piped));
+
+    // All of it survives the file format.
+    let f = app.to_portable();
+    let back = crate::portable::FactoryFile::parse(&f.to_json(false)).unwrap();
+    assert_eq!(back, f);
+    let kinds: Vec<_> = back.nodes.iter().map(|n| n.kind).collect();
+    for k in [crate::portable::Kind::SmartSplitter, crate::portable::Kind::PriorityMerger, crate::portable::Kind::Valve] {
+        assert!(kinds.contains(&k), "{k:?}");
+    }
+    let before: Vec<NodeKind> = [smart, pm, valve].iter().map(|n| app.state.graph[*n].user_data.kind.clone()).collect();
+    let (ids, skipped) = app.insert_portable(&back, egui::vec2(0.0, 3000.0));
+    assert_eq!(skipped, 0);
+    for k in before {
+        assert!(ids.iter().any(|n| app.state.graph[*n].user_data.kind == k), "{k:?} back from the file");
+    }
+    let v = ids.iter().find(|n| matches!(app.state.graph[**n].user_data.kind, NodeKind::Valve { .. })).unwrap();
+    assert_eq!(crate::graph::input_number(&app.state.graph, *v, crate::routers::VALVE_LIMIT), 50.0);
+}
+
+#[test]
+fn plans_send_leftovers_through_a_smart_splitters_overflow() {
+    use crate::graph::NodeKind;
+    use crate::routers::Rule;
+    let Some((ctx, mut app, _)) = harness() else { return };
+    frames(&ctx, &mut app, 2);
+    // Plastic is both a product and used inside (Recycled Rubber): its belt
+    // feeds machines and the Output, so the Output takes the overflow.
+    plan_hmf(&ctx, &mut app);
+    let g = &app.state.graph;
+    let smart: Vec<_> = g.iter_nodes().filter(|n| matches!(&g[*n].user_data.kind, NodeKind::SmartSplitter { rules, .. } if rules.iter().any(|r| r.contains(&Rule::Overflow)))).collect();
+    assert!(!smart.is_empty(), "a Smart Splitter with an Overflow output");
+    assert!((app.min_efficiency() - 1.0).abs() < 1e-4, "every machine at 100%: {}", app.min_efficiency());
+}
+
+#[test]
+fn longer_messages_show_longer() {
+    use crate::room_extras::bubble_secs;
+    assert_eq!(bubble_secs("ok"), 4.0);
+    assert!(bubble_secs(&"x".repeat(60)) > bubble_secs(&"x".repeat(30)));
+    assert_eq!(bubble_secs(&"x".repeat(fb_model::room::MAX_CHAT)), 13.0);
+}
+
+#[test]
+fn a_motor_plan_delivers() {
+    let Some((ctx, mut app, _)) = harness() else { return };
+    frames(&ctx, &mut app, 2);
+    app.planner_mut().targets = vec![Target { item: "Desc_Motor_C".into(), rate: 5.0 }];
+    app.planner_mut().enabled = app.user.game.recipes.values().filter(|r| !r.alternate).map(|r| r.class.clone()).collect();
+    app.press_plan();
+    frames(&ctx, &mut app, 3);
+    let outs = app.outputs();
+    assert!(outs.iter().any(|o| o.0 == "Desc_Motor_C" && (o.1 - 5.0).abs() < 1e-3), "{outs:?}");
+}
+
+#[test]
+fn storage_passes_on_what_arrives_and_reads_both_sides() {
+    use crate::graph::Template;
+    let Some((ctx, mut app, _)) = harness() else { return };
+    frames(&ctx, &mut app, 2);
+    let ore = "Desc_OreIron_C";
+    let res = app.add_test_node(Template::Resource(ore.into()), egui::pos2(0.0, 0.0));
+    let miner = app.add_test_node(Template::Extractor { item: ore.into(), class: "Build_MinerMk1_C".into(), purity: fb_model::Purity::Normal }, egui::pos2(300.0, 0.0));
+    let st = app.add_test_node(Template::Storage { item: ore.into(), class: "Build_StorageContainerMk1_C".into() }, egui::pos2(600.0, 0.0));
+    let sm = app.add_test_node(Template::Recipe("Recipe_IngotIron_C".into()), egui::pos2(900.0, 0.0));
+    connect(&mut app, res, miner, ore);
+    connect(&mut app, miner, st, ore);
+    connect(&mut app, st, sm, ore);
+    frames(&ctx, &mut app, 2);
+    assert!(app.state.graph[st].get_input(crate::graph::RATE).is_err(), "no Rate field");
+    let port = |name: &str| app.user.ports[&(st, name.to_string())];
+    // The miner's 60 go in; the smelter takes its 30; the rest fills it.
+    assert!((port(crate::storage::INPUT).have - 60.0).abs() < 1e-3);
+    assert!((port(crate::storage::OUTPUT).have - 30.0).abs() < 1e-3);
+    assert!((app.user.nodes[&sm].efficiency - 1.0).abs() < 1e-4);
+    assert!(app.summary.outputs.iter().any(|o| o.0 == ore && (o.1 - 30.0).abs() < 1e-3), "{:?}", app.summary.outputs);
+}
+
+#[test]
+fn a_backed_up_miner_gets_a_hint() {
+    use crate::graph::Template;
+    let Some((ctx, mut app, _)) = harness() else { return };
+    frames(&ctx, &mut app, 2);
+    let ore = "Desc_OreIron_C";
+    let res = app.add_test_node(Template::Resource(ore.into()), egui::pos2(0.0, 0.0));
+    let miner = app.add_test_node(Template::Extractor { item: ore.into(), class: "Build_MinerMk1_C".into(), purity: fb_model::Purity::Normal }, egui::pos2(300.0, 0.0));
+    let sm = app.add_test_node(Template::Recipe("Recipe_IngotIron_C".into()), egui::pos2(600.0, 0.0));
+    let out = app.add_test_node(Template::Output("Desc_IronIngot_C".into()), egui::pos2(900.0, 0.0));
+    connect(&mut app, res, miner, ore);
+    connect(&mut app, miner, sm, ore);
+    connect(&mut app, sm, out, "Desc_IronIngot_C");
+    frames(&ctx, &mut app, 2);
+    // The miner could do 60; the smelter takes 30.
+    let held = app.user.nodes[&miner].held.expect("the miner is held back");
+    assert!((held.0 - 30.0).abs() < 1e-3 && (held.1 - 60.0).abs() < 1e-3, "{held:?}");
+    assert!(app.user.nodes[&sm].held.is_none(), "the smelter runs flat out");
 }

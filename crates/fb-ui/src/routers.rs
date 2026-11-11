@@ -1,19 +1,166 @@
-//! Mergers, splitters and pipeline junctions: small nodes, drawn with the
-//! game's own icons, that gather or share out the wires of one item, the
-//! way they do belts and pipes in game.
+//! Mergers, splitters, pipeline junctions, pumps and valves: nodes that
+//! gather, share out or limit the wires of one item, the way their buildings
+//! do belts and pipes in game. Plain ones are small knots drawn with the
+//! game's icons; Smart and Programmable Splitters, Priority Mergers and
+//! Valves are nodes with their settings, worded as the game's own UI does.
 //!
-//! They only shape the wiring. In the simulation every port wired together
-//! is already one shared belt (see fb_engine::sim), so wiring through them
-//! is the same as wiring their suppliers straight to their consumers:
-//! [`route`] works out those direct links, and which of them each wire
-//! through a router carries, so its flow (and belt label) is right.
+//! In the simulation (fb_engine::sim) each is a router: what comes in goes
+//! out, over the actual wires, shared as [`share`] says.
 
 use crate::fmt::fmt_rate_unit;
 use crate::graph::*;
 use crate::theme::*;
 use egui::{vec2, RichText, Ui, Vec2};
 use egui_node_graph2::{InputId, NodeId, OutputId};
-use std::collections::{BTreeSet, HashMap, HashSet};
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+
+/// A Smart or Programmable Splitter output's filter, as in game.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Rule {
+    None,
+    Any,
+    AnyUndefined,
+    Overflow,
+    Item(String),
+}
+
+/// A Priority Merger input's priority, as in game.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Priority {
+    High,
+    Medium,
+    #[default]
+    Low,
+}
+
+impl Priority {
+    pub const ALL: [Priority; 3] = [Priority::High, Priority::Medium, Priority::Low];
+    pub fn label(self) -> &'static str {
+        match self {
+            Priority::High => "High",
+            Priority::Medium => "Medium",
+            Priority::Low => "Low",
+        }
+    }
+    fn rank(self) -> u8 {
+        self as u8
+    }
+}
+
+/// The game's names for the three sides (Buildables_UI string table).
+pub const OUTPUT_NAMES: [&str; 3] = ["Left Output", "Center Output", "Right Output"];
+pub const INPUT_NAMES: [&str; 3] = ["Left Input", "Center Input", "Right Input"];
+/// The Valve's setting, as the game names it.
+pub const VALVE_LIMIT: &str = "Valve Limit";
+
+/// The game's descriptions of the rules (Buildables_UI string table).
+fn rule_tip(r: &Rule) -> &'static str {
+    match r {
+        Rule::None => "No parts will pass through this output.",
+        Rule::Any => "Any part, regardless of other output settings.",
+        Rule::AnyUndefined => "Any part that is NOT selected in another output.",
+        Rule::Overflow => "Any part or amount the other outputs cannot handle.",
+        Rule::Item(_) => "Only this part passes through this output.",
+    }
+}
+
+pub fn rule_label(game: &fb_model::GameData, r: &Rule) -> String {
+    match r {
+        Rule::None => "None".into(),
+        Rule::Any => "Any".into(),
+        Rule::AnyUndefined => "Any Undefined".into(),
+        Rule::Overflow => "Overflow".into(),
+        Rule::Item(i) => game.item_name(i).into(),
+    }
+}
+
+/// A file's word for a rule, and back ("any_undefined", or an item class).
+pub fn rule_word(r: &Rule) -> String {
+    match r {
+        Rule::None => "none".into(),
+        Rule::Any => "any".into(),
+        Rule::AnyUndefined => "any_undefined".into(),
+        Rule::Overflow => "overflow".into(),
+        Rule::Item(i) => i.clone(),
+    }
+}
+
+pub fn rule_from_word(game: &fb_model::GameData, w: &str) -> Option<Rule> {
+    Some(match w {
+        "none" => Rule::None,
+        "any" => Rule::Any,
+        "any_undefined" => Rule::AnyUndefined,
+        "overflow" => Rule::Overflow,
+        i if game.items.contains_key(i) => Rule::Item(i.into()),
+        _ => return None,
+    })
+}
+
+/// A file's settings onto a Smart or Programmable Splitter or a Priority
+/// Merger; unknown words are dropped, and at most three sides are read.
+pub fn apply_settings(game: &fb_model::GameData, kind: &mut NodeKind, r: &crate::portable::RouterSettings) {
+    match kind {
+        NodeKind::SmartSplitter { programmable, rules, .. } => {
+            let most = if *programmable { 32 } else { 1 };
+            let mut read: Vec<Vec<Rule>> = r.rules.iter().take(3).map(|ws| ws.iter().filter_map(|w| rule_from_word(game, w)).take(most).collect()).collect();
+            read.resize(3, vec![Rule::None]);
+            *rules = read;
+        }
+        NodeKind::PriorityMerger { priority, .. } => {
+            let mut read: Vec<Priority> = r.priorities.iter().take(3).map(|w| Priority::ALL.into_iter().find(|p| p.label().eq_ignore_ascii_case(w)).unwrap_or_default()).collect();
+            read.resize(3, Priority::default());
+            *priority = read;
+        }
+        _ => {}
+    }
+}
+
+/// A new Smart or Programmable Splitter passes everything, like a plain one.
+pub fn default_rules() -> Vec<Vec<Rule>> {
+    vec![vec![Rule::Any]; 3]
+}
+
+/// Which outputs `item` goes to, as in game: those with a rule it matches
+/// first (Any; its own filter; Any Undefined when no other output filters
+/// it), then Overflow outputs with what they can't take. With neither, the
+/// output takes nothing (None) — and with no output at all, the splitter
+/// jams.
+pub fn out_ranks(rules: &[Vec<Rule>], item: &str) -> Vec<Option<u8>> {
+    let filters = |k: usize| rules.iter().enumerate().any(|(j, rs)| j != k && rs.iter().any(|r| matches!(r, Rule::Item(i) if i == item)));
+    (0..3)
+        .map(|k| {
+            let rs = rules.get(k).map(Vec::as_slice).unwrap_or(&[]);
+            let matches = rs.iter().any(|r| match r {
+                Rule::Any => true,
+                Rule::Item(i) => i == item,
+                Rule::AnyUndefined => !filters(k),
+                Rule::None | Rule::Overflow => false,
+            });
+            if matches {
+                Some(0)
+            } else if rs.contains(&Rule::Overflow) {
+                Some(1)
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+/// How a router node shares what goes through it (None: not a router).
+pub fn share(g: &FactoryGraph, node: NodeId) -> Option<(usize, usize, fb_engine::sim::Share)> {
+    use fb_engine::sim::Share;
+    Some(match &g[node].user_data.kind {
+        NodeKind::Merger { .. } | NodeKind::Splitter { .. } | NodeKind::Pump { .. } => (1, 1, Share::default()),
+        NodeKind::SmartSplitter { item, rules, .. } => (1, 3, Share { out_rank: out_ranks(rules, item), ..Default::default() }),
+        NodeKind::PriorityMerger { priority, .. } => (3, 1, Share { in_rank: priority.iter().map(|p| p.rank()).collect(), ..Default::default() }),
+        NodeKind::Valve { .. } => (1, 1, Share { limit: Some(input_number(g, node, VALVE_LIMIT)), ..Default::default() }),
+        _ => return None,
+    })
+}
 
 /// A router node's size (unzoomed).
 pub const SIZE: Vec2 = vec2(36.0, 36.0);
@@ -33,8 +180,9 @@ pub fn accepts(game: &fb_model::GameData, kind: &NodeKind, g: &FactoryGraph, nod
         P::Output(o) => g.output_connections(o).len(),
     };
     match kind {
-        // A pump sits in one pipe.
-        NodeKind::Pump { .. } => on(port) < 1,
+        // A pump or valve sits in one pipe; each side of a Smart Splitter or
+        // Priority Merger takes one belt.
+        NodeKind::Pump { .. } | NodeKind::Valve { .. } | NodeKind::SmartSplitter { .. } | NodeKind::PriorityMerger { .. } => on(port) < 1,
         NodeKind::Merger { item } | NodeKind::Splitter { item } if fluid(game, item) => crate::power_net::wire_count(g, node) < JUNCTION_PIPES,
         NodeKind::Merger { .. } => on(port) < if matches!(port, P::Input(_)) { MERGER_INPUTS } else { 1 },
         NodeKind::Splitter { .. } => on(port) < if matches!(port, P::Input(_)) { 1 } else { SPLITTER_OUTPUTS },
@@ -43,7 +191,10 @@ pub fn accepts(game: &fb_model::GameData, kind: &NodeKind, g: &FactoryGraph, nod
 }
 
 pub fn is_router(kind: &NodeKind) -> bool {
-    matches!(kind, NodeKind::Merger { .. } | NodeKind::Splitter { .. } | NodeKind::Pump { .. })
+    matches!(
+        kind,
+        NodeKind::Merger { .. } | NodeKind::Splitter { .. } | NodeKind::Pump { .. } | NodeKind::SmartSplitter { .. } | NodeKind::PriorityMerger { .. } | NodeKind::Valve { .. }
+    )
 }
 
 /// Pipeline Pumps, from the game's Docs: class, name, and the Head Lift its
@@ -60,6 +211,10 @@ pub fn name(game: &fb_model::GameData, kind: &NodeKind) -> &'static str {
         NodeKind::Pump { class, .. } => PUMPS.iter().find(|p| p.0 == class).map_or("Pipeline Pump", |p| p.1),
         NodeKind::Merger { item } | NodeKind::Splitter { item } if fluid(game, item) => "Pipeline Junction",
         NodeKind::Merger { .. } => "Merger",
+        NodeKind::SmartSplitter { programmable: true, .. } => "Programmable Splitter",
+        NodeKind::SmartSplitter { .. } => "Smart Splitter",
+        NodeKind::PriorityMerger { .. } => "Priority Merger",
+        NodeKind::Valve { .. } => "Valve",
         _ => "Splitter",
     }
 }
@@ -71,85 +226,173 @@ pub fn icon(game: &fb_model::GameData, kind: &NodeKind) -> &'static str {
         NodeKind::Pump { .. } => "Desc_PipelinePump_C",
         NodeKind::Merger { item } | NodeKind::Splitter { item } if fluid(game, item) => "Desc_PipelineJunction_Cross_C",
         NodeKind::Merger { .. } => "Desc_ConveyorAttachmentMerger_C",
+        NodeKind::SmartSplitter { programmable: true, .. } => "Desc_ConveyorAttachmentSplitterProgrammable_C",
+        NodeKind::SmartSplitter { .. } => "Desc_ConveyorAttachmentSplitterSmart_C",
+        NodeKind::PriorityMerger { .. } => "Desc_ConveyorAttachmentMergerPriority_C",
+        NodeKind::Valve { .. } => "Desc_Valve_C",
         _ => "Desc_ConveyorAttachmentSplitter_C",
     }
 }
 
-/// Wires through routers, as direct links: `pairs` are (supplier output,
-/// consumer input) joined through routers; `carries` says which pairs (by
-/// index) each wire that touches a router carries.
-#[derive(Default)]
-pub struct Routes {
-    pub pairs: Vec<(OutputId, InputId)>,
-    pub carries: HashMap<(InputId, OutputId), Vec<usize>>,
+/// Under a Smart or Programmable Splitter output's port: its rules.
+pub fn output_row(ui: &mut Ui, s: &mut UserState, graph: &FactoryGraph, node_id: NodeId, name: &str) {
+    let NodeKind::SmartSplitter { rules, programmable, .. } = &graph[node_id].user_data.kind else { return };
+    let Some(k) = OUTPUT_NAMES.iter().position(|n| *n == name) else { return };
+    let rs = rules.get(k).cloned().unwrap_or_default();
+    let text = if rs.is_empty() { "None".to_string() } else { rs.iter().map(|r| rule_label(&s.game, r)).collect::<Vec<_>>().join(", ") };
+    let tip = rs.first().map(rule_tip).unwrap_or(rule_tip(&Rule::None));
+    let label = if *programmable { "Rules" } else { "Rule" };
+    setting_row(ui, s, graph[node_id].user_data.planned, node_id, k, label, &text, tip, false);
 }
 
-pub fn route(g: &FactoryGraph) -> Routes {
-    let router = |n: NodeId| is_router(&g[n].user_data.kind);
-    let routers: Vec<NodeId> = g.iter_nodes().filter(|n| router(*n)).collect();
-    if routers.is_empty() {
-        return Routes::default();
+/// Under a Priority Merger input's port: its priority.
+pub fn input_row(ui: &mut Ui, s: &mut UserState, d: &NodeData, node_id: NodeId, name: &str) {
+    let NodeKind::PriorityMerger { priority, .. } = &d.kind else { return };
+    let Some(k) = INPUT_NAMES.iter().position(|n| *n == name) else { return };
+    let p = priority.get(k).copied().unwrap_or_default();
+    setting_row(ui, s, d.planned, node_id, k, "Priority", p.label(), "Inputs can be prioritized to always be merged before others.", true);
+}
+
+/// A setting as a row like a machine's fields: its name on the left, its
+/// value on the right with the menus' arrow, the whole row a button that
+/// opens its menu. Where it can't be changed (built, in the Live view):
+/// the same row without the arrow or the hover.
+#[allow(clippy::too_many_arguments)]
+fn setting_row(ui: &mut Ui, s: &mut UserState, planned: bool, node_id: NodeId, port: usize, label: &str, value: &str, tip: &str, input: bool) {
+    let editable = !s.live_view || planned;
+    let h = ui.text_style_height(&egui::TextStyle::Body) + 4.0;
+    let sense = if editable { egui::Sense::click() } else { egui::Sense::hover() };
+    let (rect, r) = ui.allocate_exact_size(vec2(ui.available_width(), h), sense);
+    if editable && r.hovered() {
+        ui.painter().rect_filled(rect.expand2(vec2(4.0, 0.0)), 0.0, ROW_HOVER);
     }
-    let ins = |r: NodeId| g[r].inputs.first().map(|(_, i)| *i);
-    let outs = |r: NodeId| g[r].outputs.first().map(|(_, o)| *o);
-    // Real suppliers reaching each router, and real consumers it reaches.
-    let walk = |start: NodeId, up: bool| -> (BTreeSet<OutputId>, BTreeSet<InputId>) {
-        let (mut sup, mut con) = (BTreeSet::new(), BTreeSet::new());
-        let mut seen = HashSet::from([start]);
-        let mut stack = vec![start];
-        while let Some(r) = stack.pop() {
-            if up {
-                for o in ins(r).map(|i| g.connections(i)).unwrap_or_default() {
-                    let n = g[o].node;
-                    if !router(n) {
-                        sup.insert(o);
-                    } else if seen.insert(n) {
-                        stack.push(n);
-                    }
-                }
-            } else {
-                for i in outs(r).map(|o| g.output_connections(o)).unwrap_or_default() {
-                    let n = g[i].node;
-                    if !router(n) {
-                        con.insert(i);
-                    } else if seen.insert(n) {
-                        stack.push(n);
-                    }
-                }
-            }
+    let font = egui::TextStyle::Body.resolve(ui.style());
+    let painter = ui.painter();
+    let g = painter.layout_no_wrap(label.to_string(), font.clone(), TEXT_DIM);
+    painter.galley(egui::pos2(rect.left(), rect.center().y - g.size().y / 2.0), g, TEXT_DIM);
+    let arrow = if editable { h * 0.7 } else { 0.0 };
+    let g = painter.layout_no_wrap(value.to_string(), font, TEXT);
+    let x = rect.right() - arrow - if editable { 4.0 } else { 0.0 } - g.size().x;
+    painter.galley(egui::pos2(x, rect.center().y - g.size().y / 2.0), g, TEXT);
+    if editable {
+        let a = egui::Rect::from_center_size(egui::pos2(rect.right() - arrow / 2.0, rect.center().y), vec2(arrow, arrow));
+        if let Some(assets) = s.assets.as_mut() {
+            assets.paint_ui(ui, crate::assets::UiIcon::Arrow, a, TEXT_DIM);
         }
-        (sup, con)
-    };
-    let up: HashMap<NodeId, BTreeSet<OutputId>> = routers.iter().map(|r| (*r, walk(*r, true).0)).collect();
-    let down: HashMap<NodeId, BTreeSet<InputId>> = routers.iter().map(|r| (*r, walk(*r, false).1)).collect();
-    let mut index: HashMap<(OutputId, InputId), usize> = HashMap::new();
-    let mut routes = Routes::default();
-    let mut pair = |routes: &mut Routes, o: OutputId, i: InputId| -> usize {
-        *index.entry((o, i)).or_insert_with(|| {
-            routes.pairs.push((o, i));
-            routes.pairs.len() - 1
-        })
-    };
-    for (i, o) in g.iter_connections() {
-        let (from, to) = (g[o].node, g[i].node);
-        let (sources, sinks): (Vec<OutputId>, Vec<InputId>) = match (router(from), router(to)) {
-            (false, false) => continue,
-            (false, true) => (vec![o], down[&to].iter().copied().collect()),
-            (true, false) => (up[&from].iter().copied().collect(), vec![i]),
-            (true, true) => (up[&from].iter().copied().collect(), down[&to].iter().copied().collect()),
-        };
-        let carried: Vec<usize> = sources.iter().flat_map(|s| sinks.iter().map(move |c| (*s, *c))).map(|(s, c)| pair(&mut routes, s, c)).collect();
-        routes.carries.insert((i, o), carried);
     }
-    routes
+    #[cfg(test)]
+    crate::widgets::TEST_BUTTONS.with(|b| b.borrow_mut().push((format!("{} setting", if input { INPUT_NAMES[port] } else { OUTPUT_NAMES[port] }), rect, editable)));
+    #[cfg(not(test))]
+    let _ = input;
+    let r = r.on_hover_text(tip);
+    if editable && r.clicked() {
+        s.router_menu = Some((node_id, port, rect.right_bottom() - vec2(arrow, 0.0)));
+    }
+    if editable {
+        r.on_hover_cursor(egui::CursorIcon::PointingHand);
+    }
+}
+
+/// A hairline between a router node's sides, as machines have.
+pub fn divider(ui: &mut Ui) {
+    ui.add_space(2.0);
+    let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 1.0), egui::Sense::hover());
+    ui.painter().rect_filled(r, 0.0, DIVIDER);
+    ui.add_space(2.0);
+}
+
+/// Smart and Programmable Splitters, Priority Mergers and Valves: the
+/// building and what goes through it, as a machine's footer.
+pub fn footer(ui: &mut Ui, s: &mut UserState, node_id: NodeId, kind: &NodeKind) {
+    let game = s.game.clone();
+    let (NodeKind::SmartSplitter { item, .. } | NodeKind::PriorityMerger { item, .. } | NodeKind::Valve { item }) = kind else { return };
+    let through = s.ports.get(&(node_id, ROUTED.to_string())).map(|p| p.have).unwrap_or(0.0);
+    divider(ui);
+    ui.horizontal(|ui| {
+        s.item_icon(ui, icon(&game, kind), 32.0);
+        ui.vertical(|ui| {
+            ui.spacing_mut().item_spacing.y = 0.0;
+            crate::widgets::name_label(ui, RichText::new(name(&game, kind)).color(TEXT));
+            let what = format!("{} through it", fmt_rate_unit(through, game.item_form(item)));
+            crate::widgets::name_label(ui, RichText::new(what).small().color(TEXT_DIM));
+        });
+    });
+}
+
+/// The menu a setting row opens: an output's rules (one for a Smart
+/// Splitter, several for a Programmable one) or an input's priority.
+pub fn router_menu(app: &mut crate::app::FactoryApp, ctx: &egui::Context) {
+    let Some((node, port, pos)) = app.user.router_menu else { return };
+    let Some(kind) = app.state.graph.nodes.get(node).map(|n| n.user_data.kind.clone()) else {
+        app.user.router_menu = None;
+        return;
+    };
+    let game = app.user.game.clone();
+    let mut next: Option<NodeKind> = None;
+    let mut close = false;
+    let menu = match &kind {
+        NodeKind::SmartSplitter { item, programmable, rules } => {
+            let title = OUTPUT_NAMES.get(port).copied().unwrap_or("Output");
+            crate::menus::popup(ctx, "router_menu", pos, title, |ui| {
+                let current = rules.get(port).cloned().unwrap_or_default();
+                for r in [Rule::None, Rule::Any, Rule::AnyUndefined, Rule::Overflow, Rule::Item(item.clone())] {
+                    let on = current.contains(&r);
+                    if crate::menus::choice(ui, &rule_label(&game, &r), "", on, true).on_hover_text(rule_tip(&r)).clicked() {
+                        let mut set = if *programmable { current.clone() } else { Vec::new() };
+                        if *programmable && on {
+                            set.retain(|x| *x != r);
+                        } else if *programmable && r == Rule::None {
+                            set = vec![Rule::None];
+                        } else {
+                            set.retain(|x| *x != Rule::None);
+                            set.push(r);
+                        }
+                        let mut rules = rules.clone();
+                        rules.resize(3, Vec::new());
+                        rules[port] = set;
+                        next = Some(NodeKind::SmartSplitter { item: item.clone(), programmable: *programmable, rules });
+                        close = !*programmable;
+                    }
+                }
+            })
+        }
+        NodeKind::PriorityMerger { item, priority } => {
+            let title = INPUT_NAMES.get(port).copied().unwrap_or("Input");
+            crate::menus::popup(ctx, "router_menu", pos, title, |ui| {
+                crate::menus::caption(ui, "Priority");
+                for p in Priority::ALL {
+                    if crate::menus::choice(ui, p.label(), "", priority.get(port) == Some(&p), true).clicked() {
+                        let mut priority = priority.clone();
+                        priority.resize(3, Priority::default());
+                        priority[port] = p;
+                        next = Some(NodeKind::PriorityMerger { item: item.clone(), priority });
+                        close = true;
+                    }
+                }
+            })
+        }
+        _ => {
+            app.user.router_menu = None;
+            return;
+        }
+    };
+    if close || crate::menus::dismissed(ctx, &menu) {
+        app.user.router_menu = None;
+    }
+    if let Some(k) = next {
+        app.state.graph[node].user_data.kind = k;
+        app.changed();
+    }
 }
 
 /// Turns every belt (or pipe) that several machines share into mergers and
 /// splitters, as it would be built in game: the suppliers' wires join
 /// through mergers (three at a time) into one, which splitters (three ways
 /// at a time) share out to the consumers. For fluids, Pipeline Junctions do
-/// both. Wires between one supplier and one consumer stay as they are, and
-/// flows don't change (see the module notes).
+/// both. A splitter shares equally, so where a belt feeds machines and also
+/// an Output, Sink or Storage (which never back up), a Smart Splitter sends
+/// the machines theirs and the rest to those on its Overflow output.
+/// Wires between one supplier and one consumer stay as they are.
 pub fn tidy(state: &mut EditorState, user: &mut UserState) {
     use std::collections::BTreeMap;
     let g = &state.graph;
@@ -262,8 +505,28 @@ pub fn tidy(state: &mut EditorState, user: &mut UserState) {
                 split(state, user, item, fluid, s_out, chunk, z);
             }
         }
-        split(state, user, &item, fluid, level[0], &sinks, z);
+        // Outputs, sinks and storage never back up: a plain splitter would
+        // give them a full share and starve the machines.
+        let spills: Vec<InputId> = sinks.iter().copied().filter(|i| never_backs_up(&state.graph[state.graph[*i].node].user_data.kind)).collect();
+        if fluid || spills.is_empty() || spills.len() == sinks.len() {
+            split(state, user, &item, fluid, level[0], &sinks, z);
+            continue;
+        }
+        let machines: Vec<InputId> = sinks.iter().copied().filter(|i| !spills.contains(i)).collect();
+        let ns: Vec<NodeId> = sinks.iter().map(|i| state.graph[*i].node).collect();
+        let at = mid(state, &ns) - egui::vec2(420.0 * z, 0.0);
+        let smart = crate::project::add_node_to(state, user, Template::SmartSplitter { item: item.clone(), programmable: false }, at);
+        state.graph[smart].user_data.kind = NodeKind::SmartSplitter { item: item.clone(), programmable: false, rules: vec![vec![Rule::Any], vec![Rule::None], vec![Rule::Overflow]] };
+        let (s_in, left, right) = (state.graph[smart].inputs[0].1, state.graph[smart].outputs[0].1, state.graph[smart].outputs[2].1);
+        state.graph.add_connection(level[0], s_in, 0);
+        split(state, user, &item, fluid, left, &machines, z);
+        split(state, user, &item, fluid, right, &spills, z);
     }
+}
+
+/// Takes whatever arrives, so a belt to it never backs up.
+fn never_backs_up(kind: &NodeKind) -> bool {
+    matches!(kind, NodeKind::Output { .. } | NodeKind::Sink { .. } | NodeKind::Storage { .. })
 }
 
 /// A router: its icon, and what goes through it on hover.

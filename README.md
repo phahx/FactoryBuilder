@@ -22,6 +22,10 @@ Every node shows its machines, clock speed, Somersloops and what flows in and ou
 
 ![Recipe nodes up close](docs/screenshots/nodes.png)
 
+Belts and pipes flow as in game: splitters share evenly, mergers take evenly, and Smart and
+Programmable Splitters, Priority Mergers and Valves take the game's settings. An orange **i**
+marks a machine held back by what's after it, with a fix to try.
+
 Let go of a wire on empty canvas and Add node lists only what fits it:
 
 ![Add node, filtered to what takes Iron Rod](docs/screenshots/add-node.png)

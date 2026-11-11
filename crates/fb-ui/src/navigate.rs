@@ -72,7 +72,9 @@ impl FactoryApp {
                 parts.push(game.item_name(item).to_string());
             }
             k @ NodeKind::Pump { .. } => parts.push(crate::routers::name(game, k).into()),
-            k @ (NodeKind::Merger { .. } | NodeKind::Splitter { .. }) => parts.push(crate::routers::name(game, k).into()),
+            k @ (NodeKind::Merger { .. } | NodeKind::Splitter { .. } | NodeKind::SmartSplitter { .. } | NodeKind::PriorityMerger { .. } | NodeKind::Valve { .. }) => {
+                parts.push(crate::routers::name(game, k).into())
+            }
         }
         for (_, i) in &n.inputs {
             if let crate::graph::PortValue::Item(item) = &g[*i].value {

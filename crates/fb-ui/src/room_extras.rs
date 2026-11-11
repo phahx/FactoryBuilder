@@ -24,12 +24,16 @@ use std::collections::BTreeMap;
 
 /// How long a ping shows.
 pub const PING_SECS: f64 = 2.0;
-/// How long a message shows beside its sender's cursor.
-pub const BUBBLE_SECS: f64 = 6.0;
+/// How long a message shows beside its sender's cursor: long enough to
+/// read, so longer the longer it is (3 s and 1 s per 12 characters, at
+/// least 4 s; 13 s for the longest).
+pub fn bubble_secs(text: &str) -> f64 {
+    (3.0 + text.chars().count() as f64 / 12.0).max(4.0)
+}
 /// Messages kept in the overview's list.
 pub const MESSAGES_KEPT: usize = 20;
-/// Messages the overview shows (the newest), one line each, so the rest of
-/// the overview stays in view.
+/// Messages the overview shows (the newest), wrapped; with messages at
+/// most MAX_CHAT long, the rest of the overview stays in view.
 pub const MESSAGES_SHOWN: usize = 5;
 /// Where I am goes out again this often, for people who just joined.
 const PLACE_EVERY: f64 = 3.0;
@@ -358,19 +362,25 @@ impl FactoryApp {
             .constrain(true)
             .show(ctx, |ui| {
                 egui::Frame::none().fill(CONTENT).stroke(Stroke::new(2.0_f32, color)).inner_margin(egui::Margin::same(4.0)).show(ui, |ui| {
-                    let edit = egui::TextEdit::singleline(&mut draft.text)
-                        .id(Id::new("room_chat_text"))
-                        .hint_text("Message everyone")
-                        .char_limit(MAX_CHAT)
-                        .desired_width(260.0)
-                        .margin(vec2(8.0, 6.0));
-                    let r = ui.add(edit);
-                    if draft.focus {
-                        r.request_focus();
-                        draft.focus = false;
-                    } else if r.lost_focus() {
-                        done = Some(ui.input(|i| i.key_pressed(Key::Enter)));
-                    }
+                    ui.horizontal(|ui| {
+                        let edit = egui::TextEdit::singleline(&mut draft.text)
+                            .id(Id::new("room_chat_text"))
+                            .hint_text("Message everyone")
+                            .char_limit(MAX_CHAT)
+                            .desired_width(260.0)
+                            .margin(vec2(8.0, 6.0));
+                        let r = ui.add(edit);
+                        if draft.focus {
+                            r.request_focus();
+                            draft.focus = false;
+                        } else if r.lost_focus() {
+                            done = Some(ui.input(|i| i.key_pressed(Key::Enter)));
+                        }
+                        // How much is left of the limit.
+                        let n = draft.text.chars().count();
+                        let c = if n >= MAX_CHAT { ACCENT } else { TEXT_DIM };
+                        ui.label(RichText::new(format!("{n} / {MAX_CHAT}")).small().color(c));
+                    });
                 });
             });
         if ctx.input(|i| i.key_pressed(Key::Escape)) {
@@ -401,7 +411,7 @@ impl FactoryApp {
         let frozen = self.room.frozen;
         if !frozen {
             self.room.pings.retain(|p| now - p.at < PING_SECS);
-            self.room.bubbles.retain(|_, (_, t)| now - *t < BUBBLE_SECS);
+            self.room.bubbles.retain(|_, (text, t)| now - *t < bubble_secs(text));
         }
         let rect = self.editor_rect;
         if !rect.is_positive() {
@@ -485,9 +495,9 @@ impl FactoryApp {
                 paint_bubble(&painter, p + vec2(14.0, 24.0), text, self.room.my_color());
             }
         }
-        if let Some(first) = self.room.bubbles.values().map(|(_, t)| *t).reduce(f64::min) {
+        if let Some(next) = self.room.bubbles.values().map(|(text, t)| bubble_secs(text) - (now - t)).reduce(f64::min) {
             if !frozen {
-                ctx.request_repaint_after(std::time::Duration::from_secs_f64((BUBBLE_SECS - (now - first)).max(0.0)));
+                ctx.request_repaint_after(std::time::Duration::from_secs_f64(next.max(0.0)));
             }
         }
     }
@@ -546,13 +556,13 @@ pub fn room_section(ui: &mut Ui, room: &RoomUi) -> Option<u32> {
     if room.messages.is_empty() {
         widgets::caption(ui, "Press / over the graph to send everyone a short message.");
     }
-    // The newest few, a line each (the whole message on hover).
+    // The newest few, each wrapped to the panel.
     let skip = room.messages.len().saturating_sub(MESSAGES_SHOWN);
     for m in room.messages.iter().skip(skip) {
         let mut job = LayoutJob::default();
         job.append(&m.name, 0.0, TextFormat { font_id: theme::semibold(14.0), color: rgb(m.color), ..Default::default() });
         job.append(&m.text, 6.0, TextFormat { font_id: FontId::proportional(14.0), color: TEXT, ..Default::default() });
-        ui.add(egui::Label::new(job).truncate()).on_hover_text(format!("{}: {}", m.name, m.text));
+        ui.add(egui::Label::new(job).wrap());
     }
     widgets::divider(ui);
     clicked

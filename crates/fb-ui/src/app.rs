@@ -1338,6 +1338,7 @@ impl FactoryApp {
             });
         self.node_menu(ctx);
         crate::wires::belt_menu(self, ctx);
+        crate::routers::router_menu(self, ctx);
         self.node_title_editor(ctx);
         self.frame_menu(ctx);
         crate::project_ui::master_canvas_menu(self, ctx);
@@ -1727,6 +1728,59 @@ impl FactoryApp {
                         let o = g[a].outputs.iter().map(|(_, o)| *o).find(|o| g[*o].typ.0 == item);
                         let i = g[b].inputs.iter().map(|(_, i)| *i).find(|i| g[*i].typ.0 == item);
                         if let (Some(o), Some(i)) = (o, i) {
+                            let pos = self.state.graph.connections(i).len();
+                            self.state.graph.add_connection(o, i, pos);
+                        }
+                    }
+                    self.frame_all = true;
+                }
+                // A Smart Splitter (overflow to a sink), a Priority Merger
+                // and a Valve, with their settings.
+                "smart_routers" => {
+                    use crate::routers::{Priority, Rule};
+                    self.dialog = Dialog::None;
+                    self.dirty = false;
+                    self.run_pending(Pending::New);
+                    self.new_factory();
+                    self.view = crate::map::View::Graph;
+                    let (ore, water) = ("Desc_OreIron_C", "Desc_Water_C");
+                    let z = self.state.pan_zoom.zoom;
+                    let at = |x: f32, y: f32| egui::pos2(x * z, y * z);
+                    self.state = crate::project::new_state();
+                    let item_in_of = |g: &crate::graph::FactoryGraph, n: NodeId| g[n].inputs.iter().map(|(_, i)| *i).find(|i| matches!(g[*i].value, PortValue::Item(_)));
+                    let src = self.add_node(Template::Resource(ore.into()), at(0.0, 0.0));
+                    let smart = self.add_node(Template::SmartSplitter { item: ore.into(), programmable: false }, at(340.0, 0.0));
+                    let smelt = self.add_node(Template::Recipe("Recipe_IngotIron_C".into()), at(720.0, -60.0));
+                    let sink = self.add_node(Template::Sink(ore.into()), at(720.0, 260.0));
+                    let a = self.add_node(Template::Resource(ore.into()), at(0.0, 460.0));
+                    let b = self.add_node(Template::Resource(ore.into()), at(0.0, 640.0));
+                    let pm = self.add_node(Template::PriorityMerger(ore.into()), at(340.0, 500.0));
+                    let pair = self.add_node(Template::Recipe("Recipe_IngotIron_C".into()), at(720.0, 480.0));
+                    let w = self.add_node(Template::Resource(water.into()), at(1160.0, 0.0));
+                    let valve = self.add_node(Template::Valve(water.into()), at(1160.0, 200.0));
+                    let wsink = self.add_node(Template::Sink(water.into()), at(1160.0, 470.0));
+                    self.set_number(src, RATE, 45.0);
+                    self.set_number(a, RATE, 30.0);
+                    self.set_number(b, RATE, 30.0);
+                    self.set_number(pair, MACHINES, 1.5);
+                    self.set_number(w, RATE, 120.0);
+                    self.set_number(valve, crate::routers::VALVE_LIMIT, 50.0);
+                    // A Miner Mk.2 that a single smelter holds back.
+                    let ground = self.add_node(Template::Resource(ore.into()), at(1160.0, 700.0));
+                    let mk2 = self.add_node(Template::Extractor { item: ore.into(), class: "Build_MinerMk2_C".into(), purity: fb_model::Purity::Normal }, at(1160.0, 820.0));
+                    let slow = self.add_node(Template::Recipe("Recipe_IngotIron_C".into()), at(1520.0, 760.0));
+                    for (from, to) in [(ground, mk2), (mk2, slow)] {
+                        let o = self.state.graph[from].outputs[0].1;
+                        if let Some(i) = item_in_of(&self.state.graph, to) {
+                            self.state.graph.add_connection(o, i, 0);
+                        }
+                    }
+                    self.state.graph[smart].user_data.kind = NodeKind::SmartSplitter { item: ore.into(), programmable: false, rules: vec![vec![Rule::Any], vec![Rule::None], vec![Rule::Overflow]] };
+                    self.state.graph[pm].user_data.kind = NodeKind::PriorityMerger { item: ore.into(), priority: vec![Priority::Low, Priority::Low, Priority::High] };
+                    let item_in = |g: &crate::graph::FactoryGraph, n: NodeId, k: usize| g[n].inputs.iter().map(|(_, i)| *i).filter(|i| matches!(g[*i].value, PortValue::Item(_))).nth(k);
+                    for (from, out, to, inp) in [(src, 0, smart, 0), (smart, 0, smelt, 0), (smart, 2, sink, 0), (a, 0, pm, 0), (b, 0, pm, 2), (pm, 0, pair, 0), (w, 0, valve, 0), (valve, 0, wsink, 0)] {
+                        let o = self.state.graph[from].outputs.get(out).map(|(_, o)| *o);
+                        if let (Some(o), Some(i)) = (o, item_in(&self.state.graph, to, inp)) {
                             let pos = self.state.graph.connections(i).len();
                             self.state.graph.add_connection(o, i, pos);
                         }
@@ -3153,31 +3207,27 @@ pub(crate) fn evaluate_graph(game: &GameData, g: &FactoryGraph, cache: &mut SimC
         let (from, to) = (g[output].node, g[input].node);
         let to_port = item_inputs(to).iter().position(|i| *i == input)?;
         let from_port = g[from].outputs.iter().position(|(_, o)| *o == output)?;
-        Some(SimLink { from_node: index[&from], from_port, to_node: index[&to], to_port })
+        Some(SimLink::new(index[&from], from_port, index[&to], to_port))
     };
+    // Every belt and pipe, through routers too; an extractor takes from its
+    // resource node directly (no belt). A chosen belt or pipe carries at
+    // most its speed.
     for (input, outputs) in g.iter_connection_groups() {
         if g.try_get_input(input).is_none() {
             continue;
         }
         for output in outputs {
-            // Wires through mergers and splitters go in below, joined up;
-            // an extractor takes from its resource node directly (no belt).
-            if router(g[output].node) || router(g[input].node) || crate::extractors::from_the_ground(g, output, input) {
+            if crate::extractors::from_the_ground(g, output, input) {
                 continue;
             }
-            if let Some(l) = sim_link(output, input) {
+            if let Some(mut l) = sim_link(output, input) {
+                let fluid = game.item_form(&g[output].typ.0).is_fluid();
+                if let Some(cap) = crate::wires::chosen(belts, input, output).and_then(|t| crate::wires::speed(game, fluid, t)) {
+                    l.cap = cap;
+                }
                 links.push(l);
                 link_wires.push((input, output));
             }
-        }
-    }
-    let routes = crate::routers::route(g);
-    let first_route = links.len();
-    let mut routed = Vec::new();
-    for (k, (o, i)) in routes.pairs.iter().enumerate() {
-        if let Some(l) = sim_link(*o, *i) {
-            links.push(l);
-            routed.push(k);
         }
     }
     let mut connected_in = BTreeSet::new();
@@ -3190,6 +3240,11 @@ pub(crate) fn evaluate_graph(game: &GameData, g: &FactoryGraph, cache: &mut SimC
     let mut sim_nodes = Vec::with_capacity(ids.len());
     for (i, &id) in ids.iter().enumerate() {
         let (ins, outs) = node_rates(game, g, id);
+        if let Some((n_in, n_out, share)) = crate::routers::share(g, id) {
+            sim_nodes.push(SimNode::router(n_in, n_out, share));
+            rates.push((ins, outs));
+            continue;
+        }
         let factory = matches!(g[id].user_data.kind, NodeKind::Factory { .. });
         // An extractor stands on its resource node: it needs nothing brought
         // in, only somewhere for what it extracts to go.
@@ -3200,40 +3255,13 @@ pub(crate) fn evaluate_graph(game: &GameData, g: &FactoryGraph, cache: &mut SimC
             inputs: ins.iter().enumerate().map(|(p, x)| if extractor || (factory && !connected_in.contains(&(i, p))) { 0.0 } else { x.1 }).collect(),
             outputs: outs.iter().map(|x| x.1).collect(),
             throttles: matches!(g[id].user_data.kind, NodeKind::Recipe { .. } | NodeKind::Extractor { .. }),
-            // Outputs take whatever arrives, like sinks.
-            sink: matches!(g[id].user_data.kind, NodeKind::Sink { .. } | NodeKind::Output { .. } | NodeKind::Storage { .. }),
+            // Outputs take whatever arrives, like sinks; storage passes on
+            // what arrives and fills with the rest.
+            sink: matches!(g[id].user_data.kind, NodeKind::Sink { .. } | NodeKind::Output { .. }),
+            store: matches!(g[id].user_data.kind, NodeKind::Storage { .. }),
             ..Default::default()
         });
         rates.push((ins, outs));
-    }
-    // A chosen belt or pipe carries at most its speed: the machine port at
-    // each end of the wire (not mergers and splitters) is held to it.
-    for b in belts {
-        let (Some(o), Some(inp)) = (g.try_get_output(b.output), g.try_get_input(b.input)) else { continue };
-        if !g.connections(b.input).contains(&b.output) {
-            continue;
-        }
-        let Some(cap) = crate::wires::speed(game, game.item_form(&o.typ.0).is_fluid(), b.tier) else { continue };
-        if !router(o.node) {
-            let i = index[&o.node];
-            if let Some(p) = g[o.node].outputs.iter().position(|(_, x)| *x == b.output) {
-                let caps = &mut sim_nodes[i].out_caps;
-                caps.resize(rates[i].1.len().max(caps.len()), f64::INFINITY);
-                if p < caps.len() {
-                    caps[p] = caps[p].min(cap);
-                }
-            }
-        }
-        if !router(inp.node) && !crate::extractors::from_the_ground(g, b.output, b.input) {
-            let i = index[&inp.node];
-            if let Some(p) = item_inputs(inp.node).iter().position(|x| *x == b.input) {
-                let caps = &mut sim_nodes[i].in_caps;
-                caps.resize(rates[i].0.len().max(caps.len()), f64::INFINITY);
-                if p < caps.len() {
-                    caps[p] = caps[p].min(cap);
-                }
-            }
-        }
     }
     // A factory's surplus goes to its own storage: each linked output gets
     // an overflow, so sending more than the others take never slows it.
@@ -3242,12 +3270,13 @@ pub(crate) fn evaluate_graph(game: &GameData, g: &FactoryGraph, cache: &mut SimC
         if matches!(g[id].user_data.kind, NodeKind::Factory { .. }) {
             for p in 0..rates[i].1.len() {
                 if connected_out.contains(&(i, p)) {
-                    sim_links.push(SimLink { from_node: i, from_port: p, to_node: sim_nodes.len(), to_port: 0 });
+                    sim_links.push(SimLink { overflow: true, ..SimLink::new(i, p, sim_nodes.len(), 0) });
                     sim_nodes.push(SimNode { inputs: vec![0.0], outputs: vec![], throttles: false, sink: true, ..Default::default() });
                 }
             }
         }
     }
+    let (sim_nodes_for_hints, sim_links_for_hints) = (sim_nodes.clone(), sim_links.clone());
     let result = match cache {
         Some((n, l, r)) if *n == sim_nodes && *l == sim_links => r.clone(),
         _ => {
@@ -3258,20 +3287,25 @@ pub(crate) fn evaluate_graph(game: &GameData, g: &FactoryGraph, cache: &mut SimC
     };
 
     let mut e = Evaluation { wire_flow: link_wires.into_iter().zip(result.link_flow.iter().copied()).collect(), ..Default::default() };
-    // Wires through routers carry the flows of the links they stand for.
-    let mut pair_flow = vec![0.0; routes.pairs.len()];
-    for (n, k) in routed.iter().enumerate() {
-        pair_flow[*k] = result.link_flow.get(first_route + n).copied().unwrap_or(0.0);
-    }
-    for (wire, carried) in &routes.carries {
-        e.wire_flow.insert(*wire, carried.iter().map(|k| pair_flow[*k]).sum());
-    }
-    for &id in &ids {
-        if router(id) {
-            let through: f64 = g[id].inputs.first().map(|(_, i)| g.connections(*i).iter().map(|o| e.wire_flow.get(&(*i, *o)).copied().unwrap_or(0.0)).sum()).unwrap_or(0.0);
-            e.ports.insert((id, crate::routers::ROUTED.into()), PortStat { have: through, want: through, connected: true });
+    // Routers: what goes through each, and through each of its ports.
+    for &id in ids.iter().filter(|id| router(**id)) {
+        let flow = |i: egui_node_graph2::InputId, o: egui_node_graph2::OutputId| e.wire_flow.get(&(i, o)).copied().unwrap_or(0.0);
+        let mut stats = Vec::new();
+        for (name, i) in g[id].inputs.iter().filter(|(_, i)| matches!(g[*i].value, PortValue::Item(_))) {
+            let wires = g.connections(*i);
+            stats.push((name.clone(), wires.iter().map(|o| flow(*i, *o)).sum::<f64>(), !wires.is_empty()));
         }
+        let through: f64 = stats.iter().map(|s| s.1).sum();
+        for (name, o) in &g[id].outputs {
+            let wires = g.output_connections(*o);
+            stats.push((name.clone(), wires.iter().map(|i| flow(*i, *o)).sum::<f64>(), !wires.is_empty()));
+        }
+        for (name, have, connected) in stats {
+            e.ports.insert((id, name), PortStat { have, want: have, connected });
+        }
+        e.ports.insert((id, crate::routers::ROUTED.into()), PortStat { have: through, want: through, connected: true });
     }
+    let held = fb_engine::sim::held_back(&sim_nodes_for_hints, &sim_links_for_hints, &result);
     let mut sum = Summary::default();
     for (i, &id) in ids.iter().enumerate() {
         let (ins, outs) = &rates[i];
@@ -3326,16 +3360,23 @@ pub(crate) fn evaluate_graph(game: &GameData, g: &FactoryGraph, cache: &mut SimC
                 }
                 sum.outputs.push((item.clone(), got, want));
             }
-            // What goes into storage the factory has made; what it supplies
-            // was brought in (by hand, or from elsewhere).
+            // What stays in storage the factory has made; what it hands
+            // out beyond what arrives was brought in (by hand, or from
+            // elsewhere).
             NodeKind::Storage { item, .. } => {
                 let got: f64 = result.received[i].iter().sum();
-                if got > 1e-9 {
-                    sum.outputs.push((item.clone(), got, got));
-                }
                 let given: f64 = result.shipped[i].iter().sum();
-                if given > 1e-9 {
-                    *sum.inputs.entry(item.clone()).or_default() += given;
+                if got - given > 1e-9 {
+                    sum.outputs.push((item.clone(), got - given, got - given));
+                }
+                if given - got > 1e-9 {
+                    *sum.inputs.entry(item.clone()).or_default() += given - got;
+                }
+                // No target: its rows read what goes in and out.
+                for (name, _) in ins.iter().chain(outs.iter()) {
+                    if let Some(p) = e.ports.get_mut(&(id, name.clone())) {
+                        p.want = p.have;
+                    }
                 }
             }
             NodeKind::Sink { item } => {
@@ -3343,7 +3384,7 @@ pub(crate) fn evaluate_graph(game: &GameData, g: &FactoryGraph, cache: &mut SimC
                 *sum.sunk.entry(item.clone()).or_default() += got;
                 sum.sink_points += got * game.items.get(item).map(|it| it.sink_points).unwrap_or(0) as f64;
             }
-            NodeKind::Pole { .. } | NodeKind::Merger { .. } | NodeKind::Splitter { .. } => {}
+            NodeKind::Pole { .. } | NodeKind::Merger { .. } | NodeKind::Splitter { .. } | NodeKind::SmartSplitter { .. } | NodeKind::PriorityMerger { .. } | NodeKind::Valve { .. } => {}
             NodeKind::Pump { class, .. } => power = game.buildable_power.get(class).copied().unwrap_or(0.0),
             // Part of the HUB: what it makes is counted below.
             NodeKind::Burner { .. } => {}
@@ -3376,7 +3417,10 @@ pub(crate) fn evaluate_graph(game: &GameData, g: &FactoryGraph, cache: &mut SimC
         if let Some(mw) = crate::power_ui::generated_mw(game, g, id, eff) {
             *sum.generation.get_or_insert(0.0) += mw;
         }
-        e.nodes.insert(id, NodeStat { efficiency: eff, power_mw: power });
+        let held = (held[i] && matches!(g[id].user_data.kind, NodeKind::Recipe { .. } | NodeKind::Extractor { .. }))
+            .then(|| (result.shipped[i].first().copied().unwrap_or(0.0), outs.first().map(|o| o.1).unwrap_or(0.0)))
+            .filter(|(_, could)| *could > 1e-9);
+        e.nodes.insert(id, NodeStat { efficiency: eff, power_mw: power, held });
     }
     // Resource nodes and the extractors on them: what each extractor
     // extracts, which its resource node shows as its total.

@@ -152,6 +152,10 @@ impl FactoryApp {
                 NodeKind::Storage { class, .. } => (portable::Kind::Storage, class.clone()),
                 NodeKind::Merger { item } => (portable::Kind::Merger, item.clone()),
                 NodeKind::Splitter { item } => (portable::Kind::Splitter, item.clone()),
+                NodeKind::SmartSplitter { item, programmable: true, .. } => (portable::Kind::ProgrammableSplitter, item.clone()),
+                NodeKind::SmartSplitter { item, .. } => (portable::Kind::SmartSplitter, item.clone()),
+                NodeKind::PriorityMerger { item, .. } => (portable::Kind::PriorityMerger, item.clone()),
+                NodeKind::Valve { item } => (portable::Kind::Valve, item.clone()),
                 NodeKind::Extractor { class, .. } => (portable::Kind::Extractor, class.clone()),
                 NodeKind::Pump { class, .. } => (portable::Kind::Pump, class.clone()),
                 NodeKind::Burner { fuel } => (portable::Kind::Burner, fuel.clone()),
@@ -164,14 +168,20 @@ impl FactoryApp {
                 NodeKind::Pump { item, .. } | NodeKind::Storage { item, .. } => (Some(item.clone()), None),
                 _ => (None, None),
             };
-            let has_rate = matches!(kind, portable::Kind::Resource | portable::Kind::Input | portable::Kind::Output | portable::Kind::Storage);
+            let has_rate = matches!(kind, portable::Kind::Resource | portable::Kind::Input | portable::Kind::Output);
+            let rate = if kind == portable::Kind::Valve { Some(input_number(g, id, crate::routers::VALVE_LIMIT)) } else { has_rate.then(|| input_number(g, id, RATE)) };
+            let router = match &n.user_data.kind {
+                NodeKind::SmartSplitter { rules, .. } => Some(portable::RouterSettings { rules: rules.iter().map(|rs| rs.iter().map(crate::routers::rule_word).collect()).collect(), ..Default::default() }),
+                NodeKind::PriorityMerger { priority, .. } => Some(portable::RouterSettings { priorities: priority.iter().map(|p| p.label().to_lowercase()).collect(), ..Default::default() }),
+                _ => None,
+            };
             f.nodes.push(portable::Node {
                 kind,
                 class,
                 machines: is_recipe.then(|| input_number(g, id, MACHINES)),
                 clock: is_recipe.then(|| input_number(g, id, CLOCK)),
                 sloops: Some(crate::graph::sloops(game, g, id)).filter(|n| *n > 0),
-                rate: has_rate.then(|| input_number(g, id, RATE)),
+                rate,
                 name: Some(n.label.clone()).filter(|l| *l != default_label(game, &n.user_data.kind)),
                 color: n.user_data.color.map(portable::color_to_hex),
                 item,
@@ -179,6 +189,7 @@ impl FactoryApp {
                 x: (pos.x * 10.0).round() / 10.0,
                 y: (pos.y * 10.0).round() / 10.0,
                 planned: n.user_data.planned,
+                router,
             });
         }
         for (to, &id) in ids.iter().enumerate() {
@@ -282,6 +293,11 @@ impl FactoryApp {
                 }
                 portable::Kind::Merger if known_item => Template::Merger(n.class.clone()),
                 portable::Kind::Splitter if known_item => Template::Splitter(n.class.clone()),
+                portable::Kind::SmartSplitter | portable::Kind::ProgrammableSplitter if known_item && !game.item_form(&n.class).is_fluid() => {
+                    Template::SmartSplitter { item: n.class.clone(), programmable: n.kind == portable::Kind::ProgrammableSplitter }
+                }
+                portable::Kind::PriorityMerger if known_item && !game.item_form(&n.class).is_fluid() => Template::PriorityMerger(n.class.clone()),
+                portable::Kind::Valve if known_item && game.item_form(&n.class).is_fluid() => Template::Valve(n.class.clone()),
                 portable::Kind::Extractor if crate::extractors::find(&game, &n.class).is_some() && n.item.as_ref().is_some_and(|i| game.items.contains_key(i)) => {
                     Template::Extractor { item: n.item.clone().unwrap_or_default(), class: n.class.clone(), purity: n.purity.unwrap_or_default() }
                 }
@@ -308,6 +324,12 @@ impl FactoryApp {
             set(self, CLOCK, n.clock);
             set(self, crate::graph::SLOOPS, n.sloops.map(f64::from));
             set(self, RATE, n.rate);
+            if n.kind == portable::Kind::Valve {
+                set(self, crate::routers::VALVE_LIMIT, n.rate);
+            }
+            if let Some(r) = &n.router {
+                crate::routers::apply_settings(&game, &mut self.state.graph[id].user_data.kind, r);
+            }
             self.state.graph[id].user_data.color = n.color.as_deref().and_then(portable::color_from_hex);
             self.state.graph[id].user_data.planned = n.planned;
             if let (NodeKind::Resource { purity, .. }, Some(p)) = (&mut self.state.graph[id].user_data.kind, n.purity) {

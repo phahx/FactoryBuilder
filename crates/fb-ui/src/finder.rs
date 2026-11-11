@@ -146,11 +146,17 @@ impl Catalog {
         // as in game), named for the item, with the game's icons.
         for (class, item) in &game.items {
             let kinds: &[(Template, &str, &str)] = if item.form.is_fluid() {
-                &[(Template::Merger(class.clone()), "Pipeline Junctions", "Pipeline Junction · joins and shares out pipes")]
+                &[
+                    (Template::Merger(class.clone()), "Pipeline Junctions", "Pipeline Junction · joins and shares out pipes"),
+                    (Template::Valve(class.clone()), "Valves", "Valve · limits pipeline flow rates"),
+                ]
             } else {
                 &[
                     (Template::Merger(class.clone()), "Mergers", "Merger · joins belts into one"),
                     (Template::Splitter(class.clone()), "Splitters", "Splitter · shares a belt out over several"),
+                    (Template::SmartSplitter { item: class.clone(), programmable: false }, "Smart Splitters", "Smart Splitter · a filter for each output"),
+                    (Template::SmartSplitter { item: class.clone(), programmable: true }, "Programmable Splitters", "Programmable Splitter · several filters for each output"),
+                    (Template::PriorityMerger(class.clone()), "Priority Mergers", "Priority Merger · inputs merged before others by priority"),
                 ]
             };
             for (template, group, subtitle) in kinds {
@@ -233,7 +239,11 @@ impl Catalog {
             ("Extractors", "Desc_MinerMk1_C"),
             ("Mergers", "Desc_ConveyorAttachmentMerger_C"),
             ("Splitters", "Desc_ConveyorAttachmentSplitter_C"),
+            ("Smart Splitters", "Desc_ConveyorAttachmentSplitterSmart_C"),
+            ("Programmable Splitters", "Desc_ConveyorAttachmentSplitterProgrammable_C"),
+            ("Priority Mergers", "Desc_ConveyorAttachmentMergerPriority_C"),
             ("Pipeline Junctions", "Desc_PipelineJunction_Cross_C"),
+            ("Valves", "Desc_Valve_C"),
             ("Pipeline Pumps", "Desc_PipelinePump_C"),
             ("Storage", "Desc_StorageContainerMk1_C"),
         ] {
