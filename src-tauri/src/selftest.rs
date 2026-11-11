@@ -45,7 +45,7 @@ const PROBE_JS: &str = r#"
   // then read the canvas in a later animation frame (before it clears).
   const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
   r.screenshots = [];
-  for (const view of ['graph', 'zoomed', 'finder', 'finder_search', 'finder_wire', 'menu', 'room_cursors', 'room_info', 'setup_install', 'setup_game', 'setup_icons', 'setup_name', 'settings_dev', 'map', 'map_zoom', 'map_close', 'map_import', 'export', 'frames', 'project', 'project_menu', 'tab_menu', 'project_tab', 'world_dialog', 'world_project', 'readme_world', 'power_lit', 'power_close', 'routers', 'hub', 'hub_master', 'readme_prep', 'readme_plan', 'readme_room', 'readme_nodes', 'readme_wire', 'live_map', 'live_dialog', 'readme_live_map', 'live_map_selected', 'readme_live_master', 'readme_live_factory']) {
+  const shoot = async (view) => {
     try {
       window.__fbSelftestView = view;
       for (let i = 0; i < 6; i++) {
@@ -63,6 +63,9 @@ const PROBE_JS: &str = r#"
       await inv('selftest_screenshot', { dataUrl: png, name: view });
       r.screenshots.push(view);
     } catch (e) { r.screenshot_err = String(e); }
+  };
+  for (const view of ['graph', 'zoomed', 'finder', 'finder_search', 'finder_wire', 'menu', 'room_cursors', 'room_info', 'setup_install', 'setup_game', 'setup_icons', 'setup_name', 'settings_dev', 'map', 'map_zoom', 'map_close', 'map_import', 'export', 'frames', 'project', 'project_menu', 'tab_menu', 'project_tab', 'world_dialog', 'world_project', 'readme_world', 'power_lit', 'power_close', 'routers', 'hub', 'hub_master', 'readme_prep', 'readme_plan', 'readme_room', 'readme_nodes', 'readme_wire', 'live_map', 'live_dialog']) {
+    await shoot(view);
   }
   await sleep(3000);
   // Hover tips: put the pointer on something, wait past the tooltip delay,
@@ -93,6 +96,11 @@ const PROBE_JS: &str = r#"
       await inv('selftest_screenshot', { dataUrl: png, name });
       r.screenshots.push(name);
     } catch (e) { r.screenshot_err = String(e); }
+  }
+  // Last: the Live view's scenes put a generated example world on the map
+  // (demo.rs), which the views and tips above don't expect.
+  for (const view of ['readme_live_map', 'live_map_selected', 'readme_live_master', 'readme_live_factory']) {
+    await shoot(view);
   }
   r.errors = window.__fbErrors;
   await inv('selftest_report', { report: JSON.stringify(r) });

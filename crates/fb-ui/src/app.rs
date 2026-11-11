@@ -1461,6 +1461,11 @@ impl FactoryApp {
                 // The Map tab with the self-test's sample save.
                 "map" | "map_zoom" | "map_close" => {
                     self.dialog = Dialog::None;
+                    // The plain map: no Live map add-on (live_map turns it on).
+                    self.leave_live();
+                    if let Some(s) = self.status.as_mut() {
+                        s.settings.live.enabled = false;
+                    }
                     self.view = crate::map::View::Map;
                     if self.map.world.is_none() {
                         self.backend.call("selftest_save", json!({}), Msg::SelftestSave);
