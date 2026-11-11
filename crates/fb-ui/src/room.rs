@@ -50,6 +50,12 @@ pub struct RoomUi {
     pub selections: BTreeMap<u32, (u32, Vec<NodeId>)>,
     /// The person whose view mine follows.
     pub following: Option<u32>,
+    /// Where each person is (`Wire::Place`), and the shared project's
+    /// document names to say so.
+    pub places: BTreeMap<u32, fb_model::room::Place>,
+    pub doc_names: BTreeMap<u32, String>,
+    /// Where I last said I am, and when.
+    pub sent_place: Option<(fb_model::room::Place, f64)>,
     /// The message being typed (opened with /).
     pub chat: Option<ChatDraft>,
     /// The view and selection last sent, and when (sending is throttled).
@@ -115,6 +121,9 @@ impl Default for RoomUi {
             views: BTreeMap::new(),
             selections: BTreeMap::new(),
             following: None,
+            places: BTreeMap::new(),
+            doc_names: BTreeMap::new(),
+            sent_place: None,
             chat: None,
             sent_view: None,
             sent_selection: None,
@@ -140,6 +149,7 @@ impl RoomUi {
         self.cursor_shown.remove(&id);
         self.bubbles.remove(&id);
         self.views.remove(&id);
+        self.places.remove(&id);
         self.selections.remove(&id);
         self.pings.retain(|p| p.id != id);
         if self.following == Some(id) {

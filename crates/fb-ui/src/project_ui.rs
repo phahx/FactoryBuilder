@@ -23,6 +23,9 @@ enum TabAction {
     Close(u32),
     Map,
     New,
+    /// The planning project, or the Live view's.
+    Plan,
+    Live,
 }
 
 fn tab_width(ui: &Ui, label: &str, closable: bool) -> f32 {
@@ -69,14 +72,30 @@ pub fn tab_bar(app: &mut FactoryApp, ui: &mut Ui, bar: Rect) {
     let mut x = bar.left() + 8.0;
     let y = bar.top() + 4.0;
     let graph_view = app.view == View::Graph;
+    let live = app.live_view.on;
     // The master graph.
-    let (r, _, w) = tab(ui, egui::pos2(x, y), "Project", graph_view && app.active == MASTER, false, egui::Id::new("tab_master"));
-    if r.on_hover_text("Every factory in the project and how they feed each other").on_hover_cursor(CursorIcon::PointingHand).clicked() {
+    let (master, master_tip) = if live { (crate::live_factory::LIVE_NAME, "Every live factory, how they feed each other and the HUB, as built") } else { ("Project", "Every factory in the project and how they feed each other") };
+    let (r, _, w) = tab(ui, egui::pos2(x, y), master, graph_view && app.active == MASTER, false, egui::Id::new("tab_master"));
+    if !live {
+        crate::room_extras::tab_marks(ui, &app.room, r.rect, |p| p == fb_model::room::Place::Graph { doc: MASTER });
+    }
+    if r.on_hover_text(master_tip).on_hover_cursor(CursorIcon::PointingHand).clicked() {
         action = Some(TabAction::Open(MASTER));
     }
     x += w + 2.0;
-    // Room for the factory tabs: everything but the + and Map.
-    let map_w = 64.0;
+    // At the right: Plan and Live (with the Live map add-on), and Map.
+    let modes: Vec<(&str, &str, bool, TabAction)> = {
+        let mut m = Vec::new();
+        if app.live_on() {
+            m.push(("Plan", "Your planning project", graph_view && !live, TabAction::Plan));
+            m.push(("Live", "What's built, from the map: a factory per region you draw on the Map tab, kept up to date", graph_view && live, TabAction::Live));
+        }
+        m.push(("Map", "Your save on the game's map", app.view == View::Map, TabAction::Map));
+        m
+    };
+    let modes_w: f32 = modes.iter().map(|(l, ..)| tab_width(ui, l, false) + 2.0).sum();
+    // Room for the factory tabs: everything but the + and those.
+    let map_w = modes_w;
     let limit = bar.right() - 8.0 - map_w - 8.0 - TAB_HEIGHT - 4.0;
     // More tabs than fit: start late enough that the open one shows (the
     // rest are in the factory list beside the master graph).
@@ -95,6 +114,9 @@ pub fn tab_bar(app: &mut FactoryApp, ui: &mut Ui, bar: Rect) {
         }
         let tab_id = egui::Id::new(("tab_factory", id));
         let (r, close, w) = tab(ui, egui::pos2(x, y), &name, graph_view && app.active == id, true, tab_id);
+        if !live {
+            crate::room_extras::tab_marks(ui, &app.room, r.rect, |p| p == fb_model::room::Place::Graph { doc: id });
+        }
         if let Some(c) = close {
             let hovered = c.hovered();
             let tint = if graph_view && app.active == id { TEXT_DARK } else { TEXT };
@@ -117,13 +139,14 @@ pub fn tab_bar(app: &mut FactoryApp, ui: &mut Ui, bar: Rect) {
         if r.middle_clicked() {
             action = Some(TabAction::Close(id));
         }
-        if r.secondary_clicked() {
+        if r.secondary_clicked() && !live {
             app.factory_menu = r.interact_pointer_pos().map(|p| (id, p));
         }
         x += w + 2.0;
     }
-    // New factory.
+    // New factory (the Live view's come from the map).
     let add = Rect::from_min_size(egui::pos2(x + 2.0, y), vec2(TAB_HEIGHT, TAB_HEIGHT));
+    if !live {
     let r = ui.interact(add, egui::Id::new("tab_add"), Sense::click());
     ui.painter().rect_filled(add, 0.0, if r.hovered() { ACCENT } else { TAB });
     let (c, arm) = (add.center(), 6.0);
@@ -135,13 +158,26 @@ pub fn tab_bar(app: &mut FactoryApp, ui: &mut Ui, bar: Rect) {
     if r.on_hover_text("New factory").on_hover_cursor(CursorIcon::PointingHand).clicked() {
         action = Some(TabAction::New);
     }
-    // The map, at the right.
-    let (r, _, _) = tab(ui, egui::pos2(bar.right() - 8.0 - map_w, y), "Map", app.view == View::Map, false, egui::Id::new("tab_map"));
-    if r.on_hover_text("Your save on the game's map").on_hover_cursor(CursorIcon::PointingHand).clicked() {
-        action = Some(TabAction::Map);
+    }
+    // Plan, Live and Map, at the right.
+    let mut mx = bar.right() - 8.0 - map_w;
+    for (label, tip, on, a) in modes {
+        let (r, _, w) = tab(ui, egui::pos2(mx, y), label, on, false, egui::Id::new(("tab_mode", label)));
+        let here = match label {
+            "Map" => Some(fb_model::room::Place::Map),
+            "Live" => Some(fb_model::room::Place::Live),
+            _ => None,
+        };
+        if let Some(here) = here {
+            crate::room_extras::tab_marks(ui, &app.room, r.rect, |p| p == here);
+        }
+        if r.on_hover_text(tip).on_hover_cursor(CursorIcon::PointingHand).clicked() {
+            action = Some(a);
+        }
+        mx += w + 2.0;
     }
     // Picking a tab myself takes my view back from whoever I was following.
-    if matches!(action, Some(TabAction::Open(_) | TabAction::Map | TabAction::New)) {
+    if matches!(action, Some(TabAction::Open(_) | TabAction::Map | TabAction::New | TabAction::Plan | TabAction::Live)) {
         app.room.following = None;
     }
     match action {
@@ -152,6 +188,8 @@ pub fn tab_bar(app: &mut FactoryApp, ui: &mut Ui, bar: Rect) {
         Some(TabAction::Close(id)) => app.close_tab(id),
         Some(TabAction::Map) => app.view = View::Map,
         Some(TabAction::New) => app.new_factory(),
+        Some(TabAction::Plan) => app.leave_live(),
+        Some(TabAction::Live) => app.enter_live(),
         None => {}
     }
 }
@@ -159,6 +197,10 @@ pub fn tab_bar(app: &mut FactoryApp, ui: &mut Ui, bar: Rect) {
 /// Right-click on a factory's tab or its row in the factory list.
 pub fn factory_menu(app: &mut FactoryApp, ctx: &egui::Context) {
     let Some((id, pos)) = app.factory_menu else { return };
+    if app.live_view.on {
+        app.factory_menu = None;
+        return;
+    }
     if app.doc(id).is_none() {
         app.factory_menu = None;
         return;
@@ -337,8 +379,12 @@ pub fn factories_panel(app: &mut FactoryApp, ui: &mut Ui) {
     if matches!(action, Some(ListAction::Open(_) | ListAction::New)) {
         app.room.following = None;
     }
-    if menu_for.is_some() {
+    if menu_for.is_some() && !app.live_view.on {
         app.factory_menu = menu_for;
+    }
+    // The Live view's factories come from the map: open only.
+    if app.live_view.on && !matches!(action, Some(ListAction::Open(_))) {
+        action = None;
     }
     match action {
         Some(ListAction::Open(id)) => app.switch_to = Some(id),

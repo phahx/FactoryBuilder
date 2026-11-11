@@ -18,7 +18,8 @@ use fb_model::{GameData, PowerMode, PowerSettings, Recipe};
 /// by name.
 fn generator_groups(game: &GameData) -> Vec<(&str, Vec<&Recipe>)> {
     let mut groups: Vec<(&str, Vec<&Recipe>)> = Vec::new();
-    for r in game.recipes.values().filter(|r| r.is_generator()) {
+    // Not the hand-fed ones (Biomass Burners): nothing mined fuels them.
+    for r in game.recipes.values().filter(|r| r.is_generator() && !game.hand_fed_generators.contains(&r.class)) {
         match groups.iter_mut().find(|(b, _)| *b == r.building) {
             Some((_, list)) => list.push(r),
             None => groups.push((&r.building, vec![r])),
@@ -131,7 +132,7 @@ pub fn generated_mw(game: &GameData, graph: &FactoryGraph, id: NodeId, efficienc
 pub fn generator_footer(ui: &mut Ui, s: &mut UserState, graph: &FactoryGraph, node_id: NodeId, r: &Recipe) {
     let game = s.game.clone();
     let efficiency = s.nodes.get(&node_id).map(|n| n.efficiency).unwrap_or(1.0);
-    let produced = generated_mw(&game, graph, node_id, efficiency).unwrap_or(0.0);
+    let produced = s.live.get(&node_id).and_then(|l| l.makes_mw.or(l.mw.map(|_| 0.0))).map(f64::from).unwrap_or_else(|| generated_mw(&game, graph, node_id, efficiency).unwrap_or(0.0));
     let setup = crate::graph::machine_setup(&game, graph, node_id);
     let (r_div, _) = ui.allocate_exact_size(vec2(ui.available_width(), 1.0), egui::Sense::hover());
     ui.painter().rect_filled(r_div, 0.0, DIVIDER);
@@ -147,6 +148,7 @@ pub fn generator_footer(ui: &mut Ui, s: &mut UserState, graph: &FactoryGraph, no
         ui.vertical(|ui| {
             ui.spacing_mut().item_spacing.y = 0.0;
             widgets::name_label(ui, RichText::new(b.map(|b| b.name.as_str()).unwrap_or(&r.building)).color(TEXT));
+            crate::live_factory::status_line(ui, s, node_id);
             if let Some(line) = crate::graph::build_line(graph, node_id, &setup) {
                 widgets::name_label(ui, RichText::new(line).small().color(TEXT_DIM));
             }

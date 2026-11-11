@@ -412,7 +412,7 @@ impl FactoryApp {
         (2..).map(|k| format!("{base} {k}")).find(|n| !taken(n)).unwrap()
     }
 
-    fn take_live(&mut self) -> DocBody {
+    pub(crate) fn take_live(&mut self) -> DocBody {
         DocBody {
             state: std::mem::replace(&mut self.state, new_state()),
             planner: std::mem::take(&mut self.planner),
@@ -424,7 +424,7 @@ impl FactoryApp {
         }
     }
 
-    fn put_live(&mut self, b: DocBody) {
+    pub(crate) fn put_live(&mut self, b: DocBody) {
         self.state = b.state;
         self.state.style = theme::graph_style();
         self.planner = b.planner;
@@ -439,7 +439,7 @@ impl FactoryApp {
     }
 
     /// View state that belongs to the graph on screen.
-    fn reset_transient(&mut self) {
+    pub(crate) fn reset_transient(&mut self) {
         self.context_menu = None;
         self.context_targets.clear();
         self.finder = None;
@@ -668,7 +668,7 @@ impl FactoryApp {
     }
 
     /// Replaces everything with `docs`, opening `active`.
-    fn load_docs(&mut self, mut docs: Vec<Doc>, active: u32, tabs: Vec<u32>) {
+    pub(crate) fn load_docs(&mut self, mut docs: Vec<Doc>, active: u32, tabs: Vec<u32>) {
         if !docs.iter().any(|d| d.id == MASTER) {
             docs.insert(0, Doc { id: MASTER, name: "Project".into(), body: Some(Box::new(DocBody::new(Planner::default()))), info: None });
         }
@@ -795,17 +795,27 @@ impl FactoryApp {
     /// Builds a factory from the portable form into a new document body.
     /// Returns it and how many parts this game version doesn't have.
     pub(crate) fn body_from_file(&mut self, f: &FactoryFile) -> (DocBody, usize) {
+        let (body, ids) = self.body_from_file_indexed(f);
+        let skipped = ids.iter().filter(|n| n.is_none()).count();
+        (body, skipped)
+    }
+
+    /// As `body_from_file`, with the node made for each of the file's nodes
+    /// (None: this game version doesn't have it).
+    pub(crate) fn body_from_file_indexed(&mut self, f: &FactoryFile) -> (DocBody, Vec<Option<NodeId>>) {
         let saved = self.take_live();
         let saved_master = self.user.master;
+        let saved_live = std::mem::take(&mut self.user.live);
         self.user.master = false;
         self.put_live(DocBody::new(Planner::default()));
         self.planner = self.planner_from_portable(&f.plan);
-        let (_, skipped) = self.insert_portable(f, Vec2::ZERO);
+        let (ids, _) = self.insert_portable_indexed(f, Vec2::ZERO);
         self.committed = self.project_json();
         let body = self.take_live();
         self.put_live(saved);
         self.user.master = saved_master;
-        (body, skipped)
+        self.user.live = saved_live;
+        (body, ids)
     }
 
     /// Replaces everything with project `p`. Returns how many parts this
@@ -822,9 +832,11 @@ impl FactoryApp {
             }
             ids.insert(f.id, id);
         }
+        self.loaded_ids.clear();
         for f in &p.factories {
-            let (mut body, s) = self.body_from_file(&f.factory);
-            skipped += s;
+            let (mut body, made) = self.body_from_file_indexed(&f.factory);
+            skipped += made.iter().filter(|n| n.is_none()).count();
+            self.loaded_ids.insert(f.id, (ids[&f.id], made));
             // At most one HUB.
             body.planner.hub = f.hub && !docs.iter().any(|d| d.body.as_ref().is_some_and(|b| b.planner.hub));
             if body.planner.hub {
@@ -927,7 +939,7 @@ impl FactoryApp {
             g[n].inputs.iter().filter(|(_, x)| matches!(g[*x].value, PortValue::Item(_))).position(|(_, x)| *x == i)
         };
         let output_index = |o: OutputId| g[g[o].node].outputs.iter().position(|(_, x)| *x == o);
-        let io_node = |kind, item: &str, rate: f64, x: f32, y: f32| Node { kind, class: item.to_string(), machines: None, clock: None, sloops: None, rate: Some((rate * 1e4).round() / 1e4), name: None, color: None, item: None, purity: None, x, y };
+        let io_node = |kind, item: &str, rate: f64, x: f32, y: f32| Node { kind, class: item.to_string(), machines: None, clock: None, sloops: None, rate: Some((rate * 1e4).round() / 1e4), name: None, color: None, item: None, purity: None, x, y, planned: false };
         let mut row = 0.0;
         for (item, list) in &into {
             let at = f.nodes.len();
@@ -1049,7 +1061,7 @@ impl FactoryApp {
         if self.docs.iter().any(|d| d.name == "Smelting") {
             return;
         }
-        let node = |kind, class: &str, machines: Option<f64>, rate: Option<f64>, x: f32| Node { kind, class: class.into(), machines, clock: machines.map(|_| 100.0), sloops: None, rate, name: None, color: None, item: None, purity: None, x, y: 0.0 };
+        let node = |kind, class: &str, machines: Option<f64>, rate: Option<f64>, x: f32| Node { kind, class: class.into(), machines, clock: machines.map(|_| 100.0), sloops: None, rate, name: None, color: None, item: None, purity: None, x, y: 0.0, planned: false };
         let mut a = FactoryFile::new(Some("Smelting".into()));
         a.nodes = vec![
             node(Kind::Resource, "Desc_OreIron_C", None, Some(60.0), 0.0),

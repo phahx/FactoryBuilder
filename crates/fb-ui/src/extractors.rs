@@ -39,6 +39,10 @@ pub fn on_resource(g: &FactoryGraph, node: NodeId) -> bool {
 pub fn resource_footer(ui: &mut Ui, s: &mut UserState, graph: &FactoryGraph, node_id: NodeId, item: &str, purity: Purity) -> Vec<egui_node_graph2::NodeResponse<Resp, NodeData>> {
     let game = s.game.clone();
     let form = game.item_form(item);
+    // What's built isn't changed from the Live view.
+    if s.live_view && !graph[node_id].user_data.planned {
+        return vec![];
+    }
     // Only when what extracts it cares (a Water Extractor doesn't).
     let on_it: Vec<String> = graph[node_id]
         .outputs
@@ -109,7 +113,7 @@ pub fn footer(ui: &mut Ui, s: &mut UserState, graph: &FactoryGraph, node_id: Nod
         return;
     };
     let setup = machine_setup(&game, graph, node_id);
-    let mw = power(e, setup.count, setup.clock);
+    let mw = s.live.get(&node_id).and_then(|l| l.mw).map(f64::from).unwrap_or_else(|| power(e, setup.count, setup.clock));
     let (r_div, _) = ui.allocate_exact_size(vec2(ui.available_width(), 1.0), egui::Sense::hover());
     ui.painter().rect_filled(r_div, 0.0, DIVIDER);
     let each = fmt_rate_unit(e.per_min(purity, 1.0), game.item_form(item));
@@ -130,6 +134,7 @@ pub fn footer(ui: &mut Ui, s: &mut UserState, graph: &FactoryGraph, node_id: Nod
             if let Some(extra) = &extra {
                 crate::widgets::name_label(ui, RichText::new(extra).small().color(ACCENT));
             }
+            crate::live_factory::status_line(ui, s, node_id);
         });
     });
 }

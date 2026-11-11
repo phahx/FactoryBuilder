@@ -122,6 +122,11 @@ pub fn planner(app: &mut FactoryApp, ui: &mut Ui) {
         });
         return;
     }
+    if app.live_view.on {
+        widgets::panel_header(ui, &app.doc_name(app.active));
+        padded(ui, |ui| crate::live_factory::panel(app, ui));
+        return;
+    }
     widgets::panel_header(ui, "Production plan");
     if !app.game_loaded {
         padded(ui, |ui| {

@@ -79,9 +79,16 @@ pub enum NodeKind {
     Output {
         item: String,
     },
-    /// AWESOME Sink / storage: takes whatever arrives.
+    /// AWESOME Sink: takes whatever arrives.
     Sink {
         item: String,
+    },
+    /// Storage of one item (storage.rs): a Storage Container, Industrial
+    /// Storage Container, Fluid Buffer... (`class`, the building). Takes in
+    /// whatever arrives and supplies up to its rate.
+    Storage {
+        item: String,
+        class: String,
     },
     /// A whole factory on the project's master graph: what it takes in and
     /// sends out per minute (item class, rate), copied from the factory.
@@ -139,6 +146,7 @@ impl NodeKind {
             NodeKind::Input { item } => Template::Input(item),
             NodeKind::Output { item } => Template::Output(item),
             NodeKind::Sink { item } => Template::Sink(item),
+            NodeKind::Storage { item, class } => Template::Storage { item, class },
             NodeKind::Factory { id, .. } => Template::Factory(id),
             NodeKind::Pole { id } => Template::Pole(id),
             NodeKind::Merger { item } => Template::Merger(item),
@@ -156,7 +164,8 @@ impl NodeKind {
             NodeKind::Resource { item, .. }
             | NodeKind::Input { item }
             | NodeKind::Output { item }
-            | NodeKind::Sink { item } => Some(item),
+            | NodeKind::Sink { item }
+            | NodeKind::Storage { item, .. } => Some(item),
             NodeKind::Factory { hub: true, .. } => Some(fb_model::HUB_BUILDING),
             // A factory shows its first product.
             NodeKind::Factory { outs, .. } => outs.first().map(|(item, _)| item.as_str()),
@@ -174,6 +183,10 @@ pub struct NodeData {
     /// Colour label shown as a strip across the top of the header.
     #[serde(default)]
     pub color: Option<[u8; 3]>,
+    /// In the Live view (live_factory.rs): a planned piece, added in
+    /// planning mode, not something built.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub planned: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -183,6 +196,11 @@ pub enum Template {
     Input(String),
     Output(String),
     Sink(String),
+    /// Storage of `item` in building `class`.
+    Storage {
+        item: String,
+        class: String,
+    },
     /// A factory block on the master graph.
     Factory(u32),
     /// A power pole on the master graph.
@@ -245,6 +263,14 @@ pub struct UserState {
     /// The master graph is the one being drawn.
     #[serde(skip)]
     pub master: bool,
+    /// The Live view's project is the one drawn: what's built shows its
+    /// settings, not fields to change (planned pieces keep theirs).
+    #[serde(skip)]
+    pub live_view: bool,
+    /// A live factory's graph is being drawn: per node, what's live about
+    /// it (live_factory.rs).
+    #[serde(skip)]
+    pub live: HashMap<NodeId, crate::live_factory::LiveNode>,
     /// Power wires drawn bright (from node, to node): the ones about what's
     /// selected or under the pointer (power_net::lit_wires).
     #[serde(skip)]
@@ -280,6 +306,25 @@ impl UserState {
         if let Some(a) = self.assets.as_mut() {
             a.item(ui, class, size);
         }
+    }
+
+    /// An item icon with a count on it, bottom right, as the game's
+    /// inventory slots show one (Live view).
+    pub(crate) fn item_icon_count(&mut self, ui: &mut Ui, class: &str, size: f32, count: Option<&str>) -> egui::Response {
+        let size = size * self.z();
+        let (r, resp) = ui.allocate_exact_size(vec2(size, size), egui::Sense::hover());
+        if let Some(uri) = self.assets.as_mut().and_then(|a| a.item_uri(class)) {
+            egui::Image::new(uri).paint_at(ui, r);
+        }
+        if let Some(c) = count {
+            let font = egui::FontId::proportional((11.0 * self.z()).max(8.0));
+            let g = ui.painter().layout_no_wrap(c.to_string(), font, TEXT);
+            let at = r.right_bottom() - g.size() + vec2(1.0, 1.0);
+            let shadow = ui.painter().layout_no_wrap(c.to_string(), egui::FontId::proportional((11.0 * self.z()).max(8.0)), Color32::BLACK);
+            ui.painter().galley(at + vec2(1.0, 1.0), shadow, Color32::BLACK);
+            ui.painter().galley(at, g, TEXT);
+        }
+        resp
     }
 
     pub(crate) fn ui_icon(&mut self, ui: &mut Ui, icon: UiIcon, size: f32, tint: Color32) {
@@ -358,6 +403,7 @@ impl Template {
             Template::Input(item) => NodeKind::Input { item },
             Template::Output(item) => NodeKind::Output { item },
             Template::Sink(item) => NodeKind::Sink { item },
+            Template::Storage { item, class } => NodeKind::Storage { item, class },
             Template::Factory(id) => NodeKind::Factory { id, ins: Vec::new(), outs: Vec::new(), uses_mw: 0.0, makes_mw: 0.0, hub: false },
             Template::Pole(id) => NodeKind::Pole { id },
             Template::Merger(item) => NodeKind::Merger { item },
@@ -393,6 +439,7 @@ impl NodeTemplateTrait for Template {
             Template::Input(_) => "Inputs".into(),
             Template::Output(_) => "Outputs".into(),
             Template::Sink(_) => "Sinks".into(),
+            Template::Storage { .. } => "Storage".into(),
             Template::Factory(_) => "Factories".into(),
             Template::Pole(_) | Template::Burner(_) => "Power".into(),
             Template::Merger(_) | Template::Splitter(_) | Template::Pump { .. } => "Logistics".into(),
@@ -412,6 +459,7 @@ impl NodeTemplateTrait for Template {
             | Template::Input(i)
             | Template::Output(i)
             | Template::Sink(i) => s.game.item_name(i).to_string(),
+            Template::Storage { class, .. } => crate::storage::name(&s.game, class),
             Template::Factory(id) => s.factories.get(id).map(|f| f.name.clone()).unwrap_or_else(|| "Factory".into()),
             Template::Pole(_) => "Power pole".into(),
             Template::Merger(_) | Template::Splitter(_) | Template::Pump { .. } => crate::routers::name(&s.game, &self.kind()).into(),
@@ -428,7 +476,7 @@ impl NodeTemplateTrait for Template {
             }
             t => t.kind(),
         };
-        NodeData { kind, color: None }
+        NodeData { kind, color: None, planned: false }
     }
 
     fn build_node(&self, graph: &mut FactoryGraph, s: &mut UserState, node_id: NodeId) {
@@ -482,6 +530,11 @@ impl NodeTemplateTrait for Template {
                 item_in(graph, i);
             }
             Template::Sink(i) => item_in(graph, i),
+            Template::Storage { item, .. } => {
+                constant(graph, RATE, number(0.0, 0.0, 1e6, unit(item)));
+                item_in(graph, item);
+                item_out(graph, item);
+            }
             Template::Factory(id) => {
                 let f = s.factories.get(id).cloned().unwrap_or_default();
                 for (item, _) in &f.ins {
@@ -598,6 +651,19 @@ impl WidgetValueTrait for PortValue {
                 return vec![];
             }
         }
+        if let (true, false, PortValue::Number { value, suffix, .. }) = (s.live_view, d.planned, &*self) {
+            let (v, suffix) = (fmt_num(*value), suffix.clone());
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(name).color(TEXT_DIM));
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if !suffix.is_empty() {
+                        ui.label(RichText::new(suffix).color(TEXT_DIM));
+                    }
+                    ui.label(RichText::new(v).color(TEXT));
+                });
+            });
+            return vec![];
+        }
         match self {
             PortValue::Number {
                 value,
@@ -668,9 +734,10 @@ fn port_row(ui: &mut Ui, s: &mut UserState, node_id: NodeId, name: &str, item: &
     };
     // Sized allocation: `with_layout` would hand the row all remaining
     // height and centre it there, stretching the node.
+    let held = s.live.get(&node_id).and_then(|l| l.held_of(item)).map(|n| crate::live_factory::count_text(n, form.is_fluid()));
     ui.allocate_ui_with_layout(vec2(ui.available_width(), 0.0), layout, |ui| {
         ui.spacing_mut().item_spacing.x = 6.0;
-        s.item_icon(ui, item, 24.0);
+        s.item_icon_count(ui, item, 24.0, held.as_deref());
         ui.vertical(|ui| {
             ui.spacing_mut().item_spacing.y = 0.0;
             let align = if input {
@@ -744,8 +811,9 @@ impl NodeDataTrait for NodeData {
         };
         match &self.kind {
             NodeKind::Pole { id } => crate::power_net::wire_count(graph, node_id) < crate::power_net::max_wires(s.pole_tiers.get(id).copied().unwrap_or(1)),
-            // A whole factory's block takes any number of links.
-            NodeKind::Factory { .. } => true,
+            // A whole factory's block takes any number of links; a storage
+            // node can stand for several containers.
+            NodeKind::Factory { .. } | NodeKind::Storage { .. } => true,
             // A resource is the ground, not a belt: any number of extractors
             // can stand on it.
             NodeKind::Resource { .. } if matches!(port, AnyParameterId::Output(_)) => true,
@@ -822,6 +890,7 @@ impl NodeDataTrait for NodeData {
                 NodeKind::Input { .. } => Some("Input"),
                 NodeKind::Output { .. } => Some("Output"),
                 NodeKind::Sink { .. } => Some("Sink"),
+                NodeKind::Storage { .. } => Some("Storage"),
                 NodeKind::Pole { .. } | NodeKind::Merger { .. } | NodeKind::Splitter { .. } | NodeKind::Pump { .. } => None,
                 NodeKind::Extractor { .. } => {
                     let eff = s.nodes.get(&node_id).map(|n| n.efficiency).unwrap_or(1.0);
@@ -832,6 +901,9 @@ impl NodeDataTrait for NodeData {
             };
             if let Some(c) = caption {
                 ui.label(RichText::new(c).small().color(TEXT_DIM));
+            }
+            if self.planned {
+                ui.label(RichText::new("Planned").small().color(ACCENT)).on_hover_text("A planned piece (Live view, planning mode): not built.");
             }
             let game = s.game.clone();
             if let Some(item) = self.kind.icon_item(&game) {
@@ -849,7 +921,7 @@ impl NodeDataTrait for NodeData {
         _graph: &FactoryGraph,
         _s: &mut UserState,
     ) -> Option<Color32> {
-        Some(HEADER)
+        Some(if self.planned { DISABLED } else { HEADER })
     }
 
     /// A factory block that needs power and gets none (or not enough); an
@@ -941,7 +1013,8 @@ impl NodeDataTrait for NodeData {
                     return vec![];
                 }
                 let setup = machine_setup(&game, graph, node_id);
-                let power = s.nodes.get(&node_id).map(|n| n.power_mw).unwrap_or(0.0);
+                // Live: what they draw now.
+                let power = s.live.get(&node_id).and_then(|l| l.mw).map(f64::from).unwrap_or_else(|| s.nodes.get(&node_id).map(|n| n.power_mw).unwrap_or(0.0));
                 let (r_div, _) =
                     ui.allocate_exact_size(vec2(ui.available_width(), 1.0), egui::Sense::hover());
                 ui.painter().rect_filled(r_div, 0.0, DIVIDER);
@@ -966,6 +1039,7 @@ impl NodeDataTrait for NodeData {
                         if let Some(extra) = &extra {
                             widgets::name_label(ui, RichText::new(extra).small().color(ACCENT));
                         }
+                        crate::live_factory::status_line(ui, s, node_id);
                     });
                 });
             }
@@ -988,6 +1062,7 @@ impl NodeDataTrait for NodeData {
                     widgets::name_label(ui, RichText::new(format!("{n} {}", if n == 1 { "building" } else { "buildings" })).small().color(TEXT_DIM));
                 });
             }
+            NodeKind::Storage { item, class } => crate::storage::footer(ui, s, node_id, item, class),
             NodeKind::Sink { item } => {
                 let got = graph[node_id]
                     .inputs
@@ -1130,6 +1205,11 @@ pub fn node_rates(
             item_inputs.map(|(name, _)| (name.clone(), 0.0)).collect(),
             vec![],
         ),
+        // Takes whatever arrives; supplies up to its rate.
+        NodeKind::Storage { .. } => {
+            let rate = input_number(graph, node, RATE);
+            (item_inputs.map(|(name, _)| (name.clone(), 0.0)).collect(), n.outputs.iter().map(|(name, _)| (name.clone(), rate)).collect())
+        }
         NodeKind::Factory { ins, outs, .. } => {
             let rate = |list: &[(String, f64)], item: &str| list.iter().filter(|(i, _)| i == item).map(|(_, r)| *r).sum::<f64>();
             // Power ports come after the item ports and aren't items.

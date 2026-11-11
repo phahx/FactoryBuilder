@@ -571,6 +571,7 @@ fn a_wire_let_go_on_the_canvas_offers_what_fits_and_connects_it() {
             crate::graph::Template::Recipe(r) => game.recipes[r].ingredients.iter().any(|a| a.item == "Desc_IronIngot_C"),
             crate::graph::Template::Output(x) | crate::graph::Template::Sink(x) => x == "Desc_IronIngot_C",
             crate::graph::Template::Merger(x) | crate::graph::Template::Splitter(x) => x == "Desc_IronIngot_C",
+            crate::graph::Template::Storage { item, .. } => item == "Desc_IronIngot_C",
             _ => false,
         };
         assert!(ok, "{} doesn't take Iron Ingot", catalog.entries[i].title);
@@ -1747,7 +1748,7 @@ fn generator_list_picks_fuels() {
     want.sort();
     assert_eq!(app.planner_mut().power.generators, want);
     let g = fb_engine::docs::load_game_data(std::path::Path::new(&game_dir())).unwrap();
-    let total = g.recipes.values().filter(|r| r.is_generator()).count();
+    let total = g.recipes.values().filter(|r| r.is_generator() && !g.hand_fed_generators.contains(&r.class)).count();
     assert!(text_rect(&ctx, &mut app, &format!("2 of {total} allowed")).is_some());
     press(&ctx, &mut app, "From the grid");
     assert_eq!(app.planner_mut().power.mode, PowerMode::Grid);
@@ -1994,7 +1995,7 @@ fn zooming_keeps_graph_coordinates_stable() {
 /// Smelter(s) making Iron Ingots from ore, delivered as an output.
 fn ingot_factory(name: &str, smelters: f64) -> crate::portable::FactoryFile {
     use crate::portable::{FactoryFile, Kind, Node, Wire};
-    let node = |kind, class: &str, machines: Option<f64>, rate: Option<f64>, x: f32| Node { kind, class: class.into(), machines, clock: machines.map(|_| 100.0), sloops: None, rate, name: None, color: None, item: None, purity: None, x, y: 0.0 };
+    let node = |kind, class: &str, machines: Option<f64>, rate: Option<f64>, x: f32| Node { kind, class: class.into(), machines, clock: machines.map(|_| 100.0), sloops: None, rate, name: None, color: None, item: None, purity: None, x, y: 0.0, planned: false };
     let mut f = FactoryFile::new(Some(name.into()));
     f.nodes.push(node(Kind::Resource, "Desc_OreIron_C", None, Some(30.0 * smelters), 0.0));
     f.nodes.push(node(Kind::Recipe, "Recipe_IngotIron_C", Some(smelters), None, 400.0));
@@ -2007,7 +2008,7 @@ fn ingot_factory(name: &str, smelters: f64) -> crate::portable::FactoryFile {
 /// Constructors turning 60 Iron Ingots from elsewhere into 60 Iron Rods.
 fn rod_factory(name: &str) -> crate::portable::FactoryFile {
     use crate::portable::{FactoryFile, Kind, Node, Wire};
-    let node = |kind, class: &str, machines: Option<f64>, rate: Option<f64>, x: f32| Node { kind, class: class.into(), machines, clock: machines.map(|_| 100.0), sloops: None, rate, name: None, color: None, item: None, purity: None, x, y: 0.0 };
+    let node = |kind, class: &str, machines: Option<f64>, rate: Option<f64>, x: f32| Node { kind, class: class.into(), machines, clock: machines.map(|_| 100.0), sloops: None, rate, name: None, color: None, item: None, purity: None, x, y: 0.0, planned: false };
     let mut f = FactoryFile::new(Some(name.into()));
     f.nodes.push(node(Kind::Input, "Desc_IronIngot_C", None, Some(60.0), 0.0));
     f.nodes.push(node(Kind::Recipe, "Recipe_IronRod_C", Some(4.0), None, 400.0));
@@ -2140,9 +2141,9 @@ fn power_plant(app: &FactoryApp, name: &str, machines: f64) -> crate::portable::
     let gen = fb_model::DEFAULT_GENERATOR;
     let r = &app.user.game.recipes[gen];
     let mut f = FactoryFile::new(Some(name.into()));
-    f.nodes.push(Node { kind: Kind::Recipe, class: gen.into(), machines: Some(machines), clock: Some(100.0), sloops: None, rate: None, name: None, color: None, item: None, purity: None, x: 400.0, y: 0.0 });
+    f.nodes.push(Node { kind: Kind::Recipe, class: gen.into(), machines: Some(machines), clock: Some(100.0), sloops: None, rate: None, name: None, color: None, item: None, purity: None, x: 400.0, y: 0.0, planned: false });
     for (k, a) in r.ingredients.iter().enumerate() {
-        f.nodes.push(Node { kind: Kind::Input, class: a.item.clone(), machines: None, clock: None, sloops: None, rate: Some(r.per_min(a) * machines), name: None, color: None, item: None, purity: None, x: 0.0, y: 200.0 * k as f32 });
+        f.nodes.push(Node { kind: Kind::Input, class: a.item.clone(), machines: None, clock: None, sloops: None, rate: Some(r.per_min(a) * machines), name: None, color: None, item: None, purity: None, x: 0.0, y: 200.0 * k as f32, planned: false });
         f.wires.push(Wire { from: k + 1, output: 0, to: 0, input: k, slot: 0, belt: None });
     }
     f
@@ -2929,7 +2930,7 @@ fn moving_a_selection_to_a_new_factory_keeps_the_totals() {
     use crate::portable::{FactoryFile, Kind, Node, Wire};
     let Some((ctx, mut app, _)) = harness() else { return };
     frames(&ctx, &mut app, 2);
-    let node = |kind, class: &str, machines: Option<f64>, rate: Option<f64>, x: f32| Node { kind, class: class.into(), machines, clock: machines.map(|_| 100.0), sloops: None, rate, name: None, color: None, item: None, purity: None, x, y: 0.0 };
+    let node = |kind, class: &str, machines: Option<f64>, rate: Option<f64>, x: f32| Node { kind, class: class.into(), machines, clock: machines.map(|_| 100.0), sloops: None, rate, name: None, color: None, item: None, purity: None, x, y: 0.0, planned: false };
     let mut f = FactoryFile::new(Some("Rods".into()));
     f.nodes = vec![
         node(Kind::Resource, "Desc_OreIron_C", None, Some(30.0), 0.0),
@@ -3133,7 +3134,7 @@ fn right_click_on_the_master_graph_adds_a_factory_there() {
 
     // From a file: the block goes to the menu's spot too, once the file is read.
     let mut f = crate::portable::FactoryFile::new(Some("Smelting".into()));
-    f.nodes.push(crate::portable::Node { kind: crate::portable::Kind::Resource, class: "Desc_OreIron_C".into(), machines: None, clock: None, sloops: None, rate: Some(60.0), name: None, color: None, item: None, purity: None, x: 0.0, y: 0.0 });
+    f.nodes.push(crate::portable::Node { kind: crate::portable::Kind::Resource, class: "Desc_OreIron_C".into(), machines: None, clock: None, sloops: None, rate: Some(60.0), name: None, color: None, item: None, purity: None, x: 0.0, y: 0.0, planned: false });
     store.borrow_mut().insert("C:/Factories/Smelting.fbfactory".into(), f.to_json(false));
     let spot2 = egui::pos2(only.right() + 150.0, only.bottom() + 200.0);
     assert!(!app.node_rects.values().any(|r| r.contains(spot2)));
@@ -3613,7 +3614,7 @@ fn live_buildings_are_laid_over_the_save() {
         ]),
         errors: vec![],
     };
-    let out = crate::live::merge(&base, &live, &game);
+    let out = crate::live::merge(&base, &live, None, &game);
     let w = &out.world;
     let ids: Vec<u32> = w.machines.iter().map(|m| m.id).collect();
     assert_eq!(ids, vec![0, 1, 2], "ids stay indexes");
@@ -3628,5 +3629,204 @@ fn live_buildings_are_laid_over_the_save() {
     assert_eq!(classes, vec!["Build_ConveyorBeltMk1_C", "Build_ConveyorLiftMk1_C", "Build_ConveyorBeltMk2_C"], "matched either way round; lifts stay; the gone one goes");
     // Without the mod's machines, the save's stay as they are.
     let partial = LiveBuildings { machines: None, carriers: None, errors: vec!["no answer".into()] };
-    assert_eq!(crate::live::merge(&base, &partial, &game).world.machines.len(), 3);
+    assert_eq!(crate::live::merge(&base, &partial, None, &game).world.machines.len(), 3);
+}
+
+/// The Live view: a live factory's graph from a region over the save. Its
+/// nodes move, settings stay as built; in planning mode pieces can be added
+/// and wired, and planned pieces have their menu.
+#[test]
+fn live_view_moves_nodes_and_plans() {
+    let (world, map) = sample_world();
+    let region = fb_model::LiveFactoryDef { name: "Plates".into(), region: vec![[39_000.0, 40_000.0], [60_000.0, 40_000.0], [60_000.0, 60_000.0], [39_000.0, 60_000.0]], ..Default::default() };
+    let r2 = region.clone();
+    let hook: RoomHook = Rc::new(move |cmd: &str, _args: &Value| {
+        let settings = || {
+            let mut s = Settings { setup_done: true, ..Default::default() };
+            s.live.enabled = true;
+            s.live.factories = vec![r2.clone()];
+            s
+        };
+        match cmd {
+            "status" => Some(Ok(serde_json::to_value(Status { icons_found: 747, ui_assets_found: 17, map_found: true, settings: settings(), ..Default::default() }).unwrap())),
+            "map_info" => Some(Ok(serde_json::to_value(&map).unwrap())),
+            "map_tile" => Some(Err("no tiles in tests".into())),
+            "world_sessions" => Some(Ok(json!([]))),
+            _ => None,
+        }
+    });
+    let Some((ctx, mut app, _)) = harness_with(Some(hook)) else { return };
+    frames(&ctx, &mut app, 2);
+    app.map.set_world(world);
+    app.open_live("Plates");
+    frames(&ctx, &mut app, 4);
+    eprintln!("live on {} active {} name {} nodes {} docs {:?}", app.live_view.on, app.active, app.doc_name(app.active), app.node_count(), app.docs.iter().map(|d| (d.id, d.name.clone())).collect::<Vec<_>>());
+    assert!(app.live_view.on && app.doc_name(app.active) == "Plates", "the live factory is open");
+    let planned: Vec<bool> = app.graph().nodes.iter().map(|(_, n)| n.user_data.planned).collect();
+    eprintln!("planned flags {planned:?}");
+    assert!(planned.iter().all(|p| !p), "nothing built is planned");
+    // Move a node by its title.
+    let (id, rect, before) = app.first_node().expect("a node");
+    let start = rect.left_top() + egui::vec2(30.0, 12.0);
+    drag(&ctx, &mut app, start, start + egui::vec2(80.0, 0.0));
+    let moved = app.node_pos(id) - before;
+    eprintln!("moved by {moved:?}, toast {:?}", app.toast);
+    assert!(moved.x > 40.0, "the node moved: {moved:?}");
+    // Kept: the live project built again from nothing (as after reconnecting
+    // or restarting) puts it back where it was moved to.
+    let kind = app.graph()[id].user_data.kind.clone();
+    let at = app.node_pos_unzoomed(id);
+    assert!(app.live_settings().layouts.contains_key("Test|Plates"), "the layout is saved, for this session: {:?}", app.live_settings().layouts.keys().collect::<Vec<_>>());
+    assert_eq!(app.live_settings().factories[0].world, "Test", "the region belongs to the session it was seen with");
+    app.leave_live();
+    app.live_view = Default::default();
+    app.open_live("Plates");
+    frames(&ctx, &mut app, 4);
+    let again = app.graph().nodes.iter().find(|(_, n)| n.user_data.kind == kind).map(|(i, _)| i).expect("the node again");
+    let back = app.node_pos_unzoomed(again);
+    assert!((back - at).length() < 1.0, "same place after a rebuild: {back:?} vs {at:?}");
+    let (id, rect, _) = app.first_node().expect("a node");
+    let _ = (id, rect);
+    // Right-click a built node: no editing menu; right-click the canvas
+    // in planning mode: Add node.
+    app.set_planning(true);
+    frames(&ctx, &mut app, 3);
+    let spot = empty_spot(&app);
+    click(&ctx, &mut app, spot, egui::PointerButton::Secondary);
+    eprintln!("finder open {}", app.finder.is_some());
+    assert!(app.finder.is_some(), "Add node opens in planning mode");
+    // Add a planned Iron Ingot smelter: marked planned, kept.
+    frame_with(&ctx, &mut app, vec![egui::Event::Text("iron ingot".into())]);
+    frames(&ctx, &mut app, 1);
+    frame_with(&ctx, &mut app, vec![egui::Event::Key { key: egui::Key::Enter, physical_key: None, pressed: true, repeat: false, modifiers: Default::default() }]);
+    frames(&ctx, &mut app, 3);
+    let planned: Vec<egui_node_graph2::NodeId> = app.graph().nodes.iter().filter(|(_, n)| n.user_data.planned).map(|(id, _)| id).collect();
+    eprintln!("planned nodes {} toast {:?}", planned.len(), app.toast);
+    assert_eq!(planned.len(), 1, "one planned piece");
+    // Wire the built iron ore deposit (any number of wires) into the plan.
+    use egui_node_graph2::AnyParameterId;
+    let g = app.graph();
+    let plate_out = g.nodes.iter().filter(|(_, n)| !n.user_data.planned).flat_map(|(_, n)| n.outputs.iter().map(|(_, o)| *o)).find(|o| g[*o].typ.0 == "Desc_OreIron_C").expect("a built ore output");
+    let plate_in = g[planned[0]].inputs.iter().map(|(_, i)| *i).find(|i| g[*i].typ.0 == "Desc_OreIron_C").expect("planned ore input");
+    frames(&ctx, &mut app, 1);
+    let from = *app.port_hooks[&AnyParameterId::Output(plate_out)].last().unwrap();
+    let to = app.port_hooks[&AnyParameterId::Input(plate_in)][0];
+    drag(&ctx, &mut app, from, to);
+    frames(&ctx, &mut app, 2);
+    let wired = app.graph().connections(plate_in).contains(&plate_out);
+    eprintln!("planned wire made {wired} toast {:?}", app.toast);
+    assert!(wired, "a planned wire from what's built to the plan");
+    // Kept with the live factory.
+    let plan = app.live_defs()[0].plan.clone();
+    eprintln!("plan saved {} chars", plan.len());
+    assert!(plan.contains("Recipe_IngotIron_C") && plan.contains("Desc_OreIron_C"), "the plan and its wire are saved: {plan}");
+    // Right-click a built node: its menu, without Delete or Duplicate.
+    let built = app.graph().nodes.iter().find(|(_, n)| !n.user_data.planned).map(|(id, _)| id).unwrap();
+    let rect = app.node_rects[&built];
+    click(&ctx, &mut app, rect.left_top() + egui::vec2(30.0, 12.0), egui::PointerButton::Secondary);
+    let labels: Vec<String> = crate::widgets::TEST_BUTTONS.with(|b| b.borrow().iter().map(|(l, _, _)| l.clone()).collect());
+    eprintln!("menu open {} labels {:?}", app.context_menu.is_some(), labels.iter().filter(|l| ["Delete", "Duplicate", "Add comment frame", "Rename"].contains(&l.as_str())).collect::<Vec<_>>());
+    assert!(app.context_menu.is_some(), "the menu opens on a built node");
+    assert!(!labels.iter().any(|l| l == "Delete" || l == "Duplicate"), "nothing that changes it");
+    // Planning mode off: only what's built; on again: the plan is back, wired.
+    frame_with(&ctx, &mut app, key(egui::Key::Escape));
+    app.set_planning(false);
+    frames(&ctx, &mut app, 3);
+    assert!(app.graph().nodes.iter().all(|(_, n)| !n.user_data.planned), "no planned pieces with planning mode off");
+    app.set_planning(true);
+    frames(&ctx, &mut app, 3);
+    let g = app.graph();
+    let back: Vec<_> = g.nodes.iter().filter(|(_, n)| n.user_data.planned).map(|(id, _)| id).collect();
+    assert_eq!(back.len(), 1, "the planned piece is back");
+    let wired_back = g[back[0]].inputs.iter().any(|(_, i)| !g.connections(*i).is_empty());
+    assert!(wired_back, "with its wire");
+}
+
+/// Generators in a region count, even a Biomass Burner holding no fuel.
+#[test]
+fn live_regions_take_their_generators() {
+    let Some((ctx, mut app, _)) = harness() else { return };
+    frames(&ctx, &mut app, 2);
+    let (mut world, _) = sample_world();
+    let id = world.machines.len() as u32;
+    world.machines.push(fb_model::world::Machine { id, class: "Build_GeneratorBiomass_Automated_C".into(), recipe: None, clock: 1.0, boost: 1.0, x: 41_000.0, y: 50_000.0, z: 0.0, yaw: 0.0, node: None });
+    let def = fb_model::LiveFactoryDef { name: "Plates".into(), region: vec![[39_000.0, 40_000.0], [60_000.0, 40_000.0], [60_000.0, 60_000.0], [39_000.0, 60_000.0]], ..Default::default() };
+    let lp = crate::map_import::region_project(&world, &[def], &Default::default(), &app.user.game, None);
+    let f = &lp.file.factories[0].factory;
+    eprintln!("GEN count {}", app.user.game.recipes.keys().filter(|k| k.starts_with(fb_model::GENERATOR_PREFIX)).count()); for r in app.user.game.recipes.values().filter(|r| r.class.starts_with(fb_model::GENERATOR_PREFIX)).take(3) { eprintln!("RECIPE {} building {} gen {}", r.class, r.building, r.is_generator()); }
+    let gens: Vec<&str> = f.nodes.iter().filter(|n| n.class.starts_with(fb_model::GENERATOR_PREFIX)).map(|n| n.class.as_str()).collect();
+    assert_eq!(gens.len(), 1, "the burner is in the factory: {:?}", f.nodes.iter().map(|n| &n.class).collect::<Vec<_>>());
+    assert!(gens[0].contains("Build_GeneratorBiomass_Automated_C"));
+}
+
+/// The save's HUB on the live master graph: its burners burning what they
+/// burn in game, and on their power circuit with a factory.
+#[test]
+fn live_hub_has_the_saves_burners_and_power() {
+    let Some((ctx, mut app, _)) = harness() else { return };
+    frames(&ctx, &mut app, 2);
+    let (mut world, _) = sample_world();
+    world.structures.push(fb_model::world::Structure { class: "Build_TradingPost_C".into(), x: 10_000.0, y: 10_000.0, yaw: 0.0, circuit: None, power: None });
+    world.hub_burners = vec![
+        fb_model::world::HubBurner { x: 10_000.0, y: 10_100.0, circuit: Some(0), makes: 12.0, fuel: Some("Desc_Leaves_C".into()), fuel_amount: None },
+        fb_model::world::HubBurner { x: 10_000.0, y: 10_200.0, circuit: Some(0), makes: 0.0, fuel: None, fuel_amount: None },
+    ];
+    world.circuits = vec![fb_model::world::Circuit::default()];
+    world.machine_circuit.insert(1, 0);
+    let def = fb_model::LiveFactoryDef { name: "Plates".into(), region: vec![[39_000.0, 40_000.0], [60_000.0, 40_000.0], [60_000.0, 60_000.0], [39_000.0, 60_000.0]], ..Default::default() };
+    let lp = crate::map_import::region_project(&world, &[def], &Default::default(), &app.user.game, None);
+    let hub = lp.file.factories.iter().find(|f| f.hub).expect("the HUB");
+    let burners: Vec<&str> = hub.factory.nodes.iter().filter(|n| n.kind == crate::portable::Kind::Burner).map(|n| n.class.as_str()).collect();
+    assert_eq!(burners.len(), 2, "both burners");
+    assert!(burners.contains(&"Desc_Leaves_C"), "burning leaves, as in game: {burners:?}");
+    assert!(hub.factory.wires.len() == 2, "each fed its fuel");
+    use crate::power_net::End;
+    let linked = lp.file.power_links.iter().any(|l| l.from == End::Factory(hub.id) || l.to == End::Factory(hub.id));
+    assert!(linked, "the HUB is on the factory's circuit: {:?}", lp.file.power_links);
+}
+
+/// A live factory shows only with the save session it was drawn on.
+#[test]
+fn live_regions_belong_to_their_session() {
+    let Some((ctx, mut app, _)) = harness() else { return };
+    frames(&ctx, &mut app, 2);
+    let (mut world, _) = sample_world();
+    let region = fb_model::LiveFactoryDef { name: "Plates".into(), world: "Test".into(), region: vec![[39_000.0, 40_000.0], [60_000.0, 40_000.0], [60_000.0, 60_000.0], [39_000.0, 60_000.0]], ..Default::default() };
+    if let Some(s) = app.status.as_mut() {
+        s.settings.live.enabled = true;
+        s.settings.live.factories = vec![region];
+    }
+    app.map.set_world(world.clone());
+    assert_eq!(app.world_defs().len(), 1, "its own session");
+    app.live_outlines_refresh();
+    assert_eq!(app.live_map.outlines.len(), 1);
+    world.save.session = "Another".into();
+    app.map.set_world(world);
+    assert!(app.world_defs().is_empty(), "not on another session's map");
+    app.live_outlines_refresh();
+    assert!(app.live_map.outlines.is_empty(), "no outline there");
+}
+
+/// A newer build: a notice offers it, and only the button installs it.
+#[test]
+fn an_update_is_offered_and_installed_only_when_asked() {
+    let calls: Calls = Default::default();
+    let log = calls.clone();
+    let hook: RoomHook = Rc::new(move |cmd: &str, args: &Value| {
+        log.borrow_mut().push((cmd.to_string(), args.clone()));
+        match cmd {
+            "update_check" => Some(Ok(json!({ "build": 9, "current": 7, "title": "Factory Builder 0.1.0 (build 9)", "size": 50_000_000 }))),
+            "update_apply" => Some(Ok(Value::Null)),
+            _ => None,
+        }
+    });
+    let Some((ctx, mut app, _)) = harness_with(Some(hook)) else { return };
+    frames(&ctx, &mut app, 4);
+    let texts = drawn_texts(&ctx, &mut app);
+    assert!(texts.iter().any(|t| t.contains("build 9 (you have build 7)")), "the notice shows");
+    assert!(!calls.borrow().iter().any(|(c, _)| c == "update_apply"), "nothing installed without asking");
+    press(&ctx, &mut app, "Update and restart");
+    frames(&ctx, &mut app, 2);
+    assert_eq!(calls.borrow().iter().filter(|(c, _)| c == "update_check").count(), 1, "checked once");
+    assert!(calls.borrow().iter().any(|(c, _)| c == "update_apply"), "installed when asked");
 }

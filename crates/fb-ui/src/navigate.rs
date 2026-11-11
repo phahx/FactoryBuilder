@@ -57,6 +57,10 @@ impl FactoryApp {
             NodeKind::Input { .. } => parts.push("Input".into()),
             NodeKind::Output { .. } => parts.push("Output".into()),
             NodeKind::Sink { .. } => parts.push("Sink".into()),
+            NodeKind::Storage { item, .. } => {
+                parts.push("Storage".into());
+                parts.push(game.item_name(item).to_string());
+            }
             NodeKind::Factory { .. } => parts.push("Factory".into()),
             NodeKind::Pole { .. } => parts.push("Power pole".into()),
             NodeKind::Burner { fuel } => {

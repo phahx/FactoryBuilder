@@ -916,3 +916,18 @@ fn real_save_power() {
     assert_eq!(hub.len(), 1, "the HUB is on the map");
     assert!(!w.machines.iter().any(|m| m.class.starts_with("Build_GeneratorIntegratedBiomass")), "its burners are part of it");
 }
+
+/// A real save's HUB burners (FB_HUB_SAVE: a save's path): both found, with
+/// their circuit (they power the HUB's circuit).
+#[test]
+fn real_hub_burners() {
+    let Ok(path) = std::env::var("FB_HUB_SAVE") else { return };
+    let Some(game) = real_game() else { return };
+    let w = read_world(&std::fs::read(path).unwrap(), &game).unwrap();
+    eprintln!("HUB burners: {:?}", w.hub_burners);
+    eprintln!("HUB: {:?}", w.structures.iter().filter(|s| s.class.starts_with("Build_TradingPost")).collect::<Vec<_>>());
+    if w.structures.iter().any(|s| s.class.starts_with("Build_TradingPost")) {
+        assert_eq!(w.hub_burners.len(), fb_model::HUB_BURNERS);
+        assert!(w.hub_burners.iter().all(|b| b.circuit.is_some()), "on a circuit");
+    }
+}

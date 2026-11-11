@@ -27,6 +27,7 @@ mod room;
 mod saves;
 mod selftest;
 mod setup;
+mod update;
 mod world;
 
 /// Development build (`--features dev`): Developer settings, and it never
@@ -54,6 +55,13 @@ struct AppState {
     /// save downloaded last (name, play time).
     live_seen: Mutex<Option<String>>,
     live_save: Mutex<Option<(String, i64)>>,
+    /// A dedicated server (host:port) that said it has no `frm` function,
+    /// and when: FRM's own web server is asked straight away until then
+    /// plus `NO_FRM_RECHECK` (each try through the server costs a TLS
+    /// handshake, measured ~90 ms locally).
+    live_no_frm: Mutex<Option<(String, std::time::Instant)>>,
+    /// The newer release found, ready to install when asked.
+    update: Mutex<Option<update::Release>>,
 }
 
 impl AppState {
@@ -714,7 +722,7 @@ async fn live_server_check(state: State<'_, AppState>) -> CmdResult<fb_model::Se
     match live::call(&host, l.server_port, l.server_cert.as_deref(), None, "HealthCheck", serde_json::json!({ "ClientCustomData": "" })).await {
         Ok(v) => {
             out.reachable = true;
-            out.health = v.get("Health").and_then(|h| h.as_str()).map(|h| h.chars().take(32).collect());
+            out.health = live::field(&v, "Health").and_then(|h| h.as_str()).map(|h| h.chars().take(32).collect());
         }
         Err(live::Fail::Untrusted(fp)) => {
             out.reachable = true;
@@ -730,11 +738,11 @@ async fn live_server_check(state: State<'_, AppState>) -> CmdResult<fb_model::Se
     if let (Some(t), Some(pin)) = (token, l.server_cert.as_deref()) {
         match live::call(&host, l.server_port, Some(pin), Some(&t), "QueryServerState", serde_json::json!({})).await {
             Ok(v) => {
-                let g = v.get("ServerGameState").cloned().unwrap_or_default();
+                let g = live::field(&v, "ServerGameState").cloned().unwrap_or_default();
                 out.token_ok = Some(true);
-                out.session = g.get("ActiveSessionName").and_then(|s| s.as_str()).map(|s| s.chars().take(64).collect());
-                out.players = g.get("NumConnectedPlayers").and_then(|n| n.as_i64());
-                out.player_limit = g.get("PlayerLimit").and_then(|n| n.as_i64());
+                out.session = live::field(&g, "ActiveSessionName").and_then(|s| s.as_str()).map(|s| s.chars().take(64).collect());
+                out.players = live::field(&g, "NumConnectedPlayers").and_then(|n| n.as_i64());
+                out.player_limit = live::field(&g, "PlayerLimit").and_then(|n| n.as_i64());
             }
             Err(f) => {
                 out.token_ok = Some(false);
@@ -802,15 +810,38 @@ async fn live_server_sync(state: State<'_, AppState>) -> CmdResult<Option<fb_mod
     Ok(saves::summary_of(&path))
 }
 
+/// How long to go straight to FRM's web server once a dedicated server
+/// said it has no `frm` function, before asking the server again.
+const NO_FRM_RECHECK: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// One read endpoint of the Ficsit Remote Monitoring mod: through the
-/// dedicated server when there is one, otherwise its own web server.
+/// dedicated server when there is one (falling back to the mod's own web
+/// server on the same machine when the server has no `frm` function),
+/// otherwise its own web server.
 async fn frm_get(state: &AppState, endpoint: &str) -> CmdResult<serde_json::Value> {
     let l = live_settings(state)?;
     if !l.frm {
         return Err("Ficsit Remote Monitoring isn't turned on in Live map.".into());
     }
-    match (l.server_host.trim(), l.server_cert.as_deref()) {
-        (h, Some(pin)) if !h.is_empty() => live::frm_via_server(h, l.server_port, pin, endpoint).await.map_err(live_error),
+    let host = l.server_host.trim();
+    match l.server_cert.as_deref() {
+        Some(pin) if !host.is_empty() => {
+            let key = format!("{host}:{}", l.server_port);
+            let known_without = state.live_no_frm.lock().unwrap().as_ref().is_some_and(|(k, at)| *k == key && at.elapsed() < NO_FRM_RECHECK);
+            if !known_without {
+                match live::frm_via_server(host, l.server_port, pin, endpoint).await.map_err(live_error)? {
+                    Some(v) => {
+                        *state.live_no_frm.lock().unwrap() = None;
+                        return Ok(v);
+                    }
+                    None => *state.live_no_frm.lock().unwrap() = Some((key, std::time::Instant::now())),
+                }
+            }
+            live::frm_direct(host, l.frm_port, endpoint).await.map_err(|e| {
+                format!("The server doesn't pass requests on to Ficsit Remote Monitoring, and its web server didn't answer either: {e} If port {} is taken on the server, change the mod's Web Server Port and set the same port here.", l.frm_port)
+            })
+        }
+        _ if !host.is_empty() => live::frm_direct(host, l.frm_port, endpoint).await,
         _ => live::frm_direct(l.frm_host.trim(), l.frm_port, endpoint).await,
     }
 }
@@ -854,6 +885,94 @@ async fn live_buildings(state: State<'_, AppState>) -> CmdResult<fb_model::LiveB
     }
     out.carriers = ok.then_some(carriers);
     Ok(out)
+}
+
+/// Power and the map's smaller buildings now, from the Ficsit Remote
+/// Monitoring mod: circuits, what every building draws or makes, power
+/// lines, and poles, switches, storage (with what's in it), tanks,
+/// splitters, mergers, junctions and pumps. Stops at the first endpoint
+/// that fails (the mod isn't answering), keeping what came before.
+#[tauri::command]
+async fn live_power(state: State<'_, AppState>) -> CmdResult<fb_model::LivePower> {
+    let mut out = fb_model::LivePower::default();
+    let power = async {
+        let circuits = frm_get(&state, "getPower").await?;
+        let usage = frm_get(&state, "getPowerUsage").await?;
+        let generators = frm_get(&state, "getGenerators").await?;
+        Ok::<_, String>((live::circuits(&circuits), live::powered(&usage, &generators), live::structures(&usage, &[live::BATTERIES])))
+    };
+    match power.await {
+        Ok((circuits, powered, batteries)) => {
+            out.circuits = Some(circuits);
+            out.powered = Some(powered);
+            out.families.push(fb_model::LiveFamily { prefixes: vec![live::BATTERIES.to_string()], items: batteries });
+        }
+        Err(e) => {
+            out.errors.push(e);
+            return Ok(out);
+        }
+    }
+    match frm_get(&state, "getCables").await {
+        Ok(v) => out.lines = Some(live::lines(&v)),
+        Err(e) => {
+            out.errors.push(e);
+            return Ok(out);
+        }
+    }
+    for (ep, prefixes) in live::FAMILIES {
+        match frm_get(&state, ep).await {
+            Ok(v) => out.families.push(fb_model::LiveFamily { prefixes: prefixes.iter().map(|p| p.to_string()).collect(), items: live::structures(&v, prefixes) }),
+            Err(e) => {
+                out.errors.push(e);
+                break;
+            }
+        }
+    }
+    Ok(out)
+}
+
+// ------------------------------------------------------------------ updates
+
+/// A newer build of the app on GitHub, if there is one. Only packaged builds
+/// running as the installed copy look (development builds don't update).
+#[tauri::command]
+async fn update_check(state: State<'_, AppState>) -> CmdResult<Option<fb_model::update::UpdateInfo>> {
+    let Some(current) = update::build() else { return Ok(None) };
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    if !state.identity.is_installed_exe(&exe) || state.identity.is_test() {
+        return Ok(None);
+    }
+    let found = update::latest(current).await?;
+    let info = found.as_ref().map(|r| r.info.clone());
+    *state.update.lock().unwrap() = found;
+    Ok(info)
+}
+
+/// Installs the newer build found by `update_check`: downloads it, checks
+/// its signature, copies it over this install and starts it; this copy then
+/// exits.
+#[tauri::command]
+async fn update_apply(app: AppHandle, state: State<'_, AppState>) -> CmdResult<()> {
+    let release = state.update.lock().unwrap().clone().ok_or("There's no update to install.")?;
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    if !state.identity.is_installed_exe(&exe) {
+        return Err("Updates install over the installed copy, and this isn't it.".into());
+    }
+    let dir = exe.parent().ok_or("The app's folder isn't known.")?.to_path_buf();
+    let work = state.data_dir.join("update");
+    let new_app = update::fetch(&release, &work).await?;
+    update::swap_in(&dir, &new_app)?;
+    let _ = std::fs::remove_dir_all(&work);
+    std::process::Command::new(dir.join(install::EXE_NAME))
+        .args(state.identity.launch_args())
+        .current_dir(&dir)
+        .spawn()
+        .map_err(|e| format!("The update is in, but it didn't start: {e}. Start Factory Builder again."))?;
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        app.exit(0);
+    });
+    Ok(())
 }
 
 // --------------------------------------------------------------------- rooms
@@ -924,6 +1043,8 @@ fn main() {
         install::run_uninstaller(&identity, args.iter().any(|a| a == "--quiet"));
         return;
     }
+    // After an update: the exe it replaced goes.
+    update::cleanup(&std::env::current_exe().unwrap_or_default());
     // Hand off to the installed copy, so there's one app no matter which
     // copy was started. Development builds only do this in a test profile.
     if selftest_out.is_none() && (!DEV || identity.is_test()) && identity.hand_off(&args) {
@@ -959,6 +1080,8 @@ fn main() {
                 extract: Default::default(),
                 live_seen: Mutex::new(None),
                 live_save: Mutex::new(None),
+                live_no_frm: Mutex::new(None),
+                update: Mutex::new(None),
             });
             let mut window = tauri::WebviewWindowBuilder::new(app, "main", tauri::WebviewUrl::App("index.html".into()))
                 .title(if test_profile.is_some() { "Factory Builder (Test)" } else { "Factory Builder" })
@@ -985,6 +1108,9 @@ fn main() {
             live_server_sync,
             live_players,
             live_buildings,
+            live_power,
+            update_check,
+            update_apply,
             load_game,
             icon,
             ui_asset,

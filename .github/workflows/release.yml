@@ -1,6 +1,11 @@
 # Builds the shipping zip (build.ps1 -Package) on every push to main and
 # publishes it as a new GitHub release, marked latest, so the newest build is
 # always at https://github.com/phahx/FactoryBuilder/releases/latest.
+#
+# Installed copies update themselves from there (src-tauri/src/update.rs):
+# each zip is signed (crates/fb-sign) with the UPDATE_SIGNING_KEY secret, and
+# the app installs only a zip whose signature matches the public key built
+# into it. No signature, no release.
 name: Release
 
 on:
@@ -22,6 +27,9 @@ jobs:
     defaults:
       run:
         shell: pwsh
+    env:
+      # Baked into the app: the build the updater compares against.
+      FB_BUILD: ${{ github.run_number }}
     steps:
       - uses: actions/checkout@v7
 
@@ -54,6 +62,21 @@ jobs:
       - name: Test
         run: cargo test --workspace --release
 
+      # Signed as this build; checked against the key the app carries, so a
+      # wrong or missing secret stops the release instead of shipping builds
+      # no installed copy would take.
+      - name: Sign the zip
+        env:
+          UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
+        run: |
+          $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"').Matches[0].Groups[1].Value
+          $zip = "target\package\FactoryBuilder-$version.zip"
+          cargo run --release -p fb-sign -- sign $zip $env:FB_BUILD
+          if ($LASTEXITCODE) { throw 'signing failed' }
+          $public = (Select-String -Path src-tauri\src\update.rs -Pattern 'PUBLIC_KEY: &str = "(.+)"').Matches[0].Groups[1].Value
+          cargo run --release -p fb-sign -- verify $zip $env:FB_BUILD $public
+          if ($LASTEXITCODE) { throw "the signing key doesn't match the app's public key" }
+
       - name: Publish the release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -68,4 +91,4 @@ jobs:
             '',
             "Download ``FactoryBuilder-$version.zip``, unzip it and run ``Factory Builder.exe``; the first launch installs it. Windows only; needs Satisfactory installed."
           ) -join "`n"
-          gh release create $tag $zip --target "${{ github.sha }}" --title "Factory Builder $version (build ${{ github.run_number }})" --notes $notes --latest
+          gh release create $tag $zip "$zip.sig" --target "${{ github.sha }}" --title "Factory Builder $version (build ${{ github.run_number }})" --notes $notes --latest

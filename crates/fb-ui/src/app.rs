@@ -161,10 +161,22 @@ pub struct FactoryApp {
     pub(crate) map: crate::map::MapState,
     /// The Live map add-on's state (live.rs).
     pub(crate) live: crate::live::LiveState,
+    pub(crate) live_view: crate::live_factory::LiveView,
+    /// The last project file loaded: per factory in the file (its id), the
+    /// document made and the node made for each of its nodes.
+    pub(crate) loaded_ids: std::collections::BTreeMap<u32, (u32, Vec<Option<egui_node_graph2::NodeId>>)>,
+    pub(crate) live_map: crate::live_map::LiveMapState,
+    /// The map's world version the live factory outlines were drawn for.
+    pub(crate) live_map_seen: u64,
     #[cfg(test)]
     pub(crate) wire_label_texts: Vec<String>,
     /// "Not now" on the icons notice, for this session.
     pub(crate) notice_dismissed: bool,
+    /// A newer build of the app (checked once at launch), and its notice.
+    pub(crate) update: Option<fb_model::update::UpdateInfo>,
+    pub(crate) update_checked: bool,
+    pub(crate) update_busy: bool,
+    pub(crate) update_dismissed: bool,
     /// The project's documents: the master graph (id 0) and the factories.
     pub(crate) docs: Vec<crate::project::Doc>,
     /// The document in the editor.
@@ -295,12 +307,20 @@ impl FactoryApp {
             startup_checked: false,
             wizard: None,
             notice_dismissed: false,
+            update: None,
+            update_checked: false,
+            update_busy: false,
+            update_dismissed: false,
             wire_flow: Default::default(),
             wire_labels: true,
             view: Default::default(),
             frame_selected: false,
             map: Default::default(),
             live: Default::default(),
+            live_view: Default::default(),
+            loaded_ids: Default::default(),
+            live_map: Default::default(),
+            live_map_seen: 0,
             #[cfg(test)]
             wire_label_texts: Vec::new(),
             docs: Vec::new(),
@@ -398,6 +418,15 @@ impl FactoryApp {
         self.pending_commit = false;
         let now = self.project_json();
         if now == self.committed {
+            return false;
+        }
+        // The Live view shows what's built: only planned pieces change.
+        if self.live_view.on && !self.live_edit_ok() {
+            let back = self.committed.clone();
+            self.restore(&back);
+            let ctx = self.backend_ctx().clone();
+            let how = if self.live_view.planning { "Add or change planned pieces instead." } else { "Turn on planning mode to add planned pieces." };
+            self.say(&ctx, format!("What's built is shown as it is in game, so it can't be changed here. {how}"), false);
             return false;
         }
         self.undo.push(std::mem::replace(&mut self.committed, now));
@@ -558,7 +587,9 @@ impl FactoryApp {
     }
 
     fn autosave(&mut self, ctx: &egui::Context) {
-        if self.selftest || !self.game_loaded || self.autosave_in_flight {
+        // The Live view's project isn't saved; the planning one waits
+        // unchanged (it was saved on the way in: `autosave_now`).
+        if self.selftest || !self.game_loaded || self.autosave_in_flight || self.live_view.on {
             return;
         }
         let now = ctx.input(|i| i.time);
@@ -583,6 +614,17 @@ impl FactoryApp {
                 },
             );
         }
+    }
+
+    /// Saves the autosave now if anything changed (no waiting for a pause).
+    pub(crate) fn autosave_now(&mut self) {
+        if self.selftest || !self.game_loaded || self.autosave_in_flight || self.live_view.on || self.rev == self.autosaved_rev {
+            return;
+        }
+        self.autosaved_rev = self.rev;
+        self.autosave_in_flight = true;
+        let json = self.workspace_json();
+        self.backend.call::<()>("save_project", json!({ "name": AUTOSAVE, "json": json }), |r| Msg::Saved { name: AUTOSAVE.into(), autosave: true, result: r });
     }
 
     /// Reopen the last session once the game data and project list are in.
@@ -650,7 +692,17 @@ impl FactoryApp {
                 | Msg::DevDone(_)) => self.on_setup_msg(ctx, m),
                 m @ (Msg::Saves(_) | Msg::PickedSaveGame(_) | Msg::SaveUnlocks(_)) => self.on_progress_msg(ctx, m),
                 m @ (Msg::MapInfo(_) | Msg::WorldSessions(_) | Msg::WorldLoaded { .. } | Msg::WorldLatest(_) | Msg::SelftestSave(_) | Msg::MapSprites(_)) => self.on_map_msg(m),
-                m @ (Msg::LiveSaved { .. } | Msg::LiveCheck(_) | Msg::LiveTrusted(_) | Msg::LiveToken(_) | Msg::LivePlayers(_) | Msg::LiveBuildings(_) | Msg::LiveServerSave(_)) => self.on_live_msg(m),
+                m @ (Msg::LiveSaved { .. } | Msg::LiveCheck(_) | Msg::LiveTrusted(_) | Msg::LiveToken(_) | Msg::LivePlayers(_) | Msg::LiveBuildings(_) | Msg::LivePower(_) | Msg::LiveServerSave(_)) => self.on_live_msg(m),
+                // A failed check says nothing: no notice, try next launch.
+                Msg::UpdateCheck(r) => self.update = r.ok().flatten(),
+                Msg::UpdateApplied(r) => {
+                    self.update_busy = false;
+                    match r {
+                        // The new copy starts and this one closes.
+                        Ok(()) => self.say(ctx, "Updated. Restarting…", false),
+                        Err(e) => self.say(ctx, e, true),
+                    }
+                }
                 Msg::Solved(r) => {
                     self.solving = false;
                     match r {
@@ -858,8 +910,8 @@ impl FactoryApp {
     }
 
     pub(crate) fn request_plan(&mut self) {
-        // The HUB has nothing to plan.
-        if self.on_master() || self.planner.hub {
+        // The HUB has nothing to plan; a live factory is what's on the map.
+        if self.on_master() || self.planner.hub || self.live_view.on {
             return;
         }
         self.plan_tries = 0;
@@ -1209,7 +1261,16 @@ impl FactoryApp {
 
     pub fn ui(&mut self, ctx: &egui::Context) {
         self.handle_messages(ctx);
+        // The Live view: keep the map and its live figures coming (the Map
+        // tab does that itself), and the live project up to date.
+        self.user.live_view = self.live_view.on;
+        if self.live_view.on && self.view != crate::map::View::Map {
+            self.map_background(ctx);
+            self.live_poll(ctx);
+        }
+        self.live_refresh();
         self.poll_room(ctx);
+        self.send_place(ctx);
         self.follow_doc();
         if let Some(id) = self.switch_to.take() {
             self.activate(id);
@@ -1229,6 +1290,7 @@ impl FactoryApp {
         }
         self.shortcuts(ctx);
         crate::menu::menu_bar(self, ctx);
+        self.update_notice(ctx);
         self.icons_notice(ctx);
         self.status_bar(ctx);
         egui::SidePanel::left("planner")
@@ -1786,6 +1848,11 @@ impl FactoryApp {
             }
             return;
         }
+        // The Live view's project isn't saved, opened over or edited by
+        // shortcuts (File and Edit are the planning project's).
+        if self.live_view.on {
+            return;
+        }
         let cmd = |key| KeyboardShortcut::new(Modifiers::COMMAND, key);
         let cmd_shift = |key| KeyboardShortcut::new(Modifiers::COMMAND | Modifiers::SHIFT, key);
         let hit = |s: KeyboardShortcut| ctx.input_mut(|i| i.consume_shortcut(&s));
@@ -1844,6 +1911,49 @@ impl FactoryApp {
         }
         if ctx.input(|i| i.key_pressed(Key::Home)) {
             self.frame_all = true;
+        }
+    }
+
+    /// Once set up: is there a newer build? A bar offers it; nothing
+    /// changes until "Update and restart".
+    fn update_notice(&mut self, ctx: &egui::Context) {
+        let set_up = self.status.as_ref().is_some_and(|s| s.settings.setup_done);
+        if !self.update_checked && set_up && !self.selftest {
+            self.update_checked = true;
+            self.backend.call("update_check", json!({}), Msg::UpdateCheck);
+        }
+        let Some(u) = self.update.clone() else { return };
+        if self.update_dismissed || self.wizard.is_some() {
+            return;
+        }
+        let mb = (u.size as f64 / 1_048_576.0).round();
+        let text = format!("A new build of Factory Builder is out: build {} (you have build {}).", u.build, u.current);
+        let mut go = false;
+        egui::TopBottomPanel::top("update_notice")
+            .exact_height(40.0)
+            .frame(egui::Frame::none().fill(BACKDROP).inner_margin(egui::Margin::symmetric(12.0, 0.0)))
+            .show(ctx, |ui| {
+                ui.horizontal_centered(|ui| {
+                    ui.label(RichText::new(text).color(TEXT)).on_hover_text(&u.title);
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if self.update_busy {
+                            ui.label(RichText::new("Downloading and checking the update…").color(TEXT_DIM));
+                            return;
+                        }
+                        if crate::widgets::button(ui, "Not now").clicked() {
+                            self.update_dismissed = true;
+                        }
+                        let tip = format!("Downloads it ({mb} MB) from the project's GitHub releases, checks its signature, installs it over this copy and restarts. Your factories and settings stay.");
+                        if crate::widgets::button(ui, "Update and restart").on_hover_text(tip).clicked() {
+                            go = true;
+                        }
+                    });
+                });
+            });
+        if go {
+            self.flush_commit();
+            self.update_busy = true;
+            self.backend.call("update_apply", json!({}), Msg::UpdateApplied);
         }
     }
 
@@ -1991,6 +2101,17 @@ impl FactoryApp {
         let resp = self
             .state
             .draw_graph_editor(ui, &self.templates, &mut self.user, Vec::new());
+        // Live view: planned pieces get a dashed outline (a plan, not built).
+        if self.live_view.on {
+            let painter = ui.painter();
+            for (id, r) in &resp.node_rects {
+                if self.state.graph.nodes.get(*id).is_some_and(|n| n.user_data.planned) {
+                    let r = r.expand(4.0);
+                    let pts = [r.left_top(), r.right_top(), r.right_bottom(), r.left_bottom(), r.left_top()];
+                    painter.extend(egui::Shape::dashed_line(&pts, egui::Stroke::new(2.0_f32, ACCENT), 8.0, 5.0));
+                }
+            }
+        }
         if self.snap {
             let z = self.state.pan_zoom.zoom.max(0.01);
             for r in &resp.node_responses {
@@ -2038,7 +2159,8 @@ impl FactoryApp {
             }
         }
         // A wire let go on empty canvas: Add node, showing only what fits it.
-        if let Some((node, port, at)) = resp.wire_dropped.filter(|_| !self.on_master()) {
+        let may_add = !self.live_view.on || (self.live_view.planning && !self.on_master());
+        if let Some((node, port, at)) = resp.wire_dropped.filter(|_| !self.on_master() && may_add) {
             self.open_finder_for_wire(node, port, at);
             if let Some(w) = self.finder.as_mut().and_then(|f| f.wire.as_mut()) {
                 w.extras = resp.wire_dropped_extras.clone();
@@ -2056,7 +2178,9 @@ impl FactoryApp {
         // library's finder (the master graph's blocks are its factories).
         if let Some(f) = self.state.node_finder.take() {
             let at = f.position.unwrap_or(rect.center());
-            if self.on_master() {
+            if !may_add {
+                // Nothing to add here (Live view: only in planning mode).
+            } else if self.on_master() {
                 let z = self.state.pan_zoom.zoom.max(0.01);
                 let graph = ((at - rect.min - self.state.pan_zoom.pan) / z).to_pos2();
                 self.master_menu = Some((at, graph));
@@ -2193,6 +2317,8 @@ impl FactoryApp {
         // nothing to copy either.
         let only_poles = self.context_targets.iter().all(|n| crate::power_net::pole_of(g, *n).is_some());
         let only_knots = self.context_targets.iter().all(|n| g[*n].user_data.knot_size().is_some());
+        // Live view: what's built is shown as built (only its look changes).
+        let built = self.live_view.on && self.context_targets.iter().any(|n| !g[*n].user_data.planned);
         let current = g[node].user_data.color;
         let on_master = self.on_master();
         let mut custom = self.custom_color;
@@ -2208,11 +2334,11 @@ impl FactoryApp {
                 do_rename = item(ui, "Rename", "F2", true).clicked();
                 separator(ui);
             }
-            if !only_poles && !burners {
+            if !only_poles && !burners && !built {
                 do_duplicate = item(ui, "Duplicate", "Ctrl+D", true).clicked();
             }
             // A HUB burner's fuel.
-            if let [one] = &self.context_targets[..] {
+            if let (false, [one]) = (built, &self.context_targets[..]) {
                 if let NodeKind::Burner { fuel } = &g[*one].user_data.kind {
                     let game = self.user.game.clone();
                     crate::menus::caption(ui, "Fuel");
@@ -2226,7 +2352,7 @@ impl FactoryApp {
                 }
             }
             // An extractor's building and node purity.
-            if let [one] = &self.context_targets[..] {
+            if let (false, [one]) = (built, &self.context_targets[..]) {
                 if let NodeKind::Extractor { item, class, purity } = &g[*one].user_data.kind {
                     let game = self.user.game.clone();
                     let form = game.item_form(item);
@@ -2249,7 +2375,7 @@ impl FactoryApp {
                 }
             }
             // A pole's tier: how many wires it takes, as in game.
-            if let (true, [one]) = (only_poles, &self.context_targets[..]) {
+            if let (true, false, [one]) = (only_poles, built, &self.context_targets[..]) {
                 let pole = crate::power_net::pole_of(g, *one);
                 let tier = pole.and_then(|p| self.planner.power_net.poles.iter().find(|x| x.id == p)).map(|p| p.tier).unwrap_or(1);
                 let wires = crate::power_net::wire_count(g, *one);
@@ -2265,11 +2391,11 @@ impl FactoryApp {
                 separator(ui);
             }
             // The HUB's burners are part of it.
-            if !burners {
+            if !burners && !built {
                 do_delete = item(ui, "Delete", "Del", true).clicked();
             }
             do_frame = item(ui, "Add comment frame", "C", true).clicked();
-            if !on_master && !in_hub {
+            if !on_master && !in_hub && !self.live_view.on {
                 separator(ui);
                 do_move = item(ui, "Move to a new factory", "", true)
                     .on_hover_text("Moves these nodes into a factory of their own, linked to this one on the master graph.")
@@ -2481,6 +2607,10 @@ impl FactoryApp {
                 self.finder = None;
                 let graph_pos = at - self.state.pan_zoom.pan - self.editor_rect.min.to_vec2();
                 let id = self.add_node(template, graph_pos);
+                // In the Live view (planning mode), what's added is a plan.
+                if self.live_view.on {
+                    self.state.graph[id].user_data.planned = true;
+                }
                 if let Some(w) = wire {
                     self.connect_dropped_wire(&w, id);
                 }
@@ -2550,7 +2680,8 @@ impl FactoryApp {
     }
 
     fn share_doc(&mut self) {
-        if self.room.active() {
+        // The Live view's project is mine alone.
+        if self.room.active() && !self.live_view.on {
             let json = self.shared_doc_json();
             self.backend.call::<()>("room_send", json!({ "wire": fb_model::room::Wire::Doc { from: self.room.me, rev: 0, json } }), |_| Msg::RoomEvents(Ok(Vec::new())));
         }
@@ -2616,7 +2747,7 @@ impl FactoryApp {
                 self.room.peers = peers.into_iter().map(|p| (p.id, p)).collect();
                 let host = self.room.peers.get(&0).map(|p| p.name.clone()).unwrap_or_default();
                 if let Some(doc) = doc {
-                    self.apply_shared_doc(&doc);
+                    self.with_planning(|app| app.apply_shared_doc(&doc));
                     self.frame_all = true;
                 }
                 self.say(ctx, format!("Joined {host}'s room."), false);
@@ -2636,12 +2767,12 @@ impl FactoryApp {
                 }
                 self.room.forget_peer(id);
             }
-            RoomEvent::Message(w @ (Wire::Cursor { .. } | Wire::Ping { .. } | Wire::Chat { .. } | Wire::View { .. } | Wire::Selection { .. })) => {
+            RoomEvent::Message(w @ (Wire::Cursor { .. } | Wire::Ping { .. } | Wire::Chat { .. } | Wire::View { .. } | Wire::Selection { .. } | Wire::Place { .. })) => {
                 self.peer_message(ctx, w);
             }
             RoomEvent::Message(Wire::Doc { from, json, .. }) => {
                 if from != self.room.me {
-                    self.apply_shared_doc(&json);
+                    self.with_planning(|app| app.apply_shared_doc(&json));
                 }
             }
             RoomEvent::Message(Wire::Denied { reason }) => {
@@ -2991,7 +3122,7 @@ pub(crate) fn evaluate_graph(game: &GameData, g: &FactoryGraph, cache: &mut SimC
             outputs: outs.iter().map(|x| x.1).collect(),
             throttles: matches!(g[id].user_data.kind, NodeKind::Recipe { .. } | NodeKind::Extractor { .. }),
             // Outputs take whatever arrives, like sinks.
-            sink: matches!(g[id].user_data.kind, NodeKind::Sink { .. } | NodeKind::Output { .. }),
+            sink: matches!(g[id].user_data.kind, NodeKind::Sink { .. } | NodeKind::Output { .. } | NodeKind::Storage { .. }),
             ..Default::default()
         });
         rates.push((ins, outs));
@@ -3115,6 +3246,18 @@ pub(crate) fn evaluate_graph(game: &GameData, g: &FactoryGraph, cache: &mut SimC
                     sum.issues.push((id, format!("Only {} of {} {} delivered", crate::fmt::fmt_rate(got), crate::fmt::fmt_rate(want), game.item_name(item))));
                 }
                 sum.outputs.push((item.clone(), got, want));
+            }
+            // What goes into storage the factory has made; what it supplies
+            // was brought in (by hand, or from elsewhere).
+            NodeKind::Storage { item, .. } => {
+                let got: f64 = result.received[i].iter().sum();
+                if got > 1e-9 {
+                    sum.outputs.push((item.clone(), got, got));
+                }
+                let given: f64 = result.shipped[i].iter().sum();
+                if given > 1e-9 {
+                    *sum.inputs.entry(item.clone()).or_default() += given;
+                }
             }
             NodeKind::Sink { item } => {
                 let got: f64 = result.received[i].iter().sum();

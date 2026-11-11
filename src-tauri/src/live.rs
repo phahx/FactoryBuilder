@@ -62,14 +62,76 @@ impl ServerCertVerifier for Pinned {
         }
     }
     fn verify_tls12_signature(&self, message: &[u8], cert: &CertificateDer<'_>, dss: &DigitallySignedStruct) -> Result<HandshakeSignatureValid, rustls::Error> {
-        rustls::crypto::verify_tls12_signature(message, cert, dss, &self.provider.signature_verification_algorithms)
+        verify_signature(message, cert, dss, &self.provider, false)
     }
     fn verify_tls13_signature(&self, message: &[u8], cert: &CertificateDer<'_>, dss: &DigitallySignedStruct) -> Result<HandshakeSignatureValid, rustls::Error> {
-        rustls::crypto::verify_tls13_signature(message, cert, dss, &self.provider.signature_verification_algorithms)
+        verify_signature(message, cert, dss, &self.provider, true)
     }
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
         self.provider.signature_verification_algorithms.supported_schemes()
     }
+}
+
+/// Checks the server's handshake signature with its certificate's key.
+///
+/// rustls's own helpers go through webpki, which only reads X.509 v3, and
+/// the dedicated server's self-signed certificate is v1 ("unsupported
+/// certificate version"). The certificate itself is trusted by its pinned
+/// fingerprint, so all that's needed from it is the public key.
+fn verify_signature(message: &[u8], cert: &CertificateDer<'_>, dss: &DigitallySignedStruct, provider: &CryptoProvider, tls13: bool) -> Result<HandshakeSignatureValid, rustls::Error> {
+    let unadvertised = || rustls::Error::PeerMisbehaved(rustls::PeerMisbehaved::SignedHandshakeWithUnadvertisedSigScheme);
+    // TLS 1.3 allows no PKCS#1 v1.5 or SHA-1 signatures (RFC 8446 4.2.3).
+    use SignatureScheme as S;
+    let tls13_scheme = matches!(dss.scheme, S::ECDSA_NISTP256_SHA256 | S::ECDSA_NISTP384_SHA384 | S::ECDSA_NISTP521_SHA512 | S::RSA_PSS_SHA256 | S::RSA_PSS_SHA384 | S::RSA_PSS_SHA512 | S::ED25519 | S::ED448);
+    if tls13 && !tls13_scheme {
+        return Err(unadvertised());
+    }
+    let algs = provider.signature_verification_algorithms.mapping.iter().find(|(s, _)| *s == dss.scheme).map(|(_, a)| *a).ok_or_else(unadvertised)?;
+    let (key_alg, key) = public_key(cert.as_ref()).ok_or(rustls::Error::InvalidCertificate(rustls::CertificateError::BadEncoding))?;
+    let alg = algs.iter().find(|a| a.public_key_alg_id().as_ref() == key_alg).ok_or(rustls::Error::InvalidCertificate(rustls::CertificateError::BadSignature))?;
+    alg.verify_signature(key, message, dss.signature())
+        .map(|_| HandshakeSignatureValid::assertion())
+        .map_err(|_| rustls::Error::InvalidCertificate(rustls::CertificateError::BadSignature))
+}
+
+/// One DER element: (tag, contents, what follows).
+fn der(input: &[u8]) -> Option<(u8, &[u8], &[u8])> {
+    let (&tag, rest) = input.split_first()?;
+    let (&first, rest) = rest.split_first()?;
+    let (len, rest) = if first < 0x80 {
+        (first as usize, rest)
+    } else {
+        let n = (first & 0x7f) as usize;
+        if n == 0 || n > 4 || rest.len() < n {
+            return None;
+        }
+        (rest[..n].iter().fold(0usize, |l, &b| l << 8 | b as usize), &rest[n..])
+    };
+    (rest.len() >= len).then(|| (tag, &rest[..len], &rest[len..]))
+}
+
+/// A certificate's public key (any X.509 version): the algorithm
+/// identifier's contents and the key bits.
+fn public_key(cert: &[u8]) -> Option<(&[u8], &[u8])> {
+    const SEQUENCE: u8 = 0x30;
+    let (SEQUENCE, cert, _) = der(cert)? else { return None };
+    let (SEQUENCE, mut tbs, _) = der(cert)? else { return None };
+    if tbs.first() == Some(&0xA0) {
+        tbs = der(tbs)?.2; // [0] version: absent in v1
+    }
+    for expected in [0x02, SEQUENCE, SEQUENCE, SEQUENCE, SEQUENCE] {
+        // serial, signature algorithm, issuer, validity, subject
+        let (tag, _, rest) = der(tbs)?;
+        if tag != expected {
+            return None;
+        }
+        tbs = rest;
+    }
+    let (SEQUENCE, spki, _) = der(tbs)? else { return None };
+    let (SEQUENCE, alg, rest) = der(spki)? else { return None };
+    let (0x03, bits, _) = der(rest)? else { return None };
+    let (&0, key) = bits.split_first()? else { return None }; // no unused bits
+    Some((alg, key))
 }
 
 /// A host name or IP address, nothing else (no scheme, path or port).
@@ -185,24 +247,36 @@ pub async fn call(host: &str, port: u16, pin: Option<&str>, token: Option<&str>,
     Ok(api_data(&r)?)
 }
 
+/// A field of a server API reply. The docs name fields `Sessions`,
+/// `SaveHeaders` and so on, but the server sends them camelCase
+/// (`sessions`, `saveHeaders`), so the case isn't minded.
+pub fn field<'a>(v: &'a Value, key: &str) -> Option<&'a Value> {
+    let o = v.as_object()?;
+    o.get(key).or_else(|| o.iter().find(|(k, _)| k.eq_ignore_ascii_case(key)).map(|(_, v)| v))
+}
+
 /// The save the server is on: of the current session, the one played
 /// longest (the newest; PlayDurationSeconds only grows).
 pub fn newest_save(sessions: &Value) -> Option<(String, i64)> {
-    let list = sessions.get("Sessions")?.as_array()?;
-    let current = sessions.get("CurrentSessionIndex").and_then(Value::as_i64).filter(|i| *i >= 0).map(|i| i as usize);
+    let list = field(sessions, "Sessions")?.as_array()?;
+    let current = field(sessions, "CurrentSessionIndex").and_then(Value::as_i64).filter(|i| *i >= 0).map(|i| i as usize);
     let session = current.and_then(|i| list.get(i))?;
-    session
-        .get("SaveHeaders")?
+    field(session, "SaveHeaders")?
         .as_array()?
         .iter()
-        .filter_map(|h| Some((h.get("SaveName")?.as_str()?.to_string(), h.get("PlayDurationSeconds")?.as_i64()?)))
+        .filter_map(|h| Some((field(h, "SaveName")?.as_str()?.to_string(), field(h, "PlayDurationSeconds")?.as_i64()?)))
         .max_by_key(|(_, t)| *t)
 }
 
 /// Ficsit Remote Monitoring through the dedicated server's own API: no
 /// token, `endpoint` at the top level, and the endpoint's JSON comes back
 /// as is (a file reply), as FRM's FRM_Controller.cpp does it.
-pub async fn frm_via_server(host: &str, port: u16, pin: &str, endpoint: &str) -> Result<Value, Fail> {
+///
+/// `None` when the server has no `frm` function: FRM registers it when its
+/// server subsystem starts, and on some servers it never shows up (seen
+/// with FRM 1.5.5 after loading another save), so FRM's own web server is
+/// the way in then.
+pub async fn frm_via_server(host: &str, port: u16, pin: &str, endpoint: &str) -> Result<Option<Value>, Fail> {
     let body = serde_json::to_vec(&json!({ "function": "frm", "endpoint": endpoint })).map_err(|e| e.to_string())?;
     let req = hyper::Request::post("/api/v1")
         .header(hyper::header::HOST, format!("{host}:{port}"))
@@ -212,11 +286,19 @@ pub async fn frm_via_server(host: &str, port: u16, pin: &str, endpoint: &str) ->
         .map_err(|e| e.to_string())?;
     let r = https(host, port, Some(pin), req, JSON_LIMIT, JSON_TIMEOUT).await?;
     if !r.file {
-        // An error (unknown endpoint, or the mod isn't on the server).
+        if no_function(&r) {
+            return Ok(None);
+        }
+        // An error (unknown endpoint, say).
         api_data(&r)?;
         return Err(Fail::Other("The server doesn't answer for Ficsit Remote Monitoring. Is the mod installed on it?".into()));
     }
-    serde_json::from_slice(&r.body).map_err(|_| Fail::Other("Ficsit Remote Monitoring's answer wasn't readable.".into()))
+    serde_json::from_slice(&r.body).map(Some).map_err(|_| Fail::Other("Ficsit Remote Monitoring's answer wasn't readable.".into()))
+}
+
+/// The server's "no such function" answer (errorCode bad_function).
+fn no_function(r: &Reply) -> bool {
+    serde_json::from_slice::<Value>(&r.body).ok().and_then(|v| v.get("errorCode")?.as_str().map(|c| c == "bad_function")).unwrap_or(false)
 }
 
 /// Ficsit Remote Monitoring's own web server: plain HTTP GET, reads only.
@@ -275,7 +357,7 @@ pub fn machines(v: &Value) -> Vec<fb_model::LiveMachine> {
         .flatten()
         .take(200_000)
         .filter_map(|m| {
-            let class = text(m, "ClassName")?;
+            let class = text(m, "ClassName").filter(|c| !c.starts_with(fb_model::HUB_BURNER_CLASS))?;
             let loc = m.get("location")?;
             let (x, y) = (num(loc, "x")?, num(loc, "y")?);
             if x.abs() > 1e8 || y.abs() > 1e8 {
@@ -293,6 +375,10 @@ pub fn machines(v: &Value) -> Vec<fb_model::LiveMachine> {
                 productivity: productivity.map(|p| p.clamp(0.0, 1000.0) as f32),
                 producing: m.get("IsProducing").and_then(Value::as_bool),
                 paused: m.get("IsPaused").and_then(Value::as_bool),
+                id: m.get("ID").and_then(Value::as_str).filter(|s| s.len() <= 300).map(str::to_string),
+                inputs: items(m.get("ingredients")),
+                outputs: items(m.get("production")),
+                fuel: items(m.get("FuelInventory")).into_iter().max_by(|a, b| a.1.total_cmp(&b.1)).map(|(i, _)| i),
             })
         })
         .collect()
@@ -324,6 +410,151 @@ pub fn carriers(v: &Value, fluid: bool) -> Vec<fb_model::LiveCarrier> {
                 }
             }
             (pts.len() >= 2).then_some(fb_model::LiveCarrier { class, fluid, points: pts })
+        })
+        .collect()
+}
+
+/// Map marks FRM reports, by endpoint: the building classes (prefixes) each
+/// one returns all of (from FRM 1.5.5's source: the game class it lists, and
+/// the game's class tree). Valves are left out: whether getPump lists them
+/// isn't known, and a family's save buildings it doesn't list would vanish.
+pub const FAMILIES: &[(&str, &[&str])] = &[
+    ("getPowerPoles", &["Build_PowerPole", "Build_PowerTower"]),
+    ("getSwitches", &["Build_PowerSwitch", "Build_PriorityPowerSwitch"]),
+    ("getStorageInv", &["Build_Storage", "Build_CentralStorage"]),
+    ("getFluidBuffer", &["Build_PipeStorageTank", "Build_IndustrialTank"]),
+    ("getSplitterMerger", &["Build_ConveyorAttachment"]),
+    ("getPipeJunctions", &["Build_PipelineJunction"]),
+    ("getPump", &["Build_PipelinePump"]),
+];
+
+/// Power Storage come from getPowerUsage (they're factory buildings).
+pub const BATTERIES: &str = "Build_PowerStorage";
+
+fn num(o: &Value, k: &str) -> Option<f64> {
+    o.get(k).and_then(Value::as_f64).filter(|f| f.is_finite())
+}
+
+/// A class name as FRM writes them (Build_..._C, Desc_..._C).
+fn class_name(o: &Value, k: &str) -> Option<String> {
+    o.get(k).and_then(Value::as_str).filter(|s| !s.is_empty() && s.len() <= 200 && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')).map(str::to_string)
+}
+
+/// ClassName, and location x, y and facing (the game's yaw).
+fn placed(m: &Value) -> Option<(String, f32, f32, f32)> {
+    let class = class_name(m, "ClassName")?;
+    let loc = m.get("location")?;
+    let (x, y) = (num(loc, "x")?, num(loc, "y")?);
+    if x.abs() > 1e8 || y.abs() > 1e8 {
+        return None;
+    }
+    let yaw = num(loc, "rotation").map(|r| (r - 90.0).rem_euclid(360.0)).unwrap_or(0.0);
+    Some((class, x as f32, y as f32, yaw as f32))
+}
+
+/// The game's circuit id (-1: none).
+fn circuit_id(v: Option<f64>) -> Option<i64> {
+    v.map(|c| c as i64).filter(|c| *c >= 0)
+}
+
+/// Items as FRM lists them: ClassName and Amount (fluids in m3).
+fn items(v: Option<&Value>) -> Vec<(String, f32)> {
+    v.and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .take(1000)
+        .filter_map(|i| Some((class_name(i, "ClassName")?, num(i, "Amount")? as f32)))
+        .filter(|(_, n)| *n > 0.0)
+        .collect()
+}
+
+/// One family's buildings (`prefixes`) from its endpoint: poles' CircuitID,
+/// switches' Primary side, storage's Inventory and slots, tanks' fluid.
+pub fn structures(v: &Value, prefixes: &[&str]) -> Vec<fb_model::LiveStructure> {
+    v.as_array()
+        .into_iter()
+        .flatten()
+        .take(200_000)
+        .filter_map(|m| {
+            let (class, x, y, yaw) = placed(m)?;
+            if !prefixes.iter().any(|p| class.starts_with(p)) {
+                return None;
+            }
+            let circuit = circuit_id(num(m, "CircuitID").or_else(|| num(m, "Primary")));
+            let slots = match (num(m, "SlotsUsed"), num(m, "Slots")) {
+                (Some(u), Some(t)) if t > 0.0 => Some((u.max(0.0) as u32, t as u32)),
+                _ => None,
+            };
+            let fluid = num(m, "Capacity").filter(|c| *c > 0.0).map(|cap| (class_name(m, "FluidClassName"), num(m, "Content").unwrap_or(0.0).max(0.0) as f32, cap as f32));
+            Some(fb_model::LiveStructure { class, x, y, yaw, circuit, items: items(m.get("Inventory")), slots, fluid })
+        })
+        .collect()
+}
+
+/// Power lines (getCables): location0 and location1, their two ends.
+pub fn lines(v: &Value) -> Vec<[[f32; 2]; 2]> {
+    let xy = |p: &Value| Some([num(p, "x").filter(|f| f.abs() < 1e8)? as f32, num(p, "y").filter(|f| f.abs() < 1e8)? as f32]);
+    v.as_array().into_iter().flatten().take(500_000).filter_map(|c| Some([xy(c.get("location0")?)?, xy(c.get("location1")?)?])).collect()
+}
+
+/// Circuits (getPower): one per circuit group, with the game's figures.
+pub fn circuits(v: &Value) -> Vec<fb_model::LiveCircuit> {
+    let f = |o: &Value, k: &str| num(o, k).unwrap_or(0.0).max(0.0) as f32;
+    v.as_array()
+        .into_iter()
+        .flatten()
+        .take(100_000)
+        .map(|c| {
+            let ids = c.get("AssociatedCircuits").and_then(Value::as_array).into_iter().flatten().take(10_000).filter_map(|i| circuit_id(i.as_f64())).collect();
+            let battery_mwh = f(c, "BatteryCapacity");
+            fb_model::LiveCircuit {
+                ids,
+                production: f(c, "PowerProduction"),
+                consumption: f(c, "PowerConsumed"),
+                capacity: f(c, "PowerCapacity"),
+                max_consumption: f(c, "PowerMaxConsumed"),
+                battery_mwh,
+                stored_mwh: battery_mwh * (f(c, "BatteryPercent") / 100.0).clamp(0.0, 1.0),
+                fuse: c.get("FuseTriggered").and_then(Value::as_bool).unwrap_or(false),
+            }
+        })
+        .collect()
+}
+
+/// Every powered building (getPowerUsage), with what generators
+/// (getGenerators, by ID) make: their capacity times the game's load, and
+/// what they can make now (dynamic capacity, or what they make).
+pub fn powered(usage: &Value, generators: &Value) -> Vec<fb_model::LivePowered> {
+    let gens: std::collections::HashMap<&str, &Value> = generators.as_array().into_iter().flatten().filter_map(|g| Some((g.get("ID")?.as_str()?, g))).collect();
+    usage
+        .as_array()
+        .into_iter()
+        .flatten()
+        .take(500_000)
+        .filter_map(|m| {
+            let id = m.get("ID")?.as_str().filter(|s| s.len() <= 300)?.to_string();
+            let (class, x, y, _) = placed(m)?;
+            let p = m.get("PowerInfo")?;
+            let (makes, can_make) = match gens.get(id.as_str()) {
+                Some(g) => {
+                    let makes = (num(g, "ProductionCapacity").unwrap_or(0.0) * num(g, "LoadPercentage").unwrap_or(0.0) / 100.0).max(0.0) as f32;
+                    (makes, (num(g, "DynamicProdCapacity").unwrap_or(0.0).max(0.0) as f32).max(makes))
+                }
+                None => (0.0, 0.0),
+            };
+            let fuel = gens.get(id.as_str()).and_then(|g| items(g.get("FuelInventory")).into_iter().max_by(|a, b| a.1.total_cmp(&b.1)));
+            Some(fb_model::LivePowered {
+                id,
+                class,
+                x,
+                y,
+                circuit: circuit_id(num(p, "CircuitID")),
+                now: num(p, "PowerConsumed").unwrap_or(0.0).max(0.0) as f32,
+                max: num(p, "MaxPowerConsumed").unwrap_or(0.0).max(0.0) as f32,
+                makes,
+                can_make,
+                fuel,
+            })
         })
         .collect()
 }
@@ -466,6 +697,14 @@ mod tests {
     }
 
     #[test]
+    fn a_server_without_frms_function_is_told_apart() {
+        let r = |status: u16, body: &str| Reply { status, file: false, body: Bytes::from(body.to_string()) };
+        assert!(no_function(&r(404, r#"{"errorCode":"bad_function","errorMessage":"Payload JSON function 'frm' not found"}"#)));
+        assert!(!no_function(&r(404, r#"{"errorCode":"endpoint_not_found"}"#)));
+        assert!(!no_function(&r(500, "<html>")));
+    }
+
+    #[test]
     fn the_newest_save_of_the_current_session() {
         let s = json!({
             "CurrentSessionIndex": 1,
@@ -479,6 +718,12 @@ mod tests {
             ]
         });
         assert_eq!(newest_save(&s), Some(("Base_autosave_2".to_string(), 7500)));
+        // As the server really sends it: camelCase.
+        let camel = json!({ "currentSessionIndex": 0, "sessions": [{ "sessionName": "test", "saveHeaders": [
+            { "saveName": "test_autosave_1", "playDurationSeconds": 100 },
+            { "saveName": "MAP_TEST", "playDurationSeconds": 160 }
+        ] }] });
+        assert_eq!(newest_save(&camel), Some(("MAP_TEST".to_string(), 160)));
         assert_eq!(newest_save(&json!({ "CurrentSessionIndex": -1, "Sessions": [] })), None);
     }
 
@@ -501,15 +746,42 @@ mod tests {
     /// refused and its fingerprint reported; pinned, it's used.
     #[tokio::test]
     async fn only_the_pinned_certificate_is_accepted() {
-        let Ok(cert) = test_cert() else { return };
-        let (cert_der, key_der) = cert;
+        let Ok(cert) = test_cert("test-cert.der", "test-key.der") else { return };
+        pinned_server(cert, rustls::DEFAULT_VERSIONS).await;
+    }
+
+    /// The dedicated server's own certificate is X.509 v1 (no extensions),
+    /// which webpki refuses ("unsupported certificate version").
+    #[tokio::test]
+    async fn version_1_certificates_like_the_dedicated_servers_work() {
+        let Ok(cert) = test_cert("test-cert-v1.der", "test-key-v1.der") else { return };
+        assert_eq!(cert.0[..].windows(3).position(|w| w == [0xA0, 0x03, 0x02]), None, "the test certificate is v1");
+        pinned_server(cert.clone(), &[&rustls::version::TLS13]).await;
+        pinned_server(cert, &[&rustls::version::TLS12]).await;
+    }
+
+    #[test]
+    fn public_keys_are_read_from_any_certificate_version() {
+        for (file, len) in [("test-cert.der", 65), ("test-cert-v1.der", 270)] {
+            let Ok((der, _)) = test_cert(file, "test-key.der") else { return };
+            let (_, key) = public_key(&der).unwrap_or_else(|| panic!("{file}"));
+            assert_eq!(key.len(), len, "{file}");
+        }
+        assert_eq!(public_key(&[0x30, 0x05, 0x30]), None, "cut off");
+    }
+
+    async fn pinned_server((cert_der, key_der): (Vec<u8>, Vec<u8>), versions: &[&'static rustls::SupportedProtocolVersion]) {
         let fp = fingerprint(&cert_der);
         let config = rustls::ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
-            .with_safe_default_protocol_versions()
+            .with_protocol_versions(versions)
             .unwrap()
             .with_no_client_auth()
-            .with_single_cert(vec![CertificateDer::from(cert_der.clone())], rustls::pki_types::PrivateKeyDer::try_from(key_der).unwrap())
-            .unwrap();
+            // Not with_single_cert: its key check goes through webpki, which
+            // refuses v1 certificates just like the client side did.
+            .with_cert_resolver(Arc::new(rustls::sign::SingleCertAndKey::from(rustls::sign::CertifiedKey::new(
+                vec![CertificateDer::from(cert_der.clone())],
+                rustls::crypto::ring::sign::any_supported_type(&rustls::pki_types::PrivateKeyDer::try_from(key_der).unwrap()).unwrap(),
+            ))));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(config));
@@ -542,10 +814,10 @@ mod tests {
 
     /// A self-signed certificate and key for 127.0.0.1, for tests only
     /// (tests/README.md).
-    fn test_cert() -> Result<(Vec<u8>, Vec<u8>), ()> {
+    fn test_cert(cert: &str, key: &str) -> Result<(Vec<u8>, Vec<u8>), ()> {
         let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests");
-        let cert = std::fs::read(dir.join("test-cert.der")).map_err(|_| ())?;
-        let key = std::fs::read(dir.join("test-key.der")).map_err(|_| ())?;
+        let cert = std::fs::read(dir.join(cert)).map_err(|_| ())?;
+        let key = std::fs::read(dir.join(key)).map_err(|_| ())?;
         Ok((cert, key))
     }
 }

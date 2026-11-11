@@ -116,11 +116,17 @@ impl Catalog {
                 (
                     Template::Sink(class.clone()),
                     "Sinks",
-                    "Leftovers, sunk or stored",
+                    "Leftovers, sunk in the AWESOME Sink",
+                ),
+                (
+                    Template::Storage { item: class.clone(), class: crate::storage::default_for(game, class).to_string() },
+                    "Storage",
+                    "Kept in storage: takes what arrives, supplies what's set",
                 ),
             ] {
                 let (takes, makes) = match template {
                     Template::Input(_) => (vec![], vec![class.clone()]),
+                    Template::Storage { .. } => (vec![class.clone()], vec![class.clone()]),
                     _ => (vec![class.clone()], vec![]),
                 };
                 entries.push(Entry {
@@ -229,6 +235,7 @@ impl Catalog {
             ("Splitters", "Desc_ConveyorAttachmentSplitter_C"),
             ("Pipeline Junctions", "Desc_PipelineJunction_Cross_C"),
             ("Pipeline Pumps", "Desc_PipelinePump_C"),
+            ("Storage", "Desc_StorageContainerMk1_C"),
         ] {
             groups.push(Group { name: name.into(), icon: GroupIcon::Item(icon.into()), entries: vec![] });
         }

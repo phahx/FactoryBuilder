@@ -111,11 +111,13 @@ pub fn burner_mw(efficiency: f64) -> f64 {
 pub fn burner_footer(ui: &mut Ui, s: &mut UserState, _graph: &FactoryGraph, node_id: NodeId, fuel: &str) {
     let game = s.game.clone();
     let eff = s.nodes.get(&node_id).map(|n| n.efficiency).unwrap_or(1.0);
+    // Live: what it makes now.
+    let mw = s.live.get(&node_id).and_then(|l| l.makes_mw).map(f64::from).unwrap_or_else(|| burner_mw(eff));
     let (r_div, _) = ui.allocate_exact_size(vec2(ui.available_width(), 1.0), egui::Sense::hover());
     ui.painter().rect_filled(r_div, 0.0, DIVIDER);
     let burns = format!("{} {} per min at {} MW", fmt_num(fuel_per_min(&game, fuel)), game.item_name(fuel), fmt_num(HUB_BURNER_MW));
     widgets::split_row_with(ui, 36.0, s, |ui, s| {
-        ui.label(RichText::new(format!("Produces {} MW", fmt_num(burner_mw(eff)))).small().color(TEXT));
+        ui.label(RichText::new(format!("Produces {} MW", fmt_num(mw))).small().color(TEXT));
         s.ui_icon(ui, crate::assets::UiIcon::Power, 14.0, TEXT);
     }, |ui, s| {
         s.item_icon(ui, fb_model::BIOMASS_BURNER_ICON, 32.0);
@@ -123,6 +125,7 @@ pub fn burner_footer(ui: &mut Ui, s: &mut UserState, _graph: &FactoryGraph, node
             ui.spacing_mut().item_spacing.y = 0.0;
             widgets::name_label(ui, RichText::new(BURNER_NAME).color(TEXT));
             widgets::name_label(ui, RichText::new(burns).small().color(TEXT_DIM));
+            crate::live_factory::status_line(ui, s, node_id);
         });
     });
 }

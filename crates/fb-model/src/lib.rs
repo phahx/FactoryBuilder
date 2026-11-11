@@ -86,6 +86,27 @@ pub const HUB_BURNER_MW: f64 = 20.0;
 /// The (standalone) Biomass Burner, whose Docs entry lists the fuels.
 pub const BIOMASS_BURNER: &str = "Build_GeneratorBiomass_Automated_C";
 pub const BIOMASS_BURNER_ICON: &str = "Desc_GeneratorBiomass_Automated_C";
+/// Building classes that are storage (prefixes): the game's storage
+/// containers (and lockers, the HUB's box, the Dimensional Depot uploader)
+/// and fluid buffers.
+pub const STORAGE_CLASSES: &[&str] = &["Build_Storage", "Build_CentralStorage", "Build_IndustrialTank", "Build_PipeStorageTank"];
+
+pub fn is_storage(class: &str) -> bool {
+    class.len() <= 200 && STORAGE_CLASSES.iter().any(|p| class.starts_with(p))
+}
+
+/// The HUB's built-in burners (in saves, and in what the Ficsit Remote
+/// Monitoring mod reports).
+pub const HUB_BURNER_CLASS: &str = "Build_GeneratorIntegratedBiomass";
+
+/// A building's icon (its descriptor). The HUB's burners have none of their
+/// own: they show the Biomass Burner's.
+pub fn building_icon(class: &str) -> String {
+    if class.starts_with(HUB_BURNER_CLASS) {
+        return BIOMASS_BURNER_ICON.to_string();
+    }
+    class.strip_prefix("Build_").map(|s| format!("Desc_{s}")).unwrap_or_default()
+}
 
 /// A fuel a Biomass Burner burns: the item and its energy (MJ per item).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -239,6 +260,11 @@ pub struct GameData {
     /// What a Biomass Burner burns (the HUB's too), in the Docs' order.
     #[serde(default)]
     pub burner_fuels: Vec<BurnerFuel>,
+    /// Generator recipes whose fuel can't be made from mined resources
+    /// (the Biomass Burner's leaves, wood...): fed by hand in game. Saves
+    /// and the live map have them; planning doesn't offer them.
+    #[serde(default)]
+    pub hand_fed_generators: std::collections::BTreeSet<String>,
 }
 
 /// Resource node purity.
@@ -387,6 +413,16 @@ pub struct Schematic {
 }
 
 impl GameData {
+    /// A building's name in game. The Docs don't name the HUB's burners:
+    /// they're the Biomass Burner's, "(HUB)".
+    pub fn building_name(&self, class: &str) -> String {
+        if class.starts_with(HUB_BURNER_CLASS) {
+            let burner = self.building_names.get(BIOMASS_BURNER).map(String::as_str).unwrap_or("Biomass Burner");
+            return format!("{burner} (HUB)");
+        }
+        self.building_names.get(class).cloned().unwrap_or_else(|| class.to_string())
+    }
+
     pub fn item_name<'a>(&'a self, class: &'a str) -> &'a str {
         self.items.get(class).map(|i| i.name.as_str()).unwrap_or(class)
     }
@@ -432,7 +468,8 @@ pub struct SolveRequest {
     pub resource_limits: BTreeMap<ClassName, f64>,
     pub objective: Objective,
     #[serde(default)]
-    pub power: PowerSettings,
+    pub power: PowerSettings,
+
     /// MW the extractors draw per unit per minute of each raw resource
     /// (from the extractor settings): the plan counts their power too.
     #[serde(default)]
@@ -581,6 +618,66 @@ pub struct LiveSettings {
     pub frm_host: String,
     #[serde(default = "default_frm_port")]
     pub frm_port: u16,
+    /// The live project's factories: regions drawn on the map, or buildings
+    /// picked (the Live view builds a master graph of them).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub factories: Vec<LiveFactoryDef>,
+    /// Where nodes were moved to in the Live view's graphs, by graph name
+    /// (the live master graph, the HUB, each live factory).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub layouts: BTreeMap<String, Vec<NodePlace>>,
+}
+
+/// Where one node of a Live view graph stands (unzoomed graph units): what
+/// it is (`key`) and which of those (`n`, in order).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NodePlace {
+    pub key: String,
+    pub n: u32,
+    pub x: f32,
+    pub y: f32,
+}
+
+/// A factory of the live project: a region drawn on the map (everything
+/// inside counts, including what's built there later) or buildings picked
+/// by hand.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct LiveFactoryDef {
+    pub name: String,
+    /// The save session it was drawn on (it shows only with that one).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub world: String,
+    /// The region's corners (world cm).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub region: Vec<[f32; 2]>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub buildings: Vec<BuildingRef>,
+    /// Its planned pieces (Live view, planning mode), as the app keeps them.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub plan: String,
+    /// Its colour on the map and its block's on the live master graph.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<[u8; 3]>,
+}
+
+impl LiveFactoryDef {
+    /// Fit to keep: a name, and a region of 3 to 1000 finite corners or
+    /// some buildings, within sane bounds.
+    pub fn valid(&self) -> bool {
+        let fine = |v: f32| v.is_finite() && v.abs() < 1e8;
+        let name_ok = !self.name.trim().is_empty() && self.name.len() <= 100;
+        let region_ok = self.region.is_empty() || (self.region.len() >= 3 && self.region.len() <= 1000 && self.region.iter().all(|p| fine(p[0]) && fine(p[1])));
+        let group_ok = self.buildings.len() <= 100_000 && self.buildings.iter().all(|b| fine(b.x) && fine(b.y) && b.class.len() <= 200);
+        name_ok && region_ok && group_ok && self.plan.len() <= 1 << 20 && (!self.region.is_empty() || !self.buildings.is_empty())
+    }
+}
+
+/// A building on the map, by class and where it stands (world cm).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BuildingRef {
+    pub class: String,
+    pub x: f32,
+    pub y: f32,
 }
 
 /// What's built right now, from the Ficsit Remote Monitoring mod. A part
@@ -608,6 +705,93 @@ pub struct LiveMachine {
     pub productivity: Option<f32>,
     pub producing: Option<bool>,
     pub paused: Option<bool>,
+    /// The mod's id for it (the actor's name), which its power figures
+    /// (`LivePowered::id`) use too.
+    #[serde(default)]
+    pub id: Option<String>,
+    /// What's in its input and output slots now: item class and amount
+    /// (fluids in m3).
+    #[serde(default)]
+    pub inputs: Vec<(String, f32)>,
+    #[serde(default)]
+    pub outputs: Vec<(String, f32)>,
+    /// Generators: the fuel they hold most of (what they burn).
+    #[serde(default)]
+    pub fuel: Option<String>,
+}
+
+/// Power and the map's smaller buildings right now, from the Ficsit Remote
+/// Monitoring mod. Asked for more often than `LiveBuildings`. As there, a
+/// part is None (or a family missing) when the mod didn't answer for it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct LivePower {
+    /// Map marks, one family per endpoint that answered.
+    pub families: Vec<LiveFamily>,
+    /// Power lines: their two ends.
+    pub lines: Option<Vec<[[f32; 2]; 2]>>,
+    pub circuits: Option<Vec<LiveCircuit>>,
+    /// Every building with power: its circuit and what it draws or makes.
+    pub powered: Option<Vec<LivePowered>>,
+    pub errors: Vec<String>,
+}
+
+/// Buildings of the classes starting with `prefixes`, all of them, as one
+/// endpoint reports them: the save's of these classes are replaced.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct LiveFamily {
+    pub prefixes: Vec<String>,
+    pub items: Vec<LiveStructure>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct LiveStructure {
+    pub class: String,
+    pub x: f32,
+    pub y: f32,
+    /// The game's yaw, degrees (as `world::Machine::yaw`).
+    pub yaw: f32,
+    /// The game's circuit id (`LiveCircuit::ids`).
+    pub circuit: Option<i64>,
+    /// Storage: what's in it (item class, amount) and slots used of all.
+    #[serde(default)]
+    pub items: Vec<(String, f32)>,
+    #[serde(default)]
+    pub slots: Option<(u32, u32)>,
+    /// Fluid tanks: the fluid (class), m3 in it, and m3 it holds.
+    #[serde(default)]
+    pub fluid: Option<(Option<String>, f32, f32)>,
+}
+
+/// One power circuit, with the game's own figures (MW, MWh).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct LiveCircuit {
+    /// The game's circuit ids joined into it.
+    pub ids: Vec<i64>,
+    pub production: f32,
+    pub consumption: f32,
+    pub capacity: f32,
+    pub max_consumption: f32,
+    pub battery_mwh: f32,
+    pub stored_mwh: f32,
+    pub fuse: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct LivePowered {
+    pub id: String,
+    pub class: String,
+    pub x: f32,
+    pub y: f32,
+    pub circuit: Option<i64>,
+    /// MW drawn now, and at most.
+    pub now: f32,
+    pub max: f32,
+    /// Generators: MW made now, and what they can make now.
+    pub makes: f32,
+    pub can_make: f32,
+    /// Generators: the fuel they hold most of, and how much.
+    #[serde(default)]
+    pub fuel: Option<(String, f32)>,
 }
 
 /// A belt or pipe now: its line on the map.
@@ -649,7 +833,7 @@ pub const DEFAULT_SERVER_PORT: u16 = 7777;
 
 impl Default for LiveSettings {
     fn default() -> Self {
-        LiveSettings { enabled: false, server_host: String::new(), server_port: DEFAULT_SERVER_PORT, server_cert: None, frm: false, frm_host: default_frm_host(), frm_port: DEFAULT_FRM_PORT }
+        LiveSettings { enabled: false, server_host: String::new(), server_port: DEFAULT_SERVER_PORT, server_cert: None, frm: false, frm_host: default_frm_host(), frm_port: DEFAULT_FRM_PORT, factories: Vec::new(), layouts: BTreeMap::new() }
     }
 }
 
@@ -825,6 +1009,40 @@ pub mod world {
         /// Player characters where the save left them.
         #[serde(default)]
         pub players: Vec<PlayerSpot>,
+        /// Belts and pipes between machines and storage (containers, fluid
+        /// buffers).
+        #[serde(default)]
+        pub store_links: Vec<StoreLink>,
+        /// The HUB's Biomass Burners (part of the HUB, not machines).
+        #[serde(default)]
+        pub hub_burners: Vec<HubBurner>,
+    }
+
+    /// One of the HUB's built-in Biomass Burners.
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+    pub struct HubBurner {
+        pub x: f32,
+        pub y: f32,
+        /// Its power circuit (index in `World::circuits`).
+        pub circuit: Option<u32>,
+        /// MW it makes now.
+        pub makes: f32,
+        /// What it burns, and how much it holds (live only).
+        pub fuel: Option<String>,
+        #[serde(default)]
+        pub fuel_amount: Option<f32>,
+    }
+
+    /// A machine filling a storage, or a storage feeding a machine.
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+    pub struct StoreLink {
+        pub machine: u32,
+        /// Index in `World::structures`.
+        pub store: u32,
+        /// The item carried, when it can be told from the recipe.
+        pub item: Option<String>,
+        /// Into the storage (from the machine), or out of it.
+        pub into: bool,
     }
 
     /// A player on the map: from a save (no name: saves keep only an
@@ -888,6 +1106,9 @@ pub mod world {
         /// Biomass Burners make what's still needed.
         #[serde(default)]
         pub production: f32,
+        /// A fuse on it has blown (live only: saves don't say).
+        #[serde(default)]
+        pub fuse: bool,
         /// Power Storage on it and what they hold (MWh).
         pub batteries: u32,
         pub stored_mwh: f32,
@@ -1152,6 +1373,55 @@ pub mod setup {
 // answers, so the same code works on the host's network and over the
 // internet. Messages are JSON `Wire` values.
 
+/// Updates from GitHub Releases, signed in CI (crates/fb-sign) and checked
+/// by the app (src-tauri update.rs) before anything is replaced.
+pub mod update {
+    use serde::{Deserialize, Serialize};
+
+    /// Where releases are published.
+    pub const REPO: &str = "phahx/FactoryBuilder";
+
+    /// What a build's signature covers: its build number and the SHA-256 of
+    /// its zip, so an older build can't be passed off as a newer one.
+    pub fn signed_text(build: u32, sha256_hex: &str) -> String {
+        format!("Factory Builder update
+build {build}
+sha256 {sha256_hex}
+")
+    }
+
+    /// The build number in a release tag, "v0.1.0-build.42".
+    pub fn build_of_tag(tag: &str) -> Option<u32> {
+        let n = tag.rsplit_once("-build.")?.1;
+        (!n.is_empty() && n.len() <= 9 && n.bytes().all(|b| b.is_ascii_digit())).then(|| n.parse().ok()).flatten()
+    }
+
+    /// A newer build than this one.
+    #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+    pub struct UpdateInfo {
+        pub build: u32,
+        pub current: u32,
+        /// The release's title ("Factory Builder 0.1.0 (build 42)").
+        pub title: String,
+        /// Download size in bytes.
+        pub size: u64,
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn tags_give_their_build() {
+            assert_eq!(build_of_tag("v0.1.0-build.42"), Some(42));
+            assert_eq!(build_of_tag("v0.1.0"), None);
+            assert_eq!(build_of_tag("v0.1.0-build."), None);
+            assert_eq!(build_of_tag("v0.1.0-build.4x"), None);
+            assert_eq!(build_of_tag("v0.1.0-build.99999999999"), None);
+        }
+    }
+}
+
 pub mod room {
     use serde::{Deserialize, Serialize};
     use std::net::{Ipv4Addr, SocketAddrV4};
@@ -1267,6 +1537,18 @@ pub mod room {
         /// The nodes the sender has selected on document `doc` (at most
         /// `MAX_SELECTION`).
         Selection { id: u32, doc: u32, nodes: Vec<NodeRef> },
+        /// Where the sender is in the app, so everyone sees what everyone
+        /// is doing. Sent when it changes, and now and then for newcomers.
+        Place { id: u32, place: Place },
+    }
+
+    /// Where someone is: a document of the shared project (0 is the master
+    /// graph), the Map tab, or their own Live view.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+    pub enum Place {
+        Graph { doc: u32 },
+        Map,
+        Live,
     }
 
     /// A node of the shared graph. The graph's node ids are slotmap keys,
@@ -1280,10 +1562,11 @@ pub mod room {
         pub version: u32,
     }
 
-    /// Version 2 added pings, messages, views and selections. Version 1
-    /// builds would drop those silently (half a room seeing them), so the
-    /// host turns away other versions instead.
-    pub const PROTOCOL_VERSION: u32 = 2;
+    /// Version 2 added pings, messages, views and selections; version 3
+    /// where people are (`Place`). Older builds would drop those silently
+    /// (half a room seeing them), so the host turns away other versions
+    /// instead.
+    pub const PROTOCOL_VERSION: u32 = 3;
 
     /// Longest message, in characters.
     pub const MAX_CHAT: usize = 200;
@@ -1326,6 +1609,7 @@ pub mod room {
                 }
                 Wire::View { doc, x, y, zoom, .. } if coord_ok(x) && coord_ok(y) && (MIN_VIEW_ZOOM..=MAX_VIEW_ZOOM).contains(&zoom) => Some(Wire::View { id, doc, x, y, zoom }),
                 Wire::Selection { doc, nodes, .. } if nodes.len() <= MAX_SELECTION => Some(Wire::Selection { id, doc, nodes }),
+                Wire::Place { place, .. } => Some(Wire::Place { id, place }),
                 _ => None,
             }
         }

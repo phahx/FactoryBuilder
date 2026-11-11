@@ -8,7 +8,7 @@ use crate::app::FactoryApp;
 use crate::fmt::fmt_num;
 use crate::theme::*;
 use egui::{pos2, vec2, FontId, Pos2, Rect};
-use egui_node_graph2::{InputId, OutputId};
+use egui_node_graph2::{InputId, NodeId, OutputId};
 use serde::{Deserialize, Serialize};
 
 /// A belt (or pipe) chosen for a wire: Mk.1 = 1.
@@ -123,8 +123,16 @@ pub fn paint_labels(app: &mut FactoryApp, ui: &egui::Ui, wires: &[(InputId, Outp
         } else {
             format!("{} {per} on a {c_name} ({how}, up to {} {per}). Click to choose the belt.", fmt_num(flow), fmt_num(belt.per_min))
         };
-        let resp = resp.on_hover_text(tip).on_hover_cursor(egui::CursorIcon::PointingHand);
-        if resp.clicked() {
+        // In the Live view, only a planned piece's belts can be chosen.
+        let g = &app.state.graph;
+        let planned = |n: Option<NodeId>| n.and_then(|n| g.nodes.get(n)).is_some_and(|n| n.user_data.planned);
+        let choosable = !app.user.live_view || planned(g.try_get_input(*input).map(|i| i.node)) || planned(g.try_get_output(*output).map(|o| o.node));
+        let resp = if choosable {
+            resp.on_hover_text(tip).on_hover_cursor(egui::CursorIcon::PointingHand)
+        } else {
+            resp.on_hover_text(format!("{} {per}", fmt_num(flow)))
+        };
+        if resp.clicked() && choosable {
             open = Some((*input, *output, rect.left_bottom()));
         }
         #[cfg(test)]

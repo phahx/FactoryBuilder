@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/fb-model", "crates/fb-engine", "crates/fb-ui", "crates/oodle-shim", "src-tauri"]
+members = ["crates/fb-model", "crates/fb-engine", "crates/fb-ui", "crates/fb-sign", "crates/oodle-shim", "src-tauri"]
 
 [workspace.package]
 version = "0.1.0"

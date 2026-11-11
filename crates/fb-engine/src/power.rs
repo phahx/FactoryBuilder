@@ -23,9 +23,10 @@
 //! only `mVariablePowerProductionConstant`/`Factor`), and the planner doesn't
 //! model geyser nodes.
 //!
-//! Generators whose fuel can't be made at all from raw resources with the
-//! game's recipes (the Biomass Burner's leaves, wood, mycelia, ...) are left
-//! out too, since the planner could never fuel them.
+//! Generators whose fuel can't be made from raw resources (the Biomass
+//! Burner's leaves, wood, mycelia, ...) are kept too: saves and the live map
+//! have them, fed by hand. The planner only uses one when its fuel is
+//! brought in (the solver checks what can be made).
 
 use fb_model::{Amount, Building, GameData, Recipe, GENERATOR_PREFIX};
 use serde_json::Value;
@@ -152,7 +153,8 @@ pub fn add_generators(root: &Value, data: &mut GameData) {
         }
     }
 
-    // Keep only generators whose fuel can be made from raw resources.
+    // Which fuels can be made from mined resources: the rest are fed by
+    // hand (kept, but not offered for planning).
     let mut makeable: BTreeSet<String> = BTreeSet::new();
     makeable.insert(WATER.to_string());
     for (class, item) in &data.items {
@@ -175,10 +177,11 @@ pub fn add_generators(root: &Value, data: &mut GameData) {
         }
     }
     for (building, recipe) in candidates {
-        if recipe.ingredients.iter().all(|a| makeable.contains(&a.item)) {
-            data.buildings.entry(building.class.clone()).or_insert(building);
-            data.recipes.insert(recipe.class.clone(), recipe);
+        if !recipe.ingredients.iter().all(|a| makeable.contains(&a.item)) {
+            data.hand_fed_generators.insert(recipe.class.clone());
         }
+        data.buildings.entry(building.class.clone()).or_insert(building);
+        data.recipes.insert(recipe.class.clone(), recipe);
     }
 }
 
@@ -279,12 +282,14 @@ mod tests {
     }
 
     #[test]
-    fn unfuelable_and_geothermal_are_left_out() {
+    fn hand_fed_kept_geothermal_left_out() {
         let Some((_, data)) = docs() else { return };
         let gens: Vec<&str> = data.recipes.keys().filter(|k| k.starts_with(GENERATOR_PREFIX)).map(|k| k.as_str()).collect();
         eprintln!("{} generator options: {gens:?}", gens.len());
         assert!(!gens.iter().any(|g| g.contains("GeoThermal")));
-        assert!(!gens.contains(&"Generator__Build_GeneratorBiomass_Automated_C__Desc_Leaves_C"), "leaves can't be made");
+        assert!(gens.contains(&"Generator__Build_GeneratorBiomass_Automated_C__Desc_Leaves_C"), "hand-fed burners are kept (saves have them)");
+        assert!(data.hand_fed_generators.contains("Generator__Build_GeneratorBiomass_Automated_C__Desc_Leaves_C"), "and known as hand-fed");
+        assert!(!data.hand_fed_generators.contains("Generator__Build_GeneratorCoal_C__Desc_Coal_C"));
         assert!(gens.contains(&"Generator__Build_GeneratorCoal_C__Desc_PetroleumCoke_C"));
         for g in &gens {
             assert!(!data.recipes[*g].alternate);

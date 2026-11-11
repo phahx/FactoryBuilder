@@ -18,7 +18,9 @@ pub fn menu_bar(app: &mut FactoryApp, ctx: &egui::Context) {
         .show(ctx, |ui| {
             egui::menu::bar(ui, |ui| {
                 ui.style_mut().spacing.button_padding = egui::vec2(10.0, 5.0);
-                ui.menu_button("File", |ui| {
+                // The Live view's project isn't saved, edited or rearranged.
+                let live = app.live_view.on;
+                ui.add_enabled_ui(!live, |ui| ui.menu_button("File", |ui| {
                     ui.set_min_width(240.0);
                     if ui.add(Button::new("New").shortcut_text("Ctrl+N")).clicked() {
                         ui.close_menu();
@@ -107,8 +109,10 @@ pub fn menu_bar(app: &mut FactoryApp, ctx: &egui::Context) {
                         let s = app.status.as_ref().map(|s| s.settings.clone()).unwrap_or_default();
                         app.dialog = Dialog::settings(&s);
                     }
-                });
-                ui.menu_button("Edit", |ui| {
+                }))
+                .response
+                .on_disabled_hover_text("File is for your planning project: go back to it with Plan, at the top right.");
+                ui.add_enabled_ui(!live, |ui| ui.menu_button("Edit", |ui| {
                     ui.set_min_width(220.0);
                     if ui
                         .add_enabled(app.can_undo(), Button::new("Undo").shortcut_text("Ctrl+Z"))
@@ -157,7 +161,9 @@ pub fn menu_bar(app: &mut FactoryApp, ctx: &egui::Context) {
                         app.view = crate::map::View::Graph;
                         app.open_find();
                     }
-                });
+                }))
+                .response
+                .on_disabled_hover_text("Edit is for your planning project: go back to it with Plan, at the top right.");
                 ui.menu_button("View", |ui| {
                     ui.set_min_width(220.0);
                     if ui
@@ -192,7 +198,7 @@ pub fn menu_bar(app: &mut FactoryApp, ctx: &egui::Context) {
                         app.save_view_settings();
                     }
                 });
-                ui.menu_button("Project", |ui| {
+                ui.add_enabled_ui(!live, |ui| ui.menu_button("Project", |ui| {
                     ui.set_min_width(260.0);
                     if ui.button("Master graph").on_hover_text("Every factory in the project and how they feed each other.").clicked() {
                         ui.close_menu();
@@ -231,7 +237,9 @@ pub fn menu_bar(app: &mut FactoryApp, ctx: &egui::Context) {
                             app.dialog = Dialog::DeleteFactories { ids: vec![id] };
                         }
                     }
-                });
+                }))
+                .response
+                .on_disabled_hover_text("Project is for your planning project: go back to it with Plan, at the top right.");
                 ui.menu_button("Room", |ui| {
                     ui.set_min_width(260.0);
                     let off = app.room.mode == crate::room::Mode::Off;

@@ -91,6 +91,15 @@ File › Settings › Developer:
 Development builds never hand off to an installed copy (except in the test profile), so
 installing doesn't get in the way of running your build.
 
+## Updates
+
+At launch the installed app checks the [latest release](https://github.com/phahx/FactoryBuilder/releases/latest).
+When there's a newer build, a bar offers **Update and restart**; nothing changes until you
+click it. The update is downloaded from GitHub, checked against the signature CI made for that
+build (a key only the release workflow has; the app carries the public half), installed over
+the app and started. Factories and settings stay where they are. Development builds don't
+update themselves.
+
 ## Files and sharing
 
 Factories save as `.fbfactory` files (plain, versioned JSON; Export › Factory JSON writes the
@@ -127,11 +136,28 @@ save left them (saves don't keep names), and its Live map button sets up two opt
   server. Its certificate is usually self-signed, so, as the game does, you confirm its
   fingerprint once; a different certificate is refused until you confirm it again.
 - **The [Ficsit Remote Monitoring](https://ficsit.app/mod/FicsitRemoteMonitoring) mod**, on
-  the game host. Players move live (about once a second, named), and every 15 seconds what's
-  built now is laid over the save: new machines, belts and pipes appear, ones taken down go, and
-  hovering a machine shows whether it's producing. On a dedicated server it's reached through
-  the server's own port; otherwise start its web server with `/frm http start` in the game's
-  chat (port 8080 by default).
+  the game host. Players move live (several times a second, named), and what's built now is
+  laid over the save: machines, belts and pipes every 15 seconds; power poles, power lines,
+  circuits (the game's own figures), storage and its contents, fluid buffers, splitters,
+  mergers and the like every 3 seconds. Hovering shows what a machine is doing and holds, or
+  what's in a container. On a dedicated server it's asked through the server's own port, or
+  through the mod's web server on the same machine (start it with `/frm http start` in the
+  game's chat, or its autostart option; set its port in Live map if 8080 is taken).
+
+With a dedicated server set up, the Map tab follows that server only.
+
+### Live view
+
+Draw a region on the Map tab (**Draw factory region**), or select buildings and right-click,
+to make a live factory. Regions belong to the save session they were drawn on. The **Live**
+tab (beside Plan and Map) is a project of its own, built from them and kept up to date: a
+master graph of every live factory, linked by the belts, pipes, storage and power running
+between them, with the save's HUB and its burners; and a graph per factory, with storage as
+storage nodes. What's built shows its settings as text and its live figures (counts on the
+item icons, what's producing, MW now); it can't be changed there, but nodes can be moved and
+the layout is kept. **Planning mode** adds planned pieces to a live factory: they're marked
+Planned, stay editable and are kept with it. Your planning project waits untouched while the
+Live view is shown.
 
 ## Layout
 

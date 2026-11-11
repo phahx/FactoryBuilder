@@ -149,6 +149,7 @@ impl FactoryApp {
                 NodeKind::Input { item } => (portable::Kind::Input, item.clone()),
                 NodeKind::Output { item } => (portable::Kind::Output, item.clone()),
                 NodeKind::Sink { item } => (portable::Kind::Sink, item.clone()),
+                NodeKind::Storage { class, .. } => (portable::Kind::Storage, class.clone()),
                 NodeKind::Merger { item } => (portable::Kind::Merger, item.clone()),
                 NodeKind::Splitter { item } => (portable::Kind::Splitter, item.clone()),
                 NodeKind::Extractor { class, .. } => (portable::Kind::Extractor, class.clone()),
@@ -160,10 +161,10 @@ impl FactoryApp {
             let (item, purity) = match &n.user_data.kind {
                 NodeKind::Extractor { item, purity, .. } => (Some(item.clone()), Some(*purity)),
                 NodeKind::Resource { purity, .. } => (None, Some(*purity)),
-                NodeKind::Pump { item, .. } => (Some(item.clone()), None),
+                NodeKind::Pump { item, .. } | NodeKind::Storage { item, .. } => (Some(item.clone()), None),
                 _ => (None, None),
             };
-            let has_rate = matches!(kind, portable::Kind::Resource | portable::Kind::Input | portable::Kind::Output);
+            let has_rate = matches!(kind, portable::Kind::Resource | portable::Kind::Input | portable::Kind::Output | portable::Kind::Storage);
             f.nodes.push(portable::Node {
                 kind,
                 class,
@@ -177,6 +178,7 @@ impl FactoryApp {
                 purity,
                 x: (pos.x * 10.0).round() / 10.0,
                 y: (pos.y * 10.0).round() / 10.0,
+                planned: n.user_data.planned,
             });
         }
         for (to, &id) in ids.iter().enumerate() {
@@ -256,6 +258,13 @@ impl FactoryApp {
     /// (graph units). Returns the new nodes and how many entries were skipped
     /// because this game version doesn't know them.
     pub(crate) fn insert_portable(&mut self, f: &FactoryFile, offset: Vec2) -> (Vec<NodeId>, usize) {
+        let (ids, skipped) = self.insert_portable_indexed(f, offset);
+        (ids.into_iter().flatten().collect(), skipped)
+    }
+
+    /// As `insert_portable`, with the new node of each of the file's nodes
+    /// (in the file's order; None: skipped).
+    pub(crate) fn insert_portable_indexed(&mut self, f: &FactoryFile, offset: Vec2) -> (Vec<Option<NodeId>>, usize) {
         let game = self.user.game.clone();
         let z = self.state.pan_zoom.zoom;
         let mut ids: Vec<Option<NodeId>> = vec![None; f.nodes.len()];
@@ -268,6 +277,9 @@ impl FactoryApp {
                 portable::Kind::Input if known_item => Template::Input(n.class.clone()),
                 portable::Kind::Output if known_item => Template::Output(n.class.clone()),
                 portable::Kind::Sink if known_item => Template::Sink(n.class.clone()),
+                portable::Kind::Storage if crate::storage::is_storage(&n.class) && n.item.as_ref().is_some_and(|i| game.items.contains_key(i)) => {
+                    Template::Storage { item: n.item.clone().unwrap_or_default(), class: n.class.clone() }
+                }
                 portable::Kind::Merger if known_item => Template::Merger(n.class.clone()),
                 portable::Kind::Splitter if known_item => Template::Splitter(n.class.clone()),
                 portable::Kind::Extractor if crate::extractors::find(&game, &n.class).is_some() && n.item.as_ref().is_some_and(|i| game.items.contains_key(i)) => {
@@ -297,6 +309,7 @@ impl FactoryApp {
             set(self, crate::graph::SLOOPS, n.sloops.map(f64::from));
             set(self, RATE, n.rate);
             self.state.graph[id].user_data.color = n.color.as_deref().and_then(portable::color_from_hex);
+            self.state.graph[id].user_data.planned = n.planned;
             if let (NodeKind::Resource { purity, .. }, Some(p)) = (&mut self.state.graph[id].user_data.kind, n.purity) {
                 *purity = p;
             }
@@ -336,7 +349,7 @@ impl FactoryApp {
         for (k, fr) in f.frames.iter().enumerate() {
             self.planner.frames.push(frame_from_file(fr, next + 1 + k as u32, offset));
         }
-        (ids.into_iter().flatten().collect(), skipped)
+        (ids, skipped)
     }
 
     /// Replaces the project with project file `p`.

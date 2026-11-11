@@ -1144,10 +1144,15 @@ pub(crate) fn read_world_stats(bytes: &[u8], game: &GameData) -> Result<(World, 
 
     // Machines (ids in order), carriers and marks.
     let mut machine_of: Vec<Option<u32>> = vec![None; ents.len()];
+    // Storage (containers, fluid buffers): their index in `structures`.
+    let mut store_of: Vec<Option<u32>> = vec![None; ents.len()];
     for (i, e) in ents.iter().enumerate() {
         let [x, y, z] = e.xf.pos;
         let (Some(x), Some(y), Some(z)) = (finite(x), finite(y), finite(z)) else { continue };
         if e.mark {
+            if e.role == Role::End && fb_model::is_storage(&e.class) {
+                store_of[i] = Some(world.structures.len() as u32);
+            }
             world.structures.push(Structure { class: e.class.clone(), x, y, yaw: finite(e.xf.yaw()).unwrap_or(0.0), circuit: None, power: None });
         }
         match e.role {
@@ -1250,8 +1255,10 @@ pub(crate) fn read_world_stats(bytes: &[u8], game: &GameData) -> Result<(World, 
         })
         .collect();
 
-    // Follow each machine output downstream to the machines it feeds.
+    // Follow each machine output downstream to the machines it feeds (and
+    // the storage it fills).
     let mut found: BTreeSet<(u32, u32, bool)> = BTreeSet::new();
+    let mut found_store: BTreeSet<(u32, u32, bool, bool)> = BTreeSet::new();
     let mut stamp: Vec<u32> = vec![u32::MAX; conns.len()];
     let mut stack: Vec<u32> = Vec::new();
     let mut walk = 0u32;
@@ -1280,8 +1287,59 @@ pub(crate) fn read_world_stats(bytes: &[u8], game: &GameData) -> Result<(World, 
                         }
                     }
                 }
+                Role::End => {
+                    if let Some(s) = store_of[x] {
+                        if dir[e] != Dir::Out {
+                            found_store.insert((from, s, fluid, true));
+                        }
+                    }
+                }
                 Role::Carrier(_) | Role::Pass => {
                     // Belts flow one way; pipes go anywhere they connect.
+                    if !fluid && dir[e] == Dir::Out {
+                        continue;
+                    }
+                    for &f in &comps[x] {
+                        let f = f as usize;
+                        if f != e && conns[f].fluid == fluid && (fluid || dir[f] != Dir::In) {
+                            stack.extend(peer[f]);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        walk += 1;
+    }
+
+    // Follow each storage output downstream to the machines it feeds. (A
+    // fluid buffer's pipes go both ways: what it reaches that takes in.)
+    for (start, conn) in conns.iter().enumerate() {
+        let Some(from_ent) = owner[start] else { continue };
+        let Some(store) = store_of[from_ent as usize] else { continue };
+        let fluid = conn.fluid;
+        if !fluid && dir[start] != Dir::Out {
+            continue;
+        }
+        stack.clear();
+        stack.extend(peer[start]);
+        while let Some(e) = stack.pop() {
+            let e = e as usize;
+            if stamp[e] == walk || conns[e].fluid != fluid {
+                continue;
+            }
+            stamp[e] = walk;
+            let Some(x) = owner[e] else { continue };
+            let x = x as usize;
+            match ents[x].role {
+                Role::Machine => {
+                    if let Some(to) = machine_of[x] {
+                        if dir[e] != Dir::Out {
+                            found_store.insert((to, store, fluid, false));
+                        }
+                    }
+                }
+                Role::Carrier(_) | Role::Pass => {
                     if !fluid && dir[e] == Dir::Out {
                         continue;
                     }
@@ -1338,6 +1396,21 @@ pub(crate) fn read_world_stats(bytes: &[u8], game: &GameData) -> Result<(World, 
         items.dedup();
         let item = if items.len() == 1 { Some(items[0].to_string()) } else { None };
         world.links.push(Link { from, to, item });
+    }
+    // What goes into storage (what the machine makes) or comes out of it
+    // (what the machine takes), when there's one such item of that form.
+    for (machine, store, fluid, into) in found_store {
+        let m = &world.machines[machine as usize];
+        let mut items: Vec<&str> = if into {
+            produced(game, &classes, &resource_of, m)
+        } else {
+            taken(game, m, ents[ent_of_machine[&machine]].info.fuel.as_deref())
+        };
+        items.retain(|i| game.item_form(i).is_fluid() == fluid);
+        items.sort_unstable();
+        items.dedup();
+        let item = if items.len() == 1 { Some(items[0].to_string()) } else { None };
+        world.store_links.push(fb_model::world::StoreLink { machine, store, item, into });
     }
     Ok((world, stats))
 }
@@ -1620,6 +1693,14 @@ fn circuits(game: &GameData, ents: &[Ent], machine_of: &[Option<u32>], power: &[
         Some([e.xf.pos[0] as f32, e.xf.pos[1] as f32])
     };
 
+    // The HUB's burners: their circuit, output and fuel.
+    for ent in ents.iter().filter(|e| e.class.starts_with(fb_model::HUB_BURNER_CLASS)) {
+        let [x, y, _] = ent.xf.pos;
+        let (Some(x), Some(y)) = (finite(x), finite(y)) else { continue };
+        let circuit = index.get(ent.name.as_str()).and_then(|&v| circuit_of(v));
+        let makes = use_of.get(ent.name.as_str()).map(|u| u.makes).unwrap_or(0.0);
+        world.hub_burners.push(fb_model::world::HubBurner { x, y, circuit, makes, fuel: ent.info.fuel.clone(), fuel_amount: None });
+    }
     // Buildings: circuit and power use; poles and switches; the lines.
     for (e, ent) in ents.iter().enumerate() {
         let Some(&v) = index.get(ent.name.as_str()) else { continue };

@@ -38,6 +38,8 @@ pub struct MapState {
     pub sessions: Option<Vec<Session>>,
     pub session: Option<String>,
     pub world: Option<World>,
+    /// Goes up each time `world` changes (live factories follow it).
+    pub version: u64,
     pub loading: Option<String>,
     pub world_error: Option<String>,
     next_follow: f64,
@@ -70,6 +72,12 @@ impl MapState {
         let c = rect.center();
         (self.center.0 + (p.x - c.x) as f64 / self.scale, self.center.1 + (p.y - c.y) as f64 / self.scale)
     }
+    pub(crate) fn screen_of(&self, rect: Rect, x: f64, y: f64) -> Pos2 {
+        self.to_screen(rect, x, y)
+    }
+    pub(crate) fn world_of(&self, rect: Rect, p: Pos2) -> (f64, f64) {
+        self.to_world(rect, p)
+    }
     /// Centres the view on world (x, y) at `scale` px per cm.
     pub(crate) fn look_at(&mut self, x: f64, y: f64, scale: f64) {
         self.center = (x, y);
@@ -94,6 +102,7 @@ impl MapState {
             .collect();
         self.selected.retain(|id| (*id as usize) < w.machines.len());
         self.world = Some(w);
+        self.version += 1;
     }
 }
 
@@ -119,10 +128,16 @@ impl FactoryApp {
     pub(crate) fn choose_session(&mut self, session: String) {
         // Live map add-on: the dedicated server's newest save, fetched now.
         if session == crate::live::SERVER_SESSION {
+            let from_elsewhere = self.map.session.as_deref() != Some(crate::live::SERVER_SESSION);
             self.map.session = Some(session);
             self.map.selected.clear();
             self.map.world_error = None;
             self.live.next_server = 0.0;
+            if from_elsewhere {
+                // Not the server's: don't show it while the server's comes.
+                self.map.world = None;
+                self.live.base = None;
+            }
             return;
         }
         let newest = self.map.sessions.as_ref().and_then(|l| l.iter().find(|s| s.session == session)).and_then(|s| s.saves.first()).map(|s| s.path.clone());
@@ -143,7 +158,7 @@ impl FactoryApp {
                 let list = r.unwrap_or_default();
                 let first = list.first().map(|s| s.session.clone());
                 self.map.sessions = Some(list);
-                if self.map.session.is_none() {
+                if self.map.session.is_none() && !self.live_server() {
                     if let Some(s) = first {
                         self.choose_session(s);
                     }
@@ -176,7 +191,7 @@ impl FactoryApp {
         }
     }
 
-    fn map_follow(&mut self, ctx: &egui::Context) {
+    pub(crate) fn map_follow(&mut self, ctx: &egui::Context) {
         let now = ctx.input(|i| i.time);
         let Some(session) = self.map.session.clone() else { return };
         if session == crate::live::SERVER_SESSION {
@@ -225,11 +240,25 @@ fn date(unix: i64) -> String {
     crate::progress_ui::date_text(unix)
 }
 
+impl FactoryApp {
+    /// What keeps the map's world current: the map and its saves (or the
+    /// dedicated server) loaded and followed. The Map tab does this, and so
+    /// does an open live factory, which is built from that world.
+    pub(crate) fn map_background(&mut self, ctx: &egui::Context) {
+        self.map_start();
+        // With a dedicated server set up, the map follows that server and
+        // nothing else (no local saves).
+        if self.live_server() && !matches!(self.map.session.as_deref(), Some(crate::live::SERVER_SESSION) | Some("Self-test")) {
+            self.choose_session(crate::live::SERVER_SESSION.to_string());
+        }
+        self.map_follow(ctx);
+    }
+}
+
 /// The Map tab's content.
 pub fn map_ui(app: &mut FactoryApp, ui: &mut egui::Ui) {
-    app.map_start();
     let ctx = ui.ctx().clone();
-    app.map_follow(&ctx);
+    app.map_background(&ctx);
     app.live_poll(&ctx);
     let live_server = app.live_server();
     let assets_ready = app.status.as_ref().is_some_and(|s| s.icons_found > 0);
@@ -247,23 +276,22 @@ pub fn map_ui(app: &mut FactoryApp, ui: &mut egui::Ui) {
     let mut child = ui.new_child(egui::UiBuilder::new().max_rect(bar.shrink2(vec2(10.0, 0.0))).layout(egui::Layout::left_to_right(egui::Align::Center)));
     {
         let ui = &mut child;
-        ui.label(RichText::new("Save").color(TEXT_DIM));
-        let current = app.map.session.clone().unwrap_or_else(|| "None".into());
-        egui::ComboBox::from_id_salt("map_session").selected_text(current).width(200.0).show_ui(ui, |ui| {
-            if live_server {
-                let host = app.live_settings().server_host;
-                let on = app.map.session.as_deref() == Some(crate::live::SERVER_SESSION);
-                if ui.selectable_label(on, format!("{}  ·  {}", crate::live::SERVER_SESSION, host.trim())).clicked() {
-                    pick = Some(crate::live::SERVER_SESSION.to_string());
+        if live_server {
+            // Only the configured server (Live map add-on).
+            ui.label(RichText::new("Server").color(TEXT_DIM));
+            ui.label(RichText::new(app.live_settings().server_host.trim().to_string()).color(TEXT));
+        } else {
+            ui.label(RichText::new("Save").color(TEXT_DIM));
+            let current = app.map.session.clone().unwrap_or_else(|| "None".into());
+            egui::ComboBox::from_id_salt("map_session").selected_text(current).width(200.0).show_ui(ui, |ui| {
+                for s in app.map.sessions.iter().flatten() {
+                    let when = s.saves.first().map(|x| date(x.saved_unix)).unwrap_or_default();
+                    if ui.selectable_label(app.map.session.as_deref() == Some(s.session.as_str()), format!("{}  ·  {when}", s.session)).clicked() {
+                        pick = Some(s.session.clone());
+                    }
                 }
-            }
-            for s in app.map.sessions.iter().flatten() {
-                let when = s.saves.first().map(|x| date(x.saved_unix)).unwrap_or_default();
-                if ui.selectable_label(app.map.session.as_deref() == Some(s.session.as_str()), format!("{}  ·  {when}", s.session)).clicked() {
-                    pick = Some(s.session.clone());
-                }
-            }
-        });
+            });
+        }
         // What's drawn over the map.
         ui.add_space(8.0);
         egui::ComboBox::from_id_salt("map_layers").selected_text("Layers").width(110.0).show_ui(ui, |ui| {
@@ -287,7 +315,7 @@ pub fn map_ui(app: &mut FactoryApp, ui: &mut egui::Ui) {
         } else if let Some(w) = &app.map.world {
             let follows = if app.map.session.as_deref() == Some(crate::live::SERVER_SESSION) { "follows the dedicated server" } else { "follows the newest save" };
             let mut s = format!("{} · saved {} · {follows}", w.save.name, date(w.save.saved_unix));
-            if app.live.buildings.is_some() && app.live.base.is_some() {
+            if (app.live.buildings.is_some() || app.live.power.is_some()) && app.live.base.is_some() {
                 let (added, removed) = app.live.changes;
                 s += &format!(" · live: {added} built, {removed} taken down since");
             }
@@ -304,10 +332,30 @@ pub fn map_ui(app: &mut FactoryApp, ui: &mut egui::Ui) {
             if app.live_on() && widgets::button(ui, "Live map…").on_hover_text("Follow a dedicated server, and live players from the Ficsit Remote Monitoring mod.").clicked() {
                 open_live = true;
             }
-            let n = app.map.selected.len();
+            let n = app.map.selected.len() + app.live_map.selected_stores.len();
+            if let Some(d) = &app.live_map.drawing {
+                let what = if d.redraw.is_some() { "Redrawing the region" } else { "New live factory" };
+                if widgets::button(ui, "Cancel").clicked() {
+                    app.live_map.drawing = None;
+                }
+                ui.label(RichText::new(format!("{what}: click for corners · double-click or Enter to finish · Esc to cancel")).small().color(ACCENT));
+                return;
+            }
+            if widgets::button_enabled(ui, "Draw factory region", app.map.world.is_some())
+                .on_hover_text("Draw a region on the map: everything inside it becomes a live factory on the master graph, kept up to date (including what's built there later). Or select buildings and right-click for a live factory of just those.")
+                .clicked()
+            {
+                app.start_region(None);
+            }
             import = widgets::button_enabled(ui, "Import into planner", n > 0).on_hover_text("Adds the selected machines to the project as a new factory, one node per recipe.").clicked();
             let tip = "A new project of every factory in the save, linked on the master graph by the belts and pipes between them.";
-            whole = widgets::button_enabled(ui, "Make project from save…", app.map.world.is_some()).on_hover_text(tip).clicked();
+            // Live mode builds live factories from the map instead.
+            let live = app.live_on();
+            whole = widgets::button_enabled(ui, "Make project from save…", app.map.world.is_some() && !live)
+                .on_hover_text(tip)
+                .on_disabled_hover_text(if live { "Not while the Live map add-on is on (Settings › Add-ons)." } else { tip })
+                .clicked()
+                && !live;
             if n > 0 {
                 clear = widgets::button(ui, &format!("Clear selection ({n})")).clicked();
             } else if app.map.world.is_some() {
@@ -334,6 +382,7 @@ pub fn map_ui(app: &mut FactoryApp, ui: &mut egui::Ui) {
     }
     if clear {
         app.map.selected.clear();
+        app.live_map.selected_stores.clear();
     }
     if import {
         app.import_selection(&ctx);
@@ -415,7 +464,7 @@ pub fn map_ui(app: &mut FactoryApp, ui: &mut egui::Ui) {
         let d = resp.drag_delta();
         state.center.0 -= d.x as f64 / state.scale;
         state.center.1 -= d.y as f64 / state.scale;
-    } else if resp.drag_started_by(egui::PointerButton::Primary) && !panning {
+    } else if resp.drag_started_by(egui::PointerButton::Primary) && !panning && app.live_map.drawing.is_none() {
         state.drag_from = resp.interact_pointer_pos();
     }
 
@@ -572,7 +621,7 @@ pub fn map_ui(app: &mut FactoryApp, ui: &mut egui::Ui) {
             let r = Rect::from_center_size(p, vec2(size, size));
             if size >= 12.0 {
                 painter.rect_filled(r.expand(2.0), 2.0, if selected { ACCENT } else { CONTENT });
-                let icon = class.strip_prefix("Build_").map(|s| format!("Desc_{s}")).unwrap_or_default();
+                let icon = fb_model::building_icon(&class);
                 if let Some(uri) = assets.item_uri(&icon) {
                     egui::Image::new(uri).paint_at(&canvas, r);
                 }
@@ -598,7 +647,7 @@ pub fn map_ui(app: &mut FactoryApp, ui: &mut egui::Ui) {
             // Poles, switches and batteries (stations and the like have a
             // tip of their own, with their power in it).
             if let Some(s) = w.structures.iter().rev().filter(|s| s.circuit.is_some() && s.power.is_none()).find(|s| on(s)) {
-                let name = app.user.game.building_names.get(&s.class).cloned().unwrap_or_else(|| s.class.clone());
+                let name = app.user.game.building_name(&s.class);
                 power_hover = Some((name, s.circuit, None));
             } else if let Some(k) = w.power_lines.iter().position(|l| segment_distance(q, st.to_screen(rect, l.a[0] as f64, l.a[1] as f64), st.to_screen(rect, l.b[0] as f64, l.b[1] as f64)) < 5.0) {
                 power_hover = Some(("Power Line".into(), w.power_lines[k].circuit, Some(k)));
@@ -675,6 +724,12 @@ pub fn map_ui(app: &mut FactoryApp, ui: &mut egui::Ui) {
             let additive = ui.input(|i| i.modifiers.shift);
             if !additive {
                 state.selected.clear();
+                app.live_map.selected_stores.clear();
+            }
+            for (k, s) in w.structures.iter().enumerate() {
+                if fb_model::is_storage(&s.class) && d.contains(state.to_screen(rect, s.x as f64, s.y as f64)) {
+                    app.live_map.selected_stores.insert(k as u32);
+                }
             }
             for m in &w.machines {
                 if d.contains(state.to_screen(rect, m.x as f64, m.y as f64)) {
@@ -684,10 +739,13 @@ pub fn map_ui(app: &mut FactoryApp, ui: &mut egui::Ui) {
         }
         state.drag_from = None;
     }
-    if resp.clicked() && !ui.input(|i| i.modifiers.shift) {
+    if resp.clicked() && !ui.input(|i| i.modifiers.shift) && app.live_map.drawing.is_none() {
         state.selected.clear();
+        app.live_map.selected_stores.clear();
     }
-    let (live_status, live_new_from) = (&app.live.status, app.live.new_from);
+    // Live factories: their outlines, drawing a region, the right-click menu.
+    crate::live_map::map_layer(app, ui, &resp, rect, &painter);
+    let (live_status, live_new_from, structure_status) = (&app.live.status, app.live.new_from, &app.live.structure_status);
     if let Some(i) = player_hover {
         let saved = app.map.world.as_ref().map(|w| date(w.save.saved_unix)).unwrap_or_default();
         egui::show_tooltip_at_pointer(&ctx, ui.layer_id(), egui::Id::new("map_player"), |ui| crate::live::player_tip(ui, &players, i, live_players, &format!("saved {saved}")));
@@ -721,7 +779,9 @@ pub fn map_ui(app: &mut FactoryApp, ui: &mut egui::Ui) {
         if let Some(m) = w.machines.iter().rev().find(|m| under(&m.class, m.x, m.y, m.yaw)) {
             egui::show_tooltip_at_pointer(&ctx, ui.layer_id(), egui::Id::new("map_machine"), |ui| {
                 machine_tip(ui, assets, &game, &info, w, m);
-                crate::live::machine_lines(ui, live_status.get(m.id as usize).and_then(|s| s.as_ref()), m.id as usize >= live_new_from && !live_status.is_empty());
+                let status = live_status.get(m.id as usize).and_then(|s| s.as_ref());
+                crate::live::machine_lines(ui, status, m.id as usize >= live_new_from && !live_status.is_empty());
+                crate::live::machine_stock(ui, assets, &game, status);
             });
         } else if let Some((title, circuit, line)) = power_hover {
             egui::show_tooltip_at_pointer(&ctx, ui.layer_id(), egui::Id::new("map_power"), |ui| {
@@ -733,9 +793,11 @@ pub fn map_ui(app: &mut FactoryApp, ui: &mut egui::Ui) {
                 }
                 circuit_tip(ui, assets, &game, circuit.and_then(|c| w.circuits.get(c as usize)));
             });
-        } else if let Some(s) = w.structures.iter().rev().find(|s| under(&s.class, s.x, s.y, s.yaw)) {
+        } else if let Some(k) = w.structures.iter().rposition(|s| under(&s.class, s.x, s.y, s.yaw)) {
+            let s = &w.structures[k];
             egui::show_tooltip_at_pointer(&ctx, ui.layer_id(), egui::Id::new("map_structure"), |ui| {
-                widgets::tooltip_title(ui, game.building_names.get(&s.class).map(String::as_str).unwrap_or(&s.class));
+                widgets::tooltip_title(ui, &game.building_name(&s.class));
+                crate::live::structure_lines(ui, assets, &game, structure_status.get(k).and_then(|s| s.as_ref()));
                 if let Some(u) = s.power {
                     power_section(ui, u, None, s.circuit.and_then(|c| w.circuits.get(c as usize)));
                 }
@@ -761,8 +823,8 @@ fn made_by(game: &fb_model::GameData, info: &MapInfo, w: &World, m: &fb_model::w
 /// Hover tip for a machine on the map: what it is, what it makes and how
 /// it's set up.
 fn machine_tip(ui: &mut egui::Ui, assets: &mut crate::assets::Assets, game: &fb_model::GameData, info: &MapInfo, w: &World, m: &fb_model::world::Machine) {
-    let name = game.building_names.get(&m.class).map(String::as_str).unwrap_or(&m.class);
-    widgets::tooltip_title(ui, name);
+    let name = game.building_name(&m.class);
+    widgets::tooltip_title(ui, &name);
     if let Some(r) = m.recipe.as_ref().and_then(|r| game.recipes.get(r)) {
         widgets::tip_line(ui, RichText::new(&r.name).color(TEXT));
         let k = m.clock as f64 * m.boost as f64;
@@ -922,6 +984,9 @@ fn circuit_tip(ui: &mut egui::Ui, assets: &mut crate::assets::Assets, game: &fb_
             ui.end_row();
         }
     });
+    if c.fuse {
+        widgets::tip_line(ui, RichText::new("A fuse has blown: this circuit is off until it's reset").color(ACCENT));
+    }
     if c.consumption > c.production + 0.01 {
         let text = if c.stored_mwh > 0.0 { "Drawing more than the generators make: the batteries cover the rest" } else { "Drawing more than the generators make" };
         widgets::tip_line(ui, RichText::new(text).small().color(ACCENT));
@@ -938,8 +1003,8 @@ fn circuit_tip(ui: &mut egui::Ui, assets: &mut crate::assets::Assets, game: &fb_
     } else {
         widgets::tip_line(ui, RichText::new("Power from").small().color(TEXT_DIM));
         for s in &c.sources {
-            let name = game.building_names.get(&s.class).cloned().unwrap_or_else(|| s.class.clone());
-            let icon = s.class.strip_prefix("Build_").map(|x| format!("Desc_{x}")).unwrap_or_default();
+            let name = game.building_name(&s.class);
+            let icon = fb_model::building_icon(&s.class);
             let amount = if s.mw > 0.0 { format!("{} MW", fmt_mw(s.mw)) } else { "not running".into() };
             widgets::tip_item(ui, assets, &icon, &format!("{} × {name}", s.count), &amount);
         }

@@ -28,6 +28,11 @@ pub const PING_SECS: f64 = 2.0;
 pub const BUBBLE_SECS: f64 = 6.0;
 /// Messages kept in the overview's list.
 pub const MESSAGES_KEPT: usize = 20;
+/// Messages the overview shows (the newest), one line each, so the rest of
+/// the overview stays in view.
+pub const MESSAGES_SHOWN: usize = 5;
+/// Where I am goes out again this often, for people who just joined.
+const PLACE_EVERY: f64 = 3.0;
 /// Views and selections go out at most this often (about 10 a second).
 const SEND_EVERY: f64 = 0.1;
 /// Pings kept at once; the oldest go first (bounds what a flood can cost).
@@ -54,7 +59,7 @@ pub fn node_id(r: NodeRef) -> Option<NodeId> {
 
 fn sender(w: &Wire) -> Option<u32> {
     match w {
-        Wire::Cursor { id, .. } | Wire::Ping { id, .. } | Wire::Chat { id, .. } | Wire::View { id, .. } | Wire::Selection { id, .. } => Some(*id),
+        Wire::Cursor { id, .. } | Wire::Ping { id, .. } | Wire::Chat { id, .. } | Wire::View { id, .. } | Wire::Selection { id, .. } | Wire::Place { id, .. } => Some(*id),
         _ => None,
     }
 }
@@ -121,9 +126,40 @@ impl FactoryApp {
                 let ids = nodes.into_iter().filter_map(node_id).collect();
                 self.room.selections.insert(id, (doc, ids));
             }
+            Wire::Place { place, .. } => {
+                self.room.places.insert(id, place);
+            }
             _ => {}
         }
         ctx.request_repaint();
+    }
+
+    /// Tells the room where I am (when it changes, and now and then), and
+    /// keeps the shared project's document names for saying where others are.
+    pub(crate) fn send_place(&mut self, ctx: &egui::Context) {
+        use fb_model::room::Place;
+        if !self.room.active() {
+            return;
+        }
+        let place = if self.view == crate::map::View::Map {
+            Place::Map
+        } else if self.live_view.on {
+            Place::Live
+        } else {
+            Place::Graph { doc: self.active }
+        };
+        if !self.live_view.on {
+            self.room.doc_names = self.docs.iter().map(|d| (d.id, if d.id == crate::project::MASTER { "the master graph".to_string() } else { d.name.clone() })).collect();
+        }
+        let me = self.room.me;
+        self.room.places.insert(me, place);
+        let now = ctx.input(|i| i.time);
+        let stale = self.room.sent_place.as_ref().is_none_or(|(p, at)| *p != place || now - at >= PLACE_EVERY);
+        if stale {
+            self.room.sent_place = Some((place, now));
+            self.room_send(Wire::Place { id: me, place });
+        }
+        ctx.request_repaint_after(std::time::Duration::from_secs_f64(PLACE_EVERY));
     }
 
     pub(crate) fn add_ping(&mut self, id: u32, pos: Pos2, doc: u32, now: f64) {
@@ -477,12 +513,18 @@ pub fn room_section(ui: &mut Ui, room: &RoomUi) -> Option<u32> {
         if following {
             tags.push("following");
         }
+        let place = room.places.get(&p.id).map(|pl| place_text(room, *pl));
         let content = |ui: &mut Ui| {
             let (r, _) = ui.allocate_exact_size(vec2(12.0, 12.0), Sense::hover());
             ui.painter().rect_filled(r, 0.0, rgb(p.color));
             widgets::name_label(ui, RichText::new(&p.name).color(TEXT));
             if !tags.is_empty() {
                 ui.label(RichText::new(tags.join(", ")).small().color(TEXT_DIM));
+            }
+            if let Some(place) = &place {
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    widgets::name_label(ui, RichText::new(place).small().color(TEXT_DIM));
+                });
             }
         };
         if me {
@@ -504,12 +546,47 @@ pub fn room_section(ui: &mut Ui, room: &RoomUi) -> Option<u32> {
     if room.messages.is_empty() {
         widgets::caption(ui, "Press / over the graph to send everyone a short message.");
     }
-    for m in &room.messages {
+    // The newest few, a line each (the whole message on hover).
+    let skip = room.messages.len().saturating_sub(MESSAGES_SHOWN);
+    for m in room.messages.iter().skip(skip) {
         let mut job = LayoutJob::default();
         job.append(&m.name, 0.0, TextFormat { font_id: theme::semibold(14.0), color: rgb(m.color), ..Default::default() });
         job.append(&m.text, 6.0, TextFormat { font_id: FontId::proportional(14.0), color: TEXT, ..Default::default() });
-        ui.add(egui::Label::new(job).wrap());
+        ui.add(egui::Label::new(job).truncate()).on_hover_text(format!("{}: {}", m.name, m.text));
     }
     widgets::divider(ui);
     clicked
+}
+
+/// Where someone is, in words ("on Smelting", "on the Map").
+pub fn place_text(room: &RoomUi, place: fb_model::room::Place) -> String {
+    use fb_model::room::Place;
+    match place {
+        Place::Map => "on the Map".into(),
+        Place::Live => "in the Live view".into(),
+        Place::Graph { doc } => match room.doc_names.get(&doc) {
+            Some(n) => format!("on {n}"),
+            None => "on a factory".into(),
+        },
+    }
+}
+
+/// People's colours on a tab: who is there (`at` matches their place).
+pub fn tab_marks(ui: &Ui, room: &RoomUi, tab: Rect, at: impl Fn(fb_model::room::Place) -> bool) {
+    if !room.active() {
+        return;
+    }
+    let mut x = tab.right() - 4.0;
+    for (id, place) in &room.places {
+        if *id == room.me || !at(*place) {
+            continue;
+        }
+        let Some(p) = room.peers.get(id) else { continue };
+        let r = Rect::from_min_size(pos2(x - 6.0, tab.top() + 3.0), vec2(6.0, 6.0));
+        ui.painter().rect_filled(r, 0.0, rgb(p.color));
+        x -= 8.0;
+        if x < tab.left() + 6.0 {
+            break;
+        }
+    }
 }

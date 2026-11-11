@@ -44,6 +44,10 @@ pub enum Dialog {
     /// Confirm removing factories from the project.
     DeleteFactories { ids: Vec<u32> },
     RenameFactory { id: u32, name: String },
+    /// Name a new live factory (live_factory.rs) made from `def`.
+    NewLiveFactory { name: String, def: fb_model::LiveFactoryDef },
+    RenameLiveFactory { index: usize, name: String },
+    DeleteLiveFactory { index: usize },
     Settings { draft: Settings },
     Shortcuts,
     OpenRoom { name: String, error: Option<String> },
@@ -326,6 +330,105 @@ pub fn show(app: &mut FactoryApp, ctx: &egui::Context) {
                     app.guard(Pending::OpenProject(Box::new(p)));
                 }
                 _ => app.dialog = Dialog::WorldProject(d),
+            }
+        }
+        Dialog::NewLiveFactory { mut name, def } => {
+            let mut submit = false;
+            let named = !name.trim().is_empty();
+            let clicked = modal(
+                ctx,
+                "New live factory",
+                420.0,
+                |ui| {
+                    ui.label(RichText::new("Name").color(TEXT_DIM));
+                    let r = ui.add(egui::TextEdit::singleline(&mut name).desired_width(f32::INFINITY).char_limit(100));
+                    if !r.has_focus() && !r.lost_focus() {
+                        r.request_focus();
+                    }
+                    submit = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                    ui.add_space(6.0);
+                    ui.label(RichText::new("It's a factory of the Live view: built from what's on the map, and kept up to date as the map changes.").small().color(TEXT_DIM));
+                },
+                &[("Cancel", true), ("Make", named)],
+            );
+            match clicked {
+                Some(0) => app.dialog = Dialog::None,
+                Some(1) => submit = true,
+                _ => app.dialog = Dialog::NewLiveFactory { name: name.clone(), def: def.clone() },
+            }
+            if submit && !name.trim().is_empty() {
+                app.dialog = Dialog::None;
+                let name = app.unique_live_name(name.trim());
+                let world = app.live_world().unwrap_or_default();
+                let mut defs = app.live_defs();
+                defs.push(fb_model::LiveFactoryDef { name: name.clone(), world, ..def });
+                app.set_live_defs(defs);
+                app.map.selected.clear();
+                app.live_map.selected_stores.clear();
+                app.live_outlines_refresh();
+                let ctx = ctx.clone();
+                app.say(&ctx, format!("Made the live factory “{name}”. It's in the Live view; right-click it here to open its graph."), false);
+            }
+        }
+        Dialog::RenameLiveFactory { index, mut name } => {
+            let mut submit = false;
+            let named = !name.trim().is_empty();
+            let clicked = modal(
+                ctx,
+                "Rename live factory",
+                400.0,
+                |ui| {
+                    ui.label(RichText::new("Name").color(TEXT_DIM));
+                    let r = ui.add(egui::TextEdit::singleline(&mut name).desired_width(f32::INFINITY).char_limit(100));
+                    if !r.has_focus() && !r.lost_focus() {
+                        r.request_focus();
+                    }
+                    submit = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                },
+                &[("Cancel", true), ("Rename", named)],
+            );
+            match clicked {
+                Some(0) => app.dialog = Dialog::None,
+                Some(1) => submit = true,
+                _ => app.dialog = Dialog::RenameLiveFactory { index, name: name.clone() },
+            }
+            if submit && !name.trim().is_empty() {
+                app.dialog = Dialog::None;
+                let mut defs = app.live_defs();
+                let taken = defs.iter().enumerate().any(|(k, d)| k != index && d.name.eq_ignore_ascii_case(name.trim()));
+                let new_name = if taken { app.unique_live_name(name.trim()) } else { name.trim().to_string() };
+                if let Some(d) = defs.get_mut(index) {
+                    let old = std::mem::replace(&mut d.name, new_name.clone());
+                    app.move_live_layout(&old, Some(&new_name));
+                }
+                app.set_live_defs(defs);
+                app.live_outlines_refresh();
+            }
+        }
+        Dialog::DeleteLiveFactory { index } => {
+            let name = app.live_defs().get(index).map(|d| d.name.clone()).unwrap_or_default();
+            let clicked = modal(
+                ctx,
+                "Delete live factory",
+                400.0,
+                |ui| {
+                    ui.label(RichText::new(format!("Delete “{name}”? Its region (or picked buildings) and planned pieces go; nothing in game changes.")).color(TEXT));
+                },
+                &[("Cancel", true), ("Delete", true)],
+            );
+            match clicked {
+                Some(0) => app.dialog = Dialog::None,
+                Some(1) => {
+                    app.dialog = Dialog::None;
+                    let mut defs = app.live_defs();
+                    if index < defs.len() {
+                        let gone = defs.remove(index);
+                        app.move_live_layout(&gone.name, None);
+                    }
+                    app.set_live_defs(defs);
+                    app.live_outlines_refresh();
+                }
+                _ => {}
             }
         }
         Dialog::RenameFactory { id, mut name } => {
