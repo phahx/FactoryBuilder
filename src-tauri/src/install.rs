@@ -624,7 +624,7 @@ mod tests {
         let lnk = places.start_menu.join("Factory Builder.lnk");
         assert!(lnk.is_file() && places.desktop.join("Factory Builder.lnk").is_file(), "both shortcuts");
         let installed = id.installed().expect("registered");
-        assert_eq!(installed.version, VERSION);
+        assert_eq!(installed.version, full_version(), "the build too, when it has one");
         assert!(same_file(Path::new(&installed.dir), &dir));
         let key = windows_registry::CURRENT_USER.open(id.uninstall_key()).unwrap();
         for v in ["DisplayName", "DisplayVersion", "Publisher", "DisplayIcon", "InstallLocation", "UninstallString"] {
