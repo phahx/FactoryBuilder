@@ -38,6 +38,10 @@ pub struct GraphEditorState<NodeData, DataType, ValueType, NodeTemplate, UserSta
     /// FactoryBuilder: colours and sizes for nodes, wires and the finder.
     #[cfg_attr(feature = "persistence", serde(skip, default))]
     pub style: GraphStyle,
+    /// FactoryBuilder: nodes not drawn (another floor). Wires to them are
+    /// reported as `GraphResponse::cut_wires` instead of drawn.
+    #[cfg_attr(feature = "persistence", serde(skip, default))]
+    pub hidden: std::collections::HashSet<NodeId>,
     pub _user_state: PhantomData<fn() -> UserState>,
 }
 
@@ -98,6 +102,7 @@ impl<NodeData, DataType, ValueType, NodeKind, UserState> Default
             ongoing_box_selection: Default::default(),
             node_positions: Default::default(),
             node_finder: Default::default(),
+            hidden: Default::default(),
             pan_zoom: Default::default(),
             style: Default::default(),
             _user_state: Default::default(),

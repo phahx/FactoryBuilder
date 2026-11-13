@@ -658,9 +658,18 @@ pub struct LiveFactoryDef {
     /// Its colour on the map and its block's on the live master graph.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color: Option<[u8; 3]>,
+    /// Drawn on one level of the map: the heights (world Z, cm) it takes,
+    /// bottom and top; none: every height inside the region.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub level: Option<[f32; 2]>,
 }
 
 impl LiveFactoryDef {
+    /// Whether height `z` (world Z, cm) is on its level.
+    pub fn takes_height(&self, z: f32) -> bool {
+        self.level.is_none_or(|[lo, hi]| z >= lo && z < hi)
+    }
+
     /// Fit to keep: a name, and a region of 3 to 1000 finite corners or
     /// some buildings, within sane bounds.
     pub fn valid(&self) -> bool {
@@ -668,7 +677,9 @@ impl LiveFactoryDef {
         let name_ok = !self.name.trim().is_empty() && self.name.len() <= 100;
         let region_ok = self.region.is_empty() || (self.region.len() >= 3 && self.region.len() <= 1000 && self.region.iter().all(|p| fine(p[0]) && fine(p[1])));
         let group_ok = self.buildings.len() <= 100_000 && self.buildings.iter().all(|b| fine(b.x) && fine(b.y) && b.class.len() <= 200);
-        name_ok && region_ok && group_ok && self.plan.len() <= 1 << 20 && (!self.region.is_empty() || !self.buildings.is_empty())
+        // A level: a bottom, and a top above it (the top level's is open).
+        let level_ok = self.level.is_none_or(|[lo, hi]| fine(lo) && !hi.is_nan() && hi > lo);
+        name_ok && region_ok && group_ok && level_ok && self.plan.len() <= 1 << 20 && (!self.region.is_empty() || !self.buildings.is_empty())
     }
 }
 
@@ -748,6 +759,9 @@ pub struct LiveStructure {
     pub class: String,
     pub x: f32,
     pub y: f32,
+    /// World Z (height, cm).
+    #[serde(default)]
+    pub z: f32,
     /// The game's yaw, degrees (as `world::Machine::yaw`).
     pub yaw: f32,
     /// The game's circuit id (`LiveCircuit::ids`).
@@ -800,6 +814,9 @@ pub struct LiveCarrier {
     pub class: String,
     pub fluid: bool,
     pub points: Vec<[f32; 2]>,
+    /// Lowest and highest world Z along it.
+    #[serde(default)]
+    pub z: [f32; 2],
 }
 
 /// What checking the dedicated server found.
@@ -1162,6 +1179,9 @@ pub mod world {
         /// lift's top-down sprite.
         #[serde(default)]
         pub yaw: f32,
+        /// Lowest and highest world Z along it (a lift spans floors).
+        #[serde(default)]
+        pub z: [f32; 2],
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1177,6 +1197,9 @@ pub mod world {
         pub class: String,
         pub x: f32,
         pub y: f32,
+        /// World Z (height, cm).
+        #[serde(default)]
+        pub z: f32,
         /// Facing, degrees (see `Machine::yaw`).
         #[serde(default)]
         pub yaw: f32,
@@ -1333,8 +1356,19 @@ pub mod setup {
     }
 
     /// Compares "1.2.3"-style versions; missing parts count as 0.
+    /// Compares versions numerically; "0.1.0 (build 5)" counts its build as
+    /// one more number (so it's newer than "0.1.0" and build 4).
     pub fn version_cmp(a: &str, b: &str) -> std::cmp::Ordering {
-        let parse = |v: &str| -> Vec<u64> { v.split('.').map(|p| p.trim().parse().unwrap_or(0)).collect() };
+        let parse = |v: &str| -> Vec<u64> {
+            let (ver, build) = match v.split_once("(build") {
+                Some((ver, rest)) => (ver, rest.trim().trim_end_matches(')').trim().parse::<u64>().ok()),
+                None => (v, None),
+            };
+            let mut parts: Vec<u64> = ver.trim().split('.').map(|p| p.trim().parse().unwrap_or(0)).collect();
+            parts.resize(parts.len().max(3), 0);
+            parts.push(build.unwrap_or(0));
+            parts
+        };
         let (mut x, mut y) = (parse(a), parse(b));
         let n = x.len().max(y.len());
         x.resize(n, 0);
@@ -1346,6 +1380,15 @@ pub mod setup {
     mod tests {
         use super::*;
         use std::cmp::Ordering::*;
+
+        #[test]
+        fn builds_count_in_versions() {
+            assert_eq!(version_cmp("0.1.0", "0.1.0 (build 4)"), Less);
+            assert_eq!(version_cmp("0.1.0 (build 4)", "0.1.0 (build 5)"), Less);
+            assert_eq!(version_cmp("0.1.0 (build 12)", "0.1.0 (build 5)"), Greater);
+            assert_eq!(version_cmp("0.2.0", "0.1.0 (build 99)"), Greater);
+            assert_eq!(version_cmp("0.1.0 (build 5)", "0.1.0 (build 5)"), Equal);
+        }
 
         #[test]
         fn versions_compare_numerically() {
@@ -1564,10 +1607,10 @@ pub mod room {
 
     /// Version 2 added pings, messages, views and selections; version 3
     /// where people are (`Place`); version 4 Smart and Programmable
-    /// Splitters, Priority Mergers and Valves in shared factories. Older
-    /// builds would drop those silently (half a room seeing them), so the
-    /// host turns away other versions instead.
-    pub const PROTOCOL_VERSION: u32 = 4;
+    /// Splitters, Priority Mergers and Valves in shared factories; version 5
+    /// floors. Older builds would drop those silently (half a room seeing
+    /// them), so the host turns away other versions instead.
+    pub const PROTOCOL_VERSION: u32 = 5;
 
     /// Longest message, in characters: a few lines, wrapped, in the
     /// overview's list.

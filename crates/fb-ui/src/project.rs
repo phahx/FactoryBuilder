@@ -459,6 +459,7 @@ impl FactoryApp {
         self.master_menu = None;
         self.belt_menu = None;
         self.user.router_menu = None;
+        self.user.floor = 0;
         self.block_spot = None;
         self.node_rename = None;
         self.snap_raw.clear();
@@ -940,7 +941,7 @@ impl FactoryApp {
             g[n].inputs.iter().filter(|(_, x)| matches!(g[*x].value, PortValue::Item(_))).position(|(_, x)| *x == i)
         };
         let output_index = |o: OutputId| g[g[o].node].outputs.iter().position(|(_, x)| *x == o);
-        let io_node = |kind, item: &str, rate: f64, x: f32, y: f32| Node { kind, class: item.to_string(), machines: None, clock: None, sloops: None, rate: Some((rate * 1e4).round() / 1e4), name: None, color: None, item: None, purity: None, x, y, planned: false, router: None };
+        let io_node = |kind, item: &str, rate: f64, x: f32, y: f32| Node { kind, class: item.to_string(), machines: None, clock: None, sloops: None, rate: Some((rate * 1e4).round() / 1e4), name: None, color: None, item: None, purity: None, x, y, planned: false, router: None, floor: None };
         let mut row = 0.0;
         for (item, list) in &into {
             let at = f.nodes.len();
@@ -1062,7 +1063,7 @@ impl FactoryApp {
         if self.docs.iter().any(|d| d.name == "Smelting") {
             return;
         }
-        let node = |kind, class: &str, machines: Option<f64>, rate: Option<f64>, x: f32| Node { kind, class: class.into(), machines, clock: machines.map(|_| 100.0), sloops: None, rate, name: None, color: None, item: None, purity: None, x, y: 0.0, planned: false, router: None };
+        let node = |kind, class: &str, machines: Option<f64>, rate: Option<f64>, x: f32| Node { kind, class: class.into(), machines, clock: machines.map(|_| 100.0), sloops: None, rate, name: None, color: None, item: None, purity: None, x, y: 0.0, planned: false, router: None, floor: None };
         let mut a = FactoryFile::new(Some("Smelting".into()));
         a.nodes = vec![
             node(Kind::Resource, "Desc_OreIron_C", None, Some(60.0), 0.0),

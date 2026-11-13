@@ -1996,7 +1996,7 @@ fn zooming_keeps_graph_coordinates_stable() {
 /// Smelter(s) making Iron Ingots from ore, delivered as an output.
 fn ingot_factory(name: &str, smelters: f64) -> crate::portable::FactoryFile {
     use crate::portable::{FactoryFile, Kind, Node, Wire};
-    let node = |kind, class: &str, machines: Option<f64>, rate: Option<f64>, x: f32| Node { kind, class: class.into(), machines, clock: machines.map(|_| 100.0), sloops: None, rate, name: None, color: None, item: None, purity: None, x, y: 0.0, planned: false, router: None };
+    let node = |kind, class: &str, machines: Option<f64>, rate: Option<f64>, x: f32| Node { kind, class: class.into(), machines, clock: machines.map(|_| 100.0), sloops: None, rate, name: None, color: None, item: None, purity: None, x, y: 0.0, planned: false, router: None, floor: None };
     let mut f = FactoryFile::new(Some(name.into()));
     f.nodes.push(node(Kind::Resource, "Desc_OreIron_C", None, Some(30.0 * smelters), 0.0));
     f.nodes.push(node(Kind::Recipe, "Recipe_IngotIron_C", Some(smelters), None, 400.0));
@@ -2009,7 +2009,7 @@ fn ingot_factory(name: &str, smelters: f64) -> crate::portable::FactoryFile {
 /// Constructors turning 60 Iron Ingots from elsewhere into 60 Iron Rods.
 fn rod_factory(name: &str) -> crate::portable::FactoryFile {
     use crate::portable::{FactoryFile, Kind, Node, Wire};
-    let node = |kind, class: &str, machines: Option<f64>, rate: Option<f64>, x: f32| Node { kind, class: class.into(), machines, clock: machines.map(|_| 100.0), sloops: None, rate, name: None, color: None, item: None, purity: None, x, y: 0.0, planned: false, router: None };
+    let node = |kind, class: &str, machines: Option<f64>, rate: Option<f64>, x: f32| Node { kind, class: class.into(), machines, clock: machines.map(|_| 100.0), sloops: None, rate, name: None, color: None, item: None, purity: None, x, y: 0.0, planned: false, router: None, floor: None };
     let mut f = FactoryFile::new(Some(name.into()));
     f.nodes.push(node(Kind::Input, "Desc_IronIngot_C", None, Some(60.0), 0.0));
     f.nodes.push(node(Kind::Recipe, "Recipe_IronRod_C", Some(4.0), None, 400.0));
@@ -2142,9 +2142,9 @@ fn power_plant(app: &FactoryApp, name: &str, machines: f64) -> crate::portable::
     let gen = fb_model::DEFAULT_GENERATOR;
     let r = &app.user.game.recipes[gen];
     let mut f = FactoryFile::new(Some(name.into()));
-    f.nodes.push(Node { kind: Kind::Recipe, class: gen.into(), machines: Some(machines), clock: Some(100.0), sloops: None, rate: None, name: None, color: None, item: None, purity: None, x: 400.0, y: 0.0, planned: false, router: None });
+    f.nodes.push(Node { kind: Kind::Recipe, class: gen.into(), machines: Some(machines), clock: Some(100.0), sloops: None, rate: None, name: None, color: None, item: None, purity: None, x: 400.0, y: 0.0, planned: false, router: None, floor: None });
     for (k, a) in r.ingredients.iter().enumerate() {
-        f.nodes.push(Node { kind: Kind::Input, class: a.item.clone(), machines: None, clock: None, sloops: None, rate: Some(r.per_min(a) * machines), name: None, color: None, item: None, purity: None, x: 0.0, y: 200.0 * k as f32, planned: false, router: None });
+        f.nodes.push(Node { kind: Kind::Input, class: a.item.clone(), machines: None, clock: None, sloops: None, rate: Some(r.per_min(a) * machines), name: None, color: None, item: None, purity: None, x: 0.0, y: 200.0 * k as f32, planned: false, router: None, floor: None });
         f.wires.push(Wire { from: k + 1, output: 0, to: 0, input: k, slot: 0, belt: None });
     }
     f
@@ -2648,7 +2648,8 @@ fn extractors_extract_by_themselves_and_their_resource_shows_it() {
     let stat = |app: &FactoryApp, n, name: &str| app.user.ports[&(n, name.to_string())];
     let port = app.graph()[miner].inputs.iter().find(|(_, i)| *i == ground).map(|(n, _)| n.clone()).unwrap();
     let s = stat(&app, miner, &port);
-    assert!((s.have - 5.0).abs() < 1e-6 && (s.want - 5.0).abs() < 1e-6, "takes what it extracts: {s:?}");
+    // Its row reads using / capacity: 5 of the 60 a Miner Mk.1 can.
+    assert!((s.have - 5.0).abs() < 1e-6 && (s.want - 60.0).abs() < 1e-6, "takes what it extracts, of what it could: {s:?}");
     assert!((app.user.ground[&ore] - 5.0).abs() < 1e-6, "the resource shows what's extracted");
     let miner_mk1 = crate::extractors::per_machine(&app.user.game, "Build_MinerMk1_C", fb_model::Purity::Normal);
     assert_eq!(miner_mk1, 60.0, "a Miner Mk.1 on a Normal node: 60 per minute (Docs)");
@@ -2931,7 +2932,7 @@ fn moving_a_selection_to_a_new_factory_keeps_the_totals() {
     use crate::portable::{FactoryFile, Kind, Node, Wire};
     let Some((ctx, mut app, _)) = harness() else { return };
     frames(&ctx, &mut app, 2);
-    let node = |kind, class: &str, machines: Option<f64>, rate: Option<f64>, x: f32| Node { kind, class: class.into(), machines, clock: machines.map(|_| 100.0), sloops: None, rate, name: None, color: None, item: None, purity: None, x, y: 0.0, planned: false, router: None };
+    let node = |kind, class: &str, machines: Option<f64>, rate: Option<f64>, x: f32| Node { kind, class: class.into(), machines, clock: machines.map(|_| 100.0), sloops: None, rate, name: None, color: None, item: None, purity: None, x, y: 0.0, planned: false, router: None, floor: None };
     let mut f = FactoryFile::new(Some("Rods".into()));
     f.nodes = vec![
         node(Kind::Resource, "Desc_OreIron_C", None, Some(30.0), 0.0),
@@ -3135,7 +3136,7 @@ fn right_click_on_the_master_graph_adds_a_factory_there() {
 
     // From a file: the block goes to the menu's spot too, once the file is read.
     let mut f = crate::portable::FactoryFile::new(Some("Smelting".into()));
-    f.nodes.push(crate::portable::Node { kind: crate::portable::Kind::Resource, class: "Desc_OreIron_C".into(), machines: None, clock: None, sloops: None, rate: Some(60.0), name: None, color: None, item: None, purity: None, x: 0.0, y: 0.0, planned: false, router: None });
+    f.nodes.push(crate::portable::Node { kind: crate::portable::Kind::Resource, class: "Desc_OreIron_C".into(), machines: None, clock: None, sloops: None, rate: Some(60.0), name: None, color: None, item: None, purity: None, x: 0.0, y: 0.0, planned: false, router: None, floor: None });
     store.borrow_mut().insert("C:/Factories/Smelting.fbfactory".into(), f.to_json(false));
     let spot2 = egui::pos2(only.right() + 150.0, only.bottom() + 200.0);
     assert!(!app.node_rects.values().any(|r| r.contains(spot2)));
@@ -3593,7 +3594,7 @@ fn live_buildings_are_laid_over_the_save() {
     let game = fb_engine::docs::load_game_data(std::path::Path::new(&game_dir())).unwrap();
     let _ = app;
     let m = |id: u32, x: f32, recipe: &str| Machine { id, class: "Build_ConstructorMk1_C".into(), recipe: Some(recipe.into()), clock: 1.0, boost: 1.0, x, y: 0.0, z: 0.0, yaw: 0.0, node: None };
-    let belt = |class: &str, a: [f32; 2], b: [f32; 2]| Carrier { class: class.into(), fluid: false, points: vec![a, b], yaw: 0.0 };
+    let belt = |class: &str, a: [f32; 2], b: [f32; 2]| Carrier { class: class.into(), fluid: false, points: vec![a, b], yaw: 0.0, z: [0.0, 0.0] };
     let mut base = World::default();
     base.machines = vec![m(0, 0.0, "Recipe_IronPlate_C"), m(1, 1000.0, "Recipe_IronRod_C"), m(2, 2000.0, "Recipe_Screw_C")];
     base.links = vec![Link { from: 0, to: 1, item: None }, Link { from: 0, to: 2, item: None }];
@@ -3610,8 +3611,8 @@ fn live_buildings_are_laid_over_the_save() {
         machines: Some(vec![lm(2000.0, "Recipe_Screw_C"), lm(30.0, "Recipe_IronRod_C"), lm(5000.0, "Recipe_Wire_C")]),
         // The first belt, reported the other way round; a new one.
         carriers: Some(vec![
-            LiveCarrier { class: "Build_ConveyorBeltMk1_C".into(), fluid: false, points: vec![[480.0, 20.0], [10.0, 0.0]] },
-            LiveCarrier { class: "Build_ConveyorBeltMk2_C".into(), fluid: false, points: vec![[0.0, 5000.0], [800.0, 5000.0]] },
+            LiveCarrier { class: "Build_ConveyorBeltMk1_C".into(), fluid: false, points: vec![[480.0, 20.0], [10.0, 0.0]], z: [0.0, 0.0] },
+            LiveCarrier { class: "Build_ConveyorBeltMk2_C".into(), fluid: false, points: vec![[0.0, 5000.0], [800.0, 5000.0]], z: [0.0, 0.0] },
         ]),
         errors: vec![],
     };
@@ -3767,7 +3768,7 @@ fn live_hub_has_the_saves_burners_and_power() {
     let Some((ctx, mut app, _)) = harness() else { return };
     frames(&ctx, &mut app, 2);
     let (mut world, _) = sample_world();
-    world.structures.push(fb_model::world::Structure { class: "Build_TradingPost_C".into(), x: 10_000.0, y: 10_000.0, yaw: 0.0, circuit: None, power: None });
+    world.structures.push(fb_model::world::Structure { class: "Build_TradingPost_C".into(), x: 10_000.0, y: 10_000.0, z: 0.0, yaw: 0.0, circuit: None, power: None });
     world.hub_burners = vec![
         fb_model::world::HubBurner { x: 10_000.0, y: 10_100.0, circuit: Some(0), makes: 12.0, fuel: Some("Desc_Leaves_C".into()), fuel_amount: None },
         fb_model::world::HubBurner { x: 10_000.0, y: 10_200.0, circuit: Some(0), makes: 0.0, fuel: None, fuel_amount: None },
@@ -4058,4 +4059,43 @@ fn a_backed_up_miner_gets_a_hint() {
     let held = app.user.nodes[&miner].held.expect("the miner is held back");
     assert!((held.0 - 30.0).abs() < 1e-3 && (held.1 - 60.0).abs() < 1e-3, "{held:?}");
     assert!(app.user.nodes[&sm].held.is_none(), "the smelter runs flat out");
+}
+
+#[test]
+fn floors_hide_other_levels_and_lifts_link_them() {
+    use crate::graph::Template;
+    let Some((ctx, mut app, _)) = harness() else { return };
+    frames(&ctx, &mut app, 2);
+    let ore = "Desc_OreIron_C";
+    let res = app.add_test_node(Template::Resource(ore.into()), egui::pos2(0.0, 0.0));
+    let miner = app.add_test_node(Template::Extractor { item: ore.into(), class: "Build_MinerMk1_C".into(), purity: fb_model::Purity::Normal }, egui::pos2(300.0, 0.0));
+    let sm = app.add_test_node(Template::Recipe("Recipe_IngotIron_C".into()), egui::pos2(600.0, 0.0));
+    connect(&mut app, res, miner, ore);
+    let belt = connect(&mut app, miner, sm, ore);
+    frames(&ctx, &mut app, 2);
+    assert_eq!(crate::floors::count(&app.state.graph, &app.planner.floors), 1);
+    // The smelter up a floor, from the node menu's choice.
+    app.context_targets = vec![sm];
+    app.move_to_floor(1);
+    frames(&ctx, &mut app, 3);
+    assert_eq!(app.user.floor, 1, "shows the floor it went to");
+    assert_eq!(app.planner.floors, vec![crate::floors::STEP_M]);
+    // Back on Floor 1: the smelter isn't drawn; the belt ends in a lift stub.
+    press(&ctx, &mut app, "Floor 1");
+    frames(&ctx, &mut app, 3);
+    assert!(app.state.hidden.contains(&sm) && !app.state.hidden.contains(&miner));
+    assert!(!app.node_rects.contains_key(&sm), "not drawn");
+    assert_eq!(crate::floors::carrier(&app, belt.0, belt.1), "Conveyor Lift Mk.1");
+    assert!((app.user.nodes[&sm].efficiency - 1.0).abs() < 1e-4, "floors don't change flows");
+    press(&ctx, &mut app, "stub Floor 2");
+    frames(&ctx, &mut app, 3);
+    assert_eq!(app.user.floor, 1, "the stub goes to its floor");
+    // Ctrl+A takes only the floor shown.
+    app.select_all();
+    assert_eq!(app.state.selected_nodes, vec![sm]);
+    // Files keep floors and heights.
+    let f = app.to_portable();
+    let back = crate::portable::FactoryFile::parse(&f.to_json(false)).unwrap();
+    assert_eq!(back.plan.floors, vec![crate::floors::STEP_M]);
+    assert_eq!(back.nodes.iter().filter(|n| n.floor == Some(1)).count(), 1);
 }

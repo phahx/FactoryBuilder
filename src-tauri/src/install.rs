@@ -22,6 +22,16 @@ pub const EXE_NAME: &str = "Factory Builder.exe";
 /// The icon helper and its decoder, in `<install>\tools`.
 pub const TOOLS: [&str; 2] = ["IconExtractor.exe", "oodle_shim.dll"];
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// This build's version as installs record it: "0.1.0 (build 5)" for a
+/// release build, so a newer download isn't taken for the same as an older
+/// install (every build shares the crate version).
+pub fn full_version() -> String {
+    match crate::update::build() {
+        Some(b) => format!("{VERSION} (build {b})"),
+        None => VERSION.to_string(),
+    }
+}
 const MARKER: &str = "install.json";
 const PROG_ID: &str = "FactoryBuilder.Factory";
 /// File types that open here: extension, ProgID, type name in Explorer.
@@ -126,7 +136,7 @@ impl Identity {
         let exe = std::env::current_exe().unwrap_or_default();
         InstallInfo {
             product: self.product.clone(),
-            version: VERSION.into(),
+            version: full_version(),
             installed_copy: self.is_installed_exe(&exe),
             installed: self.installed(),
             default_dir: self.default_dir().to_string_lossy().into_owned(),
@@ -181,7 +191,7 @@ impl Identity {
         let reg = (|| -> windows_registry::Result<()> {
             let k = windows_registry::CURRENT_USER.create(self.uninstall_key())?;
             k.set_string("DisplayName", &self.product)?;
-            k.set_string("DisplayVersion", VERSION)?;
+            k.set_string("DisplayVersion", full_version())?;
             k.set_string("Publisher", PUBLISHER)?;
             k.set_string("DisplayIcon", format!("{},0", exe.to_string_lossy()))?;
             k.set_string("InstallLocation", dir.to_string_lossy())?;
@@ -196,7 +206,7 @@ impl Identity {
         report.done.push("Added to Apps & features, with an uninstaller".into());
 
         // Shortcuts.
-        let mut marker = Marker { product: self.product.clone(), version: VERSION.into(), ..Default::default() };
+        let mut marker = Marker { product: self.product.clone(), version: full_version(), ..Default::default() };
         let mut places = vec![(self.places.start_menu.clone(), "Start menu")];
         if desktop {
             places.push((self.places.desktop.clone(), "desktop"));
@@ -336,7 +346,7 @@ impl Identity {
         let Some(installed) = self.installed() else { return false };
         let me = std::env::current_exe().unwrap_or_default();
         let target = Path::new(&installed.dir).join(EXE_NAME);
-        if same_file(&me, &target) || version_cmp(&installed.version, VERSION).is_lt() {
+        if same_file(&me, &target) || version_cmp(&installed.version, &full_version()).is_lt() {
             return false;
         }
         std::process::Command::new(&target).args(args).current_dir(&installed.dir).spawn().is_ok()

@@ -52,6 +52,10 @@ pub struct Planner {
     /// This document is the project's HUB (hub.rs).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub hub: bool,
+    /// Floors 2 and up: each one's height above Floor 1, in metres
+    /// (floors.rs). Empty: one floor.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub floors: Vec<f32>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -1115,8 +1119,31 @@ impl FactoryApp {
         !self.state.selected_nodes.is_empty()
     }
 
+    /// Everything on the floor shown.
     pub(crate) fn select_all(&mut self) {
-        self.state.selected_nodes = self.state.graph.iter_nodes().collect();
+        self.state.selected_nodes = self.state.graph.iter_nodes().filter(|n| !self.state.hidden.contains(n)).collect();
+    }
+
+    /// Moves the node menu's nodes to floor `f` (a new one gets a height
+    /// a step above the top), and shows that floor with them selected.
+    pub(crate) fn move_to_floor(&mut self, f: u8) {
+        let floors = crate::floors::count(&self.state.graph, &self.planner.floors);
+        if f as usize >= floors {
+            let top = crate::floors::height(&self.planner.floors, floors as u8 - 1);
+            let mut hs: Vec<f32> = (1..floors as u8).map(|k| crate::floors::height(&self.planner.floors, k)).collect();
+            hs.push(top + crate::floors::STEP_M);
+            self.planner.floors = hs;
+        }
+        let moved: Vec<NodeId> = self.context_targets.iter().copied().filter(|n| self.state.graph.nodes.contains_key(*n)).collect();
+        for n in &moved {
+            if crate::floors::on_floors(&self.state.graph[*n].user_data.kind) {
+                self.state.graph[*n].user_data.floor = f;
+            }
+        }
+        self.user.floor = f;
+        self.state.selected_nodes = moved;
+        self.frame_selected = true;
+        self.changed();
     }
 
     pub(crate) fn delete_selected(&mut self) {
@@ -1477,6 +1504,63 @@ impl FactoryApp {
                         _ => None,
                     };
                     self.map.selftest_zoomed = false;
+                }
+                // The save's site with the most levels, close up, showing
+                // its second level only.
+                "map_level" => {
+                    self.dialog = Dialog::None;
+                    self.view = crate::map::View::Map;
+                    self.map.level = None;
+                    if let Some(w) = self.map.world.clone() {
+                        let sites = crate::map_import::sites(&w, 5000.0);
+                        let levels = |site: &Vec<u32>| {
+                            let zs: Vec<f32> = site.iter().filter_map(|id| w.machines.get(*id as usize)).map(|m| m.z).collect();
+                            crate::floors::levels(&zs, crate::floors::FLOOR_GAP_CM).len()
+                        };
+                        if let Some(site) = sites.iter().max_by_key(|s| (levels(s), s.len())) {
+                            let ms: Vec<&fb_model::world::Machine> = site.iter().filter_map(|id| w.machines.get(*id as usize)).collect();
+                            let n = ms.len().max(1) as f64;
+                            let (cx, cy) = (ms.iter().map(|m| m.x as f64).sum::<f64>() / n, ms.iter().map(|m| m.y as f64).sum::<f64>() / n);
+                            self.map.look_at(cx, cy, 0.05);
+                            self.map.selftest_zoom = None;
+                            self.map.selftest_zoomed = false;
+                        }
+                    }
+                }
+                "map_level_pick" => {
+                    if let Some(r) = self.map.levels_in_view(egui::Rect::NOTHING).and_then(|l| l.get(1).copied()) {
+                        self.map.level = Some(r);
+                        self.map.level_name = "Level 2".into();
+                    }
+                }
+                // A smelter a floor up, seen from Floor 1: its belt ends in a
+                // lift stub.
+                "floors" => {
+                    self.dialog = Dialog::None;
+                    self.dirty = false;
+                    self.run_pending(Pending::New);
+                    self.new_factory();
+                    self.view = crate::map::View::Graph;
+                    self.map.level = None;
+                    let ore = "Desc_OreIron_C";
+                    let z = self.state.pan_zoom.zoom;
+                    let at = |x: f32, y: f32| egui::pos2(x * z, y * z);
+                    self.state = crate::project::new_state();
+                    let res = self.add_node(Template::Resource(ore.into()), at(0.0, 0.0));
+                    let miner = self.add_node(Template::Extractor { item: ore.into(), class: "Build_MinerMk2_C".into(), purity: fb_model::Purity::Normal }, at(340.0, 0.0));
+                    let sm = self.add_node(Template::Recipe("Recipe_IngotIron_C".into()), at(700.0, 0.0));
+                    self.set_number(sm, MACHINES, 4.0);
+                    for (from, to) in [(res, miner), (miner, sm)] {
+                        let o = self.state.graph[from].outputs[0].1;
+                        let i = self.state.graph[to].inputs.iter().map(|(_, i)| *i).find(|i| matches!(self.state.graph[*i].value, PortValue::Item(_)));
+                        if let Some(i) = i {
+                            self.state.graph.add_connection(o, i, 0);
+                        }
+                    }
+                    self.state.graph[sm].user_data.floor = 1;
+                    self.planner.floors = vec![12.0];
+                    self.user.floor = 0;
+                    self.frame_all = true;
                 }
                 // Live map add-on (turned on here only, not saved): the
                 // save's player, close up; then its dialog with a server
@@ -2202,6 +2286,10 @@ impl FactoryApp {
             self.state.selected_nodes = keep;
         }
         if let Some(node) = self.focus_node.take() {
+            // On another floor: show that one.
+            if let Some(n) = self.state.graph.nodes.get(node).filter(|_| !self.on_master()) {
+                self.user.floor = n.user_data.floor;
+            }
             if let Some(pos) = self.state.node_positions.get(node).copied() {
                 let z = self.state.pan_zoom.zoom;
                 self.state.pan_zoom.pan =
@@ -2231,9 +2319,23 @@ impl FactoryApp {
             }
             self.user.power_lit = crate::power_net::lit_wires(&self.state.graph, &focus);
         }
+        // One floor at a time (not the master graph: factories have floors).
+        let floors = !self.on_master();
+        if floors {
+            let n = crate::floors::count(&self.state.graph, &self.planner.floors);
+            self.user.floor = self.user.floor.min(n as u8 - 1);
+            self.state.hidden = crate::floors::hidden(&self.state.graph, self.user.floor);
+        } else {
+            self.state.hidden.clear();
+            self.user.floor = 0;
+        }
         let resp = self
             .state
             .draw_graph_editor(ui, &self.templates, &mut self.user, Vec::new());
+        if floors && self.export.is_none() {
+            crate::floors::paint_stubs(self, ui, &resp.cut_wires);
+            crate::floors::bar(self, ui, rect);
+        }
         // Live view: planned pieces get a dashed outline (a plan, not built).
         if self.live_view.on {
             let painter = ui.painter();
@@ -2376,7 +2478,7 @@ impl FactoryApp {
         let z = self.state.pan_zoom.zoom;
         let w = theme::graph_style().node_width;
         let size = |id: NodeId| vec2(w, self.node_heights.get(&id).copied().unwrap_or(260.0));
-        let wanted = |id: NodeId| !selected || self.state.selected_nodes.contains(&id);
+        let wanted = |id: NodeId| (!selected || self.state.selected_nodes.contains(&id)) && !self.state.hidden.contains(&id);
         let mut bounds = egui::Rect::NOTHING;
         for (id, p) in self.state.node_positions.iter().filter(|(id, _)| wanted(*id)) {
             bounds = bounds.union(egui::Rect::from_min_size(*p, size(id) * z));
@@ -2437,6 +2539,7 @@ impl FactoryApp {
         // Run after the menu is drawn: the menu reads the node it's for, and
         // deleting it mid-draw would index a node that no longer exists.
         let (mut do_duplicate, mut do_delete, mut do_move, mut do_frame) = (false, false, false, false);
+        let mut to_floor: Option<u8> = None;
         let (mut do_open, mut do_rename) = (false, false);
         let mut set_tier = None;
         let mut set_extractor: Option<(String, fb_model::Purity)> = None;
@@ -2534,6 +2637,21 @@ impl FactoryApp {
                     .on_hover_text("Moves these nodes into a factory of their own, linked to this one on the master graph.")
                     .clicked();
             }
+            // Which floor they're on (what's built stays where it is).
+            if !on_master && !built {
+                let floors = crate::floors::count(&self.state.graph, &self.planner.floors);
+                let here = self.user.floor;
+                separator(ui);
+                crate::menus::caption(ui, "Move to floor");
+                for f in 0..floors as u8 {
+                    if crate::menus::choice(ui, &crate::floors::name(f), "", f == here, true).clicked() && f != here {
+                        to_floor = Some(f);
+                    }
+                }
+                if floors < crate::floors::MAX && item(ui, "New floor above", "", true).clicked() {
+                    to_floor = Some(floors as u8);
+                }
+            }
             if !only_knots {
                 separator(ui);
                 pick = crate::menus::colours(ui, assets.as_mut(), current, &mut custom, &mut swatches);
@@ -2572,7 +2690,10 @@ impl FactoryApp {
                 self.changed();
             }
         }
-        let chose = do_duplicate || do_delete || do_move || do_frame || do_open || do_rename || set_tier.is_some() || set_extractor.is_some() || set_fuel.is_some();
+        if let Some(f) = to_floor {
+            self.move_to_floor(f);
+        }
+        let chose = do_duplicate || do_delete || do_move || do_frame || do_open || do_rename || set_tier.is_some() || set_extractor.is_some() || set_fuel.is_some() || to_floor.is_some();
         if chose || crate::menus::dismissed(ctx, &menu) {
             self.context_menu = None;
         }
@@ -3301,19 +3422,19 @@ pub(crate) fn evaluate_graph(game: &GameData, g: &FactoryGraph, cache: &mut SimC
             stats.push((name.clone(), wires.iter().map(|i| flow(*i, *o)).sum::<f64>(), !wires.is_empty()));
         }
         for (name, have, connected) in stats {
-            e.ports.insert((id, name), PortStat { have, want: have, connected });
+            e.ports.insert((id, name), PortStat { have, want: have, connected, rated: false });
         }
-        e.ports.insert((id, crate::routers::ROUTED.into()), PortStat { have: through, want: through, connected: true });
+        e.ports.insert((id, crate::routers::ROUTED.into()), PortStat { have: through, want: through, connected: true, rated: false });
     }
     let held = fb_engine::sim::held_back(&sim_nodes_for_hints, &sim_links_for_hints, &result);
     let mut sum = Summary::default();
     for (i, &id) in ids.iter().enumerate() {
         let (ins, outs) = &rates[i];
         for (p, (name, want)) in ins.iter().enumerate() {
-            e.ports.insert((id, name.clone()), PortStat { have: result.received[i][p], want: *want, connected: connected_in.contains(&(i, p)) });
+            e.ports.insert((id, name.clone()), PortStat { have: result.received[i][p], want: *want, connected: connected_in.contains(&(i, p)), rated: true });
         }
         for (p, (name, want)) in outs.iter().enumerate() {
-            e.ports.insert((id, name.clone()), PortStat { have: result.shipped[i][p], want: *want, connected: connected_out.contains(&(i, p)) });
+            e.ports.insert((id, name.clone()), PortStat { have: result.shipped[i][p], want: *want, connected: connected_out.contains(&(i, p)), rated: true });
         }
         let eff = result.efficiency[i];
         let mut power = 0.0;
@@ -3353,7 +3474,7 @@ pub(crate) fn evaluate_graph(game: &GameData, g: &FactoryGraph, cache: &mut SimC
                 let want = if target > 0.0 { target / nodes } else { got };
                 e.delivered.insert(id, got);
                 for (name, _) in ins.iter() {
-                    e.ports.insert((id, name.clone()), PortStat { have: got, want, connected: connected_in.contains(&(i, 0)) });
+                    e.ports.insert((id, name.clone()), PortStat { have: got, want, connected: connected_in.contains(&(i, 0)), rated: true });
                 }
                 if got < want * 0.995 {
                     sum.issues.push((id, format!("Only {} of {} {} delivered", crate::fmt::fmt_rate(got), crate::fmt::fmt_rate(want), game.item_name(item))));
@@ -3372,10 +3493,11 @@ pub(crate) fn evaluate_graph(game: &GameData, g: &FactoryGraph, cache: &mut SimC
                 if given - got > 1e-9 {
                     *sum.inputs.entry(item.clone()).or_default() += given - got;
                 }
-                // No target: its rows read what goes in and out.
+                // No capacity: its rows read what goes in and out.
                 for (name, _) in ins.iter().chain(outs.iter()) {
                     if let Some(p) = e.ports.get_mut(&(id, name.clone())) {
                         p.want = p.have;
+                        p.rated = false;
                     }
                 }
             }
@@ -3434,14 +3556,9 @@ pub(crate) fn evaluate_graph(game: &GameData, g: &FactoryGraph, cache: &mut SimC
         e.wire_flow.insert((input, output), got);
         *e.ground.entry(r).or_default() += got;
         *e.ground_cap.entry(r).or_default() += can;
-        // What it puts out is all that's taken: not short of anything.
-        for (name, _) in &g[x].outputs {
-            if let Some(s) = e.ports.get_mut(&(x, name.clone())) {
-                s.want = s.have;
-            }
-        }
+        // What it takes from the ground, of what it could.
         if let Some((name, _)) = g[x].inputs.iter().find(|(_, i)| *i == input) {
-            e.ports.insert((x, name.clone()), PortStat { have: got, want: got, connected: true });
+            e.ports.insert((x, name.clone()), PortStat { have: got, want: can, connected: true, rated: true });
         }
     }
     for (input, output) in g.iter_connections() {
@@ -3452,7 +3569,8 @@ pub(crate) fn evaluate_graph(game: &GameData, g: &FactoryGraph, cache: &mut SimC
     }
     for (&r, &total) in &e.ground {
         if let Some((name, _)) = g[r].outputs.first() {
-            e.ports.insert((r, name.clone()), PortStat { have: total, want: total, connected: true });
+            let cap = e.ground_cap.get(&r).copied().unwrap_or(total);
+            e.ports.insert((r, name.clone()), PortStat { have: total, want: cap, connected: true, rated: true });
         }
     }
     crate::power_net::evaluate(g, &mut e.ports, &mut sum.issues);

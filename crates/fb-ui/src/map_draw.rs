@@ -227,7 +227,7 @@ mod tests {
         let view = View { rect: Rect::from_min_size(Pos2::ZERO, egui::vec2(1000.0, 1000.0)), center: (0.0, 0.0), scale: 1.0 };
         let mut sprites = Sprites::default();
         sprites.strips.insert("Build_ConveyorBeltMk1_C".into(), Strip { file: "b.png".into(), length_cm: 200.0, width_cm: 20.0 });
-        let belt = |class: &str, fluid: bool| Carrier { class: class.into(), fluid, points: vec![[-300.0, 0.0], [300.0, 0.0]], yaw: 0.0 };
+        let belt = |class: &str, fluid: bool| Carrier { class: class.into(), fluid, points: vec![[-300.0, 0.0], [300.0, 0.0]], yaw: 0.0, z: [0.0, 0.0] };
         let mut out = Vec::new();
         flow_arrows(&view, Some(&sprites), &belt("Build_ConveyorBeltMk1_C", false), &mut out);
         // 600 px long, 80 px apart from 40 px in: 8 chevrons, outline + line each.

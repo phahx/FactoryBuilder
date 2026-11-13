@@ -125,14 +125,19 @@ impl FactoryApp {
         match d.redraw {
             Some(k) => {
                 let mut defs = self.live_defs();
+                // Drawn on a level: it keeps to that level's heights.
                 if let Some(def) = defs.get_mut(k) {
                     def.region = d.corners;
                     def.buildings.clear();
+                    def.level = self.map.level;
                 }
                 self.set_live_defs(defs);
                 self.live_outlines_refresh();
             }
-            None => self.dialog = crate::dialogs::Dialog::NewLiveFactory { name: self.unique_live_name(NEW_NAME), def: LiveFactoryDef { region: d.corners, ..Default::default() } },
+            None => {
+                let def = LiveFactoryDef { region: d.corners, level: self.map.level, ..Default::default() };
+                self.dialog = crate::dialogs::Dialog::NewLiveFactory { name: self.unique_live_name(NEW_NAME), def };
+            }
         }
     }
 }

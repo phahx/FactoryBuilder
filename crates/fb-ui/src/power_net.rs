@@ -367,20 +367,20 @@ pub fn evaluate(g: &FactoryGraph, ports: &mut HashMap<(NodeId, String), PortStat
             NodeKind::Factory { .. } => {
                 let (surplus, need) = factory_balance(g, node);
                 if let Some(o) = power_out(g, node) {
-                    ports.insert((node, PORT.into()), PortStat { have: surplus, want: surplus, connected: !g.output_connections(o).is_empty() });
+                    ports.insert((node, PORT.into()), PortStat { have: surplus, want: surplus, connected: !g.output_connections(o).is_empty(), rated: false });
                 }
                 if let Some(i) = power_in(g, node) {
                     let share = circuit.get(&node).map_or(0.0, |&c| if used[c] > 1e-9 { (made[c] / used[c]).min(1.0) } else { 1.0 });
                     let connected = !g.connections(i).is_empty();
-                    ports.insert((node, PORT.into()), PortStat { have: if connected { need * share } else { 0.0 }, want: need, connected });
+                    ports.insert((node, PORT.into()), PortStat { have: if connected { need * share } else { 0.0 }, want: need, connected, rated: false });
                 }
             }
             NodeKind::Pole { .. } => {
                 let (m, u) = circuit.get(&node).map_or((0.0, 0.0), |&c| (made[c], used[c]));
-                ports.insert((node, MADE.into()), PortStat { have: m, want: m, connected: true });
-                ports.insert((node, USED.into()), PortStat { have: u, want: u, connected: true });
+                ports.insert((node, MADE.into()), PortStat { have: m, want: m, connected: true, rated: false });
+                ports.insert((node, USED.into()), PortStat { have: u, want: u, connected: true, rated: false });
                 let n = wire_count(g, node) as f64;
-                ports.insert((node, WIRES.into()), PortStat { have: n, want: n, connected: true });
+                ports.insert((node, WIRES.into()), PortStat { have: n, want: n, connected: true, rated: false });
             }
             _ => {}
         }

@@ -42,19 +42,19 @@ impl Builder {
     fn store(&mut self, x: f32, y: f32, items: &[(&str, f32)], slots: (u32, u32)) -> u32 {
         let k = self.w.structures.len() as u32;
         let class = "Build_StorageContainerMk1_C";
-        self.w.structures.push(Structure { class: class.into(), x, y, yaw: 0.0, circuit: None, power: None });
+        self.w.structures.push(Structure { class: class.into(), x, y, z: 0.0, yaw: 0.0, circuit: None, power: None });
         self.stores.push(Some(LiveStructure { class: class.into(), x, y, items: items.iter().map(|(i, n)| (i.to_string(), *n)).collect(), slots: Some(slots), ..Default::default() }));
         k
     }
 
     fn pole(&mut self, x: f32, y: f32) -> [f32; 2] {
-        self.w.structures.push(Structure { class: "Build_PowerPoleMk1_C".into(), x, y, yaw: 0.0, circuit: Some(0), power: None });
+        self.w.structures.push(Structure { class: "Build_PowerPoleMk1_C".into(), x, y, z: 0.0, yaw: 0.0, circuit: Some(0), power: None });
         self.stores.push(None);
         [x, y]
     }
 
     fn belt(&mut self, a: [f32; 2], b: [f32; 2]) {
-        self.w.carriers.push(Carrier { class: "Build_ConveyorBeltMk2_C".into(), fluid: false, points: vec![a, b], yaw: 0.0 });
+        self.w.carriers.push(Carrier { class: "Build_ConveyorBeltMk2_C".into(), fluid: false, points: vec![a, b], yaw: 0.0, z: [0.0, 0.0] });
     }
 
     fn link(&mut self, from: u32, to: u32, item: &str) {
@@ -165,7 +165,7 @@ impl FactoryApp {
         }
 
         // The HUB beside them, its burners on the same circuit.
-        b.w.structures.push(Structure { class: "Build_TradingPost_C".into(), x: px - 9_000.0, y: py + 3_000.0, yaw: 0.0, circuit: Some(1), power: None });
+        b.w.structures.push(Structure { class: "Build_TradingPost_C".into(), x: px - 9_000.0, y: py + 3_000.0, z: 0.0, yaw: 0.0, circuit: Some(1), power: None });
         b.stores.push(None);
         b.w.hub_burners = vec![
             HubBurner { x: px - 9_200.0, y: py + 2_000.0, circuit: Some(0), makes: 20.0, fuel: Some("Desc_Leaves_C".into()), fuel_amount: Some(31.0) },

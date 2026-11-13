@@ -8,6 +8,7 @@ pub mod backend;
 pub mod dialogs;
 pub mod extractors;
 pub mod finder;
+pub mod floors;
 pub mod frames;
 pub mod navigate;
 pub mod live;

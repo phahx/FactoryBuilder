@@ -236,7 +236,8 @@ impl FactoryApp {
         // Everything in unzoomed graph units.
         let mut items: Vec<(Rect, Color32)> = Vec::new();
         for (id, p) in self.state.node_positions.iter() {
-            if !self.state.graph.nodes.contains_key(id) {
+            // Only the floor shown.
+            if !self.state.graph.nodes.contains_key(id) || self.state.hidden.contains(&id) {
                 continue;
             }
             let h = self.node_heights.get(&id).copied().unwrap_or(200.0);

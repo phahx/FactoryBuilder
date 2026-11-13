@@ -190,6 +190,7 @@ impl FactoryApp {
                 y: (pos.y * 10.0).round() / 10.0,
                 planned: n.user_data.planned,
                 router,
+                floor: Some(n.user_data.floor).filter(|f| *f > 0),
             });
         }
         for (to, &id) in ids.iter().enumerate() {
@@ -221,6 +222,7 @@ impl FactoryApp {
             limits: p.limits.iter().filter(|(k, v)| game.resource_limits.get(*k) != Some(*v)).map(|(k, v)| (k.clone(), *v)).collect(),
             generate_power: p.power.mode == PowerMode::Generate,
             generators: (p.power.generators != PowerSettings::default().generators).then(|| p.power.generators.clone()),
+            floors: p.floors.clone(),
         };
         f
     }
@@ -255,6 +257,7 @@ impl FactoryApp {
             belts: Vec::new(),
             // A project file says which is the HUB (load_project_file).
             hub: false,
+            floors: plan.floors.iter().copied().filter(|h| h.is_finite()).map(|h| h.clamp(0.0, 10_000.0)).take(crate::floors::MAX - 1).collect(),
             power: PowerSettings {
                 mode: if plan.generate_power { PowerMode::Generate } else { PowerMode::Grid },
                 generators: match &plan.generators {
@@ -332,6 +335,7 @@ impl FactoryApp {
             }
             self.state.graph[id].user_data.color = n.color.as_deref().and_then(portable::color_from_hex);
             self.state.graph[id].user_data.planned = n.planned;
+            self.state.graph[id].user_data.floor = n.floor.unwrap_or(0).min(crate::floors::MAX as u8 - 1);
             if let (NodeKind::Resource { purity, .. }, Some(p)) = (&mut self.state.graph[id].user_data.kind, n.purity) {
                 *purity = p;
             }

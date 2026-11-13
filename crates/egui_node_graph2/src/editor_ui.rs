@@ -102,6 +102,9 @@ pub struct GraphResponse<UserResponse: UserResponseTrait, NodeData: NodeDataTrai
     pub wire_dropped: Option<(NodeId, AnyParameterId, Pos2)>,
     /// FactoryBuilder: the other outputs pulled along with that wire.
     pub wire_dropped_extras: Vec<OutputId>,
+    /// FactoryBuilder: wires with one end on a hidden node: the wire, and
+    /// where its drawn end is (screen space).
+    pub cut_wires: Vec<(InputId, OutputId, Pos2)>,
 }
 impl<UserResponse: UserResponseTrait, NodeData: NodeDataTrait> Default
     for GraphResponse<UserResponse, NodeData>
@@ -117,6 +120,7 @@ impl<UserResponse: UserResponseTrait, NodeData: NodeDataTrait> Default
             wires: Vec::new(),
             wire_dropped: None,
             wire_dropped_extras: Vec::new(),
+            cut_wires: Vec::new(),
         }
     }
 }
@@ -283,6 +287,9 @@ where
 
         /* Draw nodes */
         for node_id in self.node_order.iter().copied() {
+            if self.hidden.contains(&node_id) {
+                continue;
+            }
             let responses = GraphNodeWidget {
                 position: self.node_positions.get_mut(node_id).unwrap(),
                 graph: &mut self.graph,
@@ -477,6 +484,7 @@ where
         // FactoryBuilder: each wire starts at its own bubble on the output.
         // Faint wires first, so solid ones cross over them.
         let mut wires = Vec::new();
+        let mut cut_wires = Vec::new();
         let (mut faint, mut solid): (Vec<Shape>, Vec<Shape>) = (Vec::new(), Vec::new());
         let mut wire_order: std::collections::HashMap<OutputId, Vec<InputId>> = Default::default();
         for (input, outputs) in self.graph.iter_connection_groups() {
@@ -490,6 +498,23 @@ where
                 let k = order.iter().position(|i| *i == input).unwrap_or(0);
                 // Knots: wires meet at the middle, from any side.
                 let (from, to) = (self.graph[output].node, self.graph[input].node);
+                // One end on another floor: only its drawn end is reported.
+                match (self.hidden.contains(&from), self.hidden.contains(&to)) {
+                    (true, true) => continue,
+                    (true, false) => {
+                        if let Some(p) = conn_locations.get(&input).and_then(|h| h.get(hook_n)) {
+                            cut_wires.push((input, output, *p));
+                        }
+                        continue;
+                    }
+                    (false, true) => {
+                        if let Some(p) = port_locations.get(&AnyParameterId::Output(output)).and_then(|h| h.get(k.min(h.len().saturating_sub(1)))) {
+                            cut_wires.push((input, output, *p));
+                        }
+                        continue;
+                    }
+                    (false, false) => {}
+                }
                 let knot = |n: NodeId| self.graph[n].user_data.knot_size().is_some();
                 let knot_at = |n: NodeId| node_rects.get(&n).map(|r| r.center());
                 let src_pos = match knot_at(from).filter(|_| knot(from)) {
@@ -784,6 +809,7 @@ where
             wires,
             wire_dropped,
             wire_dropped_extras,
+            cut_wires,
         }
     }
 }

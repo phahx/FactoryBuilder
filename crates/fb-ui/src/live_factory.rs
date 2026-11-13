@@ -111,12 +111,12 @@ pub fn members(def: &LiveFactoryDef, world: &World) -> (BTreeSet<u32>, BTreeSet<
     let mut stores = BTreeSet::new();
     if def.region.len() >= 3 {
         for m in &world.machines {
-            if inside(&def.region, [m.x, m.y]) {
+            if inside(&def.region, [m.x, m.y]) && def.takes_height(m.z) {
                 machines.insert(m.id);
             }
         }
         for (k, s) in world.structures.iter().enumerate() {
-            if fb_model::is_storage(&s.class) && inside(&def.region, [s.x, s.y]) {
+            if fb_model::is_storage(&s.class) && inside(&def.region, [s.x, s.y]) && def.takes_height(s.z) {
                 stores.insert(k as u32);
             }
         }

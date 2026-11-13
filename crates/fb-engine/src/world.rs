@@ -1153,7 +1153,7 @@ pub(crate) fn read_world_stats(bytes: &[u8], game: &GameData) -> Result<(World, 
             if e.role == Role::End && fb_model::is_storage(&e.class) {
                 store_of[i] = Some(world.structures.len() as u32);
             }
-            world.structures.push(Structure { class: e.class.clone(), x, y, yaw: finite(e.xf.yaw()).unwrap_or(0.0), circuit: None, power: None });
+            world.structures.push(Structure { class: e.class.clone(), x, y, z, yaw: finite(e.xf.yaw()).unwrap_or(0.0), circuit: None, power: None });
         }
         match e.role {
             Role::Machine => {
@@ -1175,6 +1175,14 @@ pub(crate) fn read_world_stats(bytes: &[u8], game: &GameData) -> Result<(World, 
                 });
             }
             Role::Carrier(kind) => {
+                // Its height span: a lift's bottom and top, a belt's or
+                // pipe's lowest and highest spline point.
+                let zs: Vec<f32> = match kind {
+                    CarrierKind::Lift => vec![z, e.xf.point(e.info.top.unwrap_or([0.0; 3]))[2] as f32],
+                    _ => e.info.spline.iter().map(|p| e.xf.point(p.location)[2] as f32).collect(),
+                };
+                let zs: Vec<f32> = zs.into_iter().filter(|v| v.is_finite()).collect();
+                let span = if zs.is_empty() { [z, z] } else { [zs.iter().copied().fold(f32::MAX, f32::min), zs.iter().copied().fold(f32::MIN, f32::max)] };
                 let points = match kind {
                     CarrierKind::Lift => {
                         let top = e.xf.point(e.info.top.unwrap_or([0.0; 3]));
@@ -1186,7 +1194,7 @@ pub(crate) fn read_world_stats(bytes: &[u8], game: &GameData) -> Result<(World, 
                     _ => spline_points(&e.info.spline, &e.xf),
                 };
                 if points.len() >= 2 {
-                    world.carriers.push(Carrier { class: e.class.clone(), fluid: kind == CarrierKind::Pipe, points, yaw: finite(e.xf.yaw()).unwrap_or(0.0) });
+                    world.carriers.push(Carrier { class: e.class.clone(), fluid: kind == CarrierKind::Pipe, points, yaw: finite(e.xf.yaw()).unwrap_or(0.0), z: span });
                 }
             }
             _ => {}

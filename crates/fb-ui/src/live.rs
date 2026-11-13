@@ -464,7 +464,7 @@ pub fn merge(base: &World, live: &LiveBuildings, power: Option<&LivePower>, game
         }
         for (j, c) in lc.iter().enumerate() {
             if !used[j] {
-                carriers.push(Carrier { class: c.class.clone(), fluid: c.fluid, points: c.points.clone(), yaw: 0.0 });
+                carriers.push(Carrier { class: c.class.clone(), fluid: c.fluid, points: c.points.clone(), yaw: 0.0, z: c.z });
             }
         }
         w.carriers = carriers;
@@ -547,7 +547,7 @@ fn merge_power(w: &mut World, status: &[Option<LiveMachine>], p: &LivePower) -> 
     for (f, fam) in p.families.iter().enumerate() {
         for (j, it) in fam.items.iter().enumerate().filter(|(j, _)| !used[f][*j]) {
             let _ = j;
-            structures.push(Structure { class: it.class.clone(), x: it.x, y: it.y, yaw: it.yaw, circuit: None, power: None });
+            structures.push(Structure { class: it.class.clone(), x: it.x, y: it.y, z: it.z, yaw: it.yaw, circuit: None, power: None });
             st_status.push(Some(it.clone()));
             added += 1;
         }

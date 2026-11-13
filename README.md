@@ -26,6 +26,11 @@ Belts and pipes flow as in game: splitters share evenly, mergers take evenly, an
 Programmable Splitters, Priority Mergers and Valves take the game's settings. An orange **i**
 marks a machine held back by what's after it, with a fix to try.
 
+Factories can have floors: tabs over the graph show one at a time, and a belt to another floor
+ends in a stub saying which Conveyor Lift carries it (pipes going up say their head lift). On
+the Map, Layers shows one level of what's in view, and a region drawn on a level keeps to it.
+Live factories get their floors from the save's building heights.
+
 Let go of a wire on empty canvas and Add node lists only what fits it:
 
 ![Add node, filtered to what takes Iron Rod](docs/screenshots/add-node.png)

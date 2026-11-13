@@ -112,6 +112,9 @@ pub struct Plan {
     /// Generator burning Coal).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generators: Option<Vec<String>>,
+    /// Floors 2 and up: each one's height above Floor 1, in metres.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub floors: Vec<f32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -191,6 +194,9 @@ pub struct Node {
     /// Smart and Programmable Splitters, Priority Mergers: their settings.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub router: Option<RouterSettings>,
+    /// The floor it's on, Floor 1 = 0 (none: Floor 1).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub floor: Option<u8>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -447,8 +453,8 @@ mod tests {
     fn sample() -> FactoryFile {
         let mut f = FactoryFile::new(Some("Steel".into()));
         f.plan.products.push(Target { item: "Desc_SteelPlate_C".into(), rate: 20.0 });
-        f.nodes.push(Node { kind: Kind::Resource, class: "Desc_OreIron_C".into(), machines: None, clock: None, sloops: None, rate: Some(60.0), name: None, color: None, item: None, purity: None, x: 0.0, y: 0.0, planned: false, router: None });
-        f.nodes.push(Node { kind: Kind::Recipe, class: "Recipe_IngotIron_C".into(), machines: Some(2.0), clock: Some(100.0), sloops: Some(1), rate: None, name: None, color: Some("#FA9549".into()), item: None, purity: None, x: 380.0, y: 0.0, planned: false, router: None });
+        f.nodes.push(Node { kind: Kind::Resource, class: "Desc_OreIron_C".into(), machines: None, clock: None, sloops: None, rate: Some(60.0), name: None, color: None, item: None, purity: None, x: 0.0, y: 0.0, planned: false, router: None, floor: None });
+        f.nodes.push(Node { kind: Kind::Recipe, class: "Recipe_IngotIron_C".into(), machines: Some(2.0), clock: Some(100.0), sloops: Some(1), rate: None, name: None, color: Some("#FA9549".into()), item: None, purity: None, x: 380.0, y: 0.0, planned: false, router: None, floor: None });
         f.wires.push(Wire { from: 0, output: 0, to: 1, input: 0, slot: 0, belt: None });
         f
     }

@@ -64,7 +64,7 @@ const PROBE_JS: &str = r#"
       r.screenshots.push(view);
     } catch (e) { r.screenshot_err = String(e); }
   };
-  for (const view of ['graph', 'zoomed', 'finder', 'finder_search', 'finder_wire', 'menu', 'room_cursors', 'room_info', 'setup_install', 'setup_game', 'setup_icons', 'setup_name', 'settings_dev', 'map', 'map_zoom', 'map_close', 'map_import', 'export', 'frames', 'project', 'project_menu', 'tab_menu', 'project_tab', 'world_dialog', 'world_project', 'readme_world', 'power_lit', 'power_close', 'routers', 'smart_routers', 'hub', 'hub_master', 'readme_prep', 'readme_plan', 'readme_room', 'readme_nodes', 'readme_wire', 'live_map', 'live_dialog']) {
+  for (const view of ['graph', 'zoomed', 'finder', 'finder_search', 'finder_wire', 'menu', 'room_cursors', 'room_info', 'setup_install', 'setup_game', 'setup_icons', 'setup_name', 'settings_dev', 'map', 'map_zoom', 'map_close', 'map_import', 'export', 'frames', 'project', 'project_menu', 'tab_menu', 'project_tab', 'world_dialog', 'world_project', 'readme_world', 'power_lit', 'power_close', 'map_level', 'map_level_pick', 'routers', 'smart_routers', 'floors', 'hub', 'hub_master', 'readme_prep', 'readme_plan', 'readme_room', 'readme_nodes', 'readme_wire', 'live_map', 'live_dialog']) {
     await shoot(view);
   }
   await sleep(3000);

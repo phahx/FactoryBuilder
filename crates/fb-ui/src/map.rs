@@ -30,6 +30,10 @@ pub enum View {
 
 #[derive(Default)]
 pub struct MapState {
+    /// The level shown (world Z range, cm, bottom and top); none: all.
+    pub level: Option<[f32; 2]>,
+    /// Its name as picked ("Level 2").
+    pub level_name: String,
     pub info: Option<MapInfo>,
     /// Top-down renders of buildings and belts (None until extracted).
     pub sprites: Option<fb_model::world::Sprites>,
@@ -64,6 +68,35 @@ pub struct MapState {
 }
 
 impl MapState {
+    /// Whether height `z` (world Z, cm) is on the level shown.
+    pub(crate) fn on_level(&self, z: f32) -> bool {
+        self.level.is_none_or(|[lo, hi]| z >= lo && z < hi)
+    }
+
+    /// Whether a belt, pipe or lift spanning heights `z` reaches the level shown.
+    pub(crate) fn spans_level(&self, z: [f32; 2]) -> bool {
+        self.level.is_none_or(|[lo, hi]| z[1] >= lo && z[0] < hi)
+    }
+
+    /// The levels of what's built in view (the map's last rect), lowest
+    /// first: each one's heights (world Z, cm), from a metre under where it
+    /// starts to a metre under where the next one does.
+    /// None when the view is too wide for levels to mean floors (over a
+    /// kilometre across: hills, not floors).
+    pub(crate) fn levels_in_view(&self, _toolbar: Rect) -> Option<Vec<[f32; 2]>> {
+        let (Some(w), Some(rect)) = (&self.world, self.rect) else { return Some(Vec::new()) };
+        let a = self.to_world(rect, rect.min);
+        let b = self.to_world(rect, rect.max);
+        if (b.0 - a.0).max(b.1 - a.1) > 100_000.0 {
+            return None;
+        }
+        let seen = |x: f32, y: f32| (x as f64) >= a.0 && (x as f64) <= b.0 && (y as f64) >= a.1 && (y as f64) <= b.1;
+        let mut zs: Vec<f32> = w.machines.iter().filter(|m| seen(m.x, m.y)).map(|m| m.z).collect();
+        zs.extend(w.structures.iter().filter(|s| seen(s.x, s.y)).map(|s| s.z));
+        let bottoms = crate::floors::levels(&zs, crate::floors::FLOOR_GAP_CM);
+        Some((0..bottoms.len()).map(|k| [bottoms[k] - 100.0, bottoms.get(k + 1).map_or(f32::MAX, |n| n - 100.0)]).collect())
+    }
+
     fn to_screen(&self, rect: Rect, x: f64, y: f64) -> Pos2 {
         let c = rect.center();
         pos2(c.x + ((x - self.center.0) * self.scale) as f32, c.y + ((y - self.center.1) * self.scale) as f32)
@@ -294,7 +327,14 @@ pub fn map_ui(app: &mut FactoryApp, ui: &mut egui::Ui) {
         }
         // What's drawn over the map.
         ui.add_space(8.0);
-        egui::ComboBox::from_id_salt("map_layers").selected_text("Layers").width(110.0).show_ui(ui, |ui| {
+        // What's drawn, and which level (stacked floors otherwise draw over
+        // each other): one level of what's in view at a time.
+        let layers = match app.map.level {
+            Some(_) => format!("Layers · {}", app.map.level_name),
+            None => "Layers".to_string(),
+        };
+        let levels = app.map.levels_in_view(ui.max_rect());
+        egui::ComboBox::from_id_salt("map_layers").selected_text(layers).width(130.0).show_ui(ui, |ui| {
             let mut power = !app.map.hide_power;
             let tip = "Power lines, what each one carries, and their circuits' figures.";
             if ui.checkbox(&mut power, "Power").on_hover_text(tip).changed() {
@@ -306,6 +346,33 @@ pub fn map_ui(app: &mut FactoryApp, ui: &mut egui::Ui) {
             if ui.checkbox(&mut flow, "Belt direction").on_hover_text(tip).changed() {
                 app.map.hide_flow = !flow;
                 layers_changed = true;
+            }
+            ui.separator();
+            ui.label(RichText::new("Level").color(TEXT_DIM));
+            if ui.selectable_label(app.map.level.is_none(), "All levels").clicked() {
+                app.map.level = None;
+            }
+            match &levels {
+                Some(levels) => {
+                    // How high each is above the lowest in view.
+                    let base = levels.first().map_or(0.0, |r| r[0]);
+                    for (k, range) in levels.iter().enumerate() {
+                        let name = format!("Level {}", k + 1);
+                        let up = ((range[0] - base) / 100.0).round();
+                        let label = if k == 0 { format!("{name} · lowest") } else { format!("{name} · {} m up", crate::fmt::fmt_num(up as f64)) };
+                        let tip = "Only what's built at this height. The levels are those of what's in view.";
+                        if ui.selectable_label(app.map.level == Some(*range), label).on_hover_text(tip).clicked() {
+                            app.map.level = Some(*range);
+                            app.map.level_name = name;
+                        }
+                    }
+                    if levels.is_empty() {
+                        ui.label(RichText::new("Nothing built in view").color(TEXT_DIM));
+                    }
+                }
+                None => {
+                    ui.label(RichText::new("Zoom in on a factory to pick one of its levels").color(TEXT_DIM));
+                }
             }
         });
         let status = if app.map.loading.is_some() {
@@ -354,8 +421,17 @@ pub fn map_ui(app: &mut FactoryApp, ui: &mut egui::Ui) {
             if !app.live_on() {
                 whole = widgets::button_enabled(ui, "Make project from save…", app.map.world.is_some()).on_hover_text(tip).clicked();
             }
+            // Only where it fits, so it never covers Save and Layers (Esc, or
+            // a click on the map, clears too).
+            let label = format!("Clear selection ({n})");
+            let fits = |ui: &egui::Ui, text: &str| {
+                let w = egui::WidgetText::from(text).into_galley(ui, Some(egui::TextWrapMode::Extend), f32::INFINITY, egui::TextStyle::Button).size().x;
+                ui.available_width() > w + 40.0
+            };
             if n > 0 {
-                clear = widgets::button(ui, &format!("Clear selection ({n})")).clicked();
+                if fits(ui, &label) {
+                    clear = widgets::button(ui, &label).clicked();
+                }
             } else if app.map.world.is_some() {
                 // Only where it fits (it would run under the controls to its left).
                 let hint = RichText::new("Drag on the map to select machines and storage").small().color(TEXT_DIM);
@@ -510,7 +586,7 @@ pub fn map_ui(app: &mut FactoryApp, ui: &mut egui::Ui) {
             [a.0 as f32, a.1 as f32, b.0 as f32, b.1 as f32]
         };
         for (c, b) in w.carriers.iter().zip(&app.map.carrier_boxes) {
-            if b[2] < vw[0] || b[0] > vw[2] || b[3] < vw[1] || b[1] > vw[3] {
+            if b[2] < vw[0] || b[0] > vw[2] || b[3] < vw[1] || b[1] > vw[3] || !app.map.spans_level(c.z) {
                 continue;
             }
             // Lifts have a top-down render of their own, placed like a building.
@@ -584,7 +660,7 @@ pub fn map_ui(app: &mut FactoryApp, ui: &mut egui::Ui) {
     if let (Some(w), Some(assets)) = (&state.world, app.user.assets.as_mut()) {
         let sprites = state.sprites.as_ref();
         let size = ((state.scale * MACHINE_CM) as f32).clamp(3.0, 28.0);
-        for s in &w.structures {
+        for s in w.structures.iter().filter(|s| state.on_level(s.z)) {
             let drawn = crate::map_draw::building(&ctx2, assets, sprites, &mut batch, &mut outline, &view, &s.class, s.x, s.y, s.yaw, false);
             let p = state.to_screen(rect, s.x as f64, s.y as f64);
             if !drawn && rect.contains(p) && size > 6.0 {
@@ -594,7 +670,7 @@ pub fn map_ui(app: &mut FactoryApp, ui: &mut egui::Ui) {
         let mut icons = Vec::new();
         // What each drawn machine makes (or mines), shown on top of its render.
         let mut makes: Vec<(Pos2, f32, String)> = Vec::new();
-        for m in &w.machines {
+        for m in w.machines.iter().filter(|m| state.on_level(m.z)) {
             let p = state.to_screen(rect, m.x as f64, m.y as f64);
             let selected = state.selected.contains(&m.id) || drag_rect.is_some_and(|d| d.contains(p));
             if crate::map_draw::building(&ctx2, assets, sprites, &mut batch, &mut outline, &view, &m.class, m.x, m.y, m.yaw, selected) {
@@ -730,12 +806,12 @@ pub fn map_ui(app: &mut FactoryApp, ui: &mut egui::Ui) {
                 app.live_map.selected_stores.clear();
             }
             for (k, s) in w.structures.iter().enumerate() {
-                if fb_model::is_storage(&s.class) && d.contains(state.to_screen(rect, s.x as f64, s.y as f64)) {
+                if fb_model::is_storage(&s.class) && state.on_level(s.z) && d.contains(state.to_screen(rect, s.x as f64, s.y as f64)) {
                     app.live_map.selected_stores.insert(k as u32);
                 }
             }
             for m in &w.machines {
-                if d.contains(state.to_screen(rect, m.x as f64, m.y as f64)) {
+                if state.on_level(m.z) && d.contains(state.to_screen(rect, m.x as f64, m.y as f64)) {
                     state.selected.insert(m.id);
                 }
             }
@@ -779,7 +855,9 @@ pub fn map_ui(app: &mut FactoryApp, ui: &mut egui::Ui) {
             }
         };
         let game = app.user.game.clone();
-        if let Some(m) = w.machines.iter().rev().find(|m| under(&m.class, m.x, m.y, m.yaw)) {
+        let level = app.map.level;
+        let on = |z: f32| level.is_none_or(|[lo, hi]| z >= lo && z < hi);
+        if let Some(m) = w.machines.iter().rev().find(|m| on(m.z) && under(&m.class, m.x, m.y, m.yaw)) {
             egui::show_tooltip_at_pointer(&ctx, ui.layer_id(), egui::Id::new("map_machine"), |ui| {
                 machine_tip(ui, assets, &game, &info, w, m);
                 let status = live_status.get(m.id as usize).and_then(|s| s.as_ref());
@@ -796,7 +874,7 @@ pub fn map_ui(app: &mut FactoryApp, ui: &mut egui::Ui) {
                 }
                 circuit_tip(ui, assets, &game, circuit.and_then(|c| w.circuits.get(c as usize)));
             });
-        } else if let Some(k) = w.structures.iter().rposition(|s| under(&s.class, s.x, s.y, s.yaw)) {
+        } else if let Some(k) = w.structures.iter().rposition(|s| on(s.z) && under(&s.class, s.x, s.y, s.yaw)) {
             let s = &w.structures[k];
             egui::show_tooltip_at_pointer(&ctx, ui.layer_id(), egui::Id::new("map_structure"), |ui| {
                 widgets::tooltip_title(ui, &game.building_name(&s.class));

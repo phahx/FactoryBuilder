@@ -442,7 +442,10 @@ impl<'a> Model<'a> {
                 p.f[k].0 = around(level[k]).0;
             }
             // Which can rise further? One sum first, then each of the rest.
-            let up = |s: &Solved, k: usize| s.f[k] > level[k] + 1e-6 * level[k].max(1.0);
+            // Rising by no more than rounding (an overflow taking the held
+            // flows' slack) isn't rising: it would leave nothing stuck and
+            // freeze every link wherever that round's answer left it.
+            let up = |s: &Solved, k: usize| s.f[k] > level[k] + (1e-6 * level[k].max(1.0)).max(self.noise);
             let rising = self.solve(&p, Goal::FlowSum(&active));
             let mut stuck: Vec<usize> = active
                 .iter()
@@ -708,5 +711,26 @@ mod tests {
         let links = [link(0, 1), link(1, 2), link(2, 3)];
         let r = simulate(&nodes, &links);
         assert_eq!(held_back(&nodes, &links, &r), vec![true, true, false, false]);
+    }
+
+    #[test]
+    fn exact_supply_reaches_its_factories_in_full() {
+        // A factory making exactly what three others take (fuel 320, residue
+        // 120, resin 240), each output with its own storage on overflow:
+        // every one gets all of it, none spills.
+        let factory = SimNode { inputs: vec![0.0], outputs: vec![320.0, 120.0, 80.0, 240.0, 80.0], ..Default::default() };
+        let f2 = SimNode { inputs: vec![320.0], outputs: vec![], ..Default::default() };
+        let f3 = SimNode { inputs: vec![120.0], outputs: vec![], ..Default::default() };
+        let f4 = SimNode { inputs: vec![240.0], outputs: vec![60.0, 40.0], ..Default::default() };
+        let spill = || SimNode { inputs: vec![0.0], sink: true, ..Default::default() };
+        let mut links = vec![port(0, 0, 1, 0), port(0, 1, 2, 0), port(0, 3, 3, 0)];
+        for (k, p) in [(4, 0), (5, 1), (6, 3)] {
+            links.push(SimLink { overflow: true, ..SimLink::new(0, p, k, 0) });
+        }
+        let r = simulate(&[factory, f2, f3, f4, spill(), spill(), spill()], &links);
+        let exact = |a: f64, b: f64| (a - b).abs() < 1e-6;
+        assert!(exact(r.received[1][0], 320.0) && exact(r.received[2][0], 120.0) && exact(r.received[3][0], 240.0), "{:?}", r.received);
+        assert!(r.received[4..].iter().all(|v| v[0].abs() < 1e-6), "nothing spills: {:?}", r.received);
+        assert!(r.efficiency[..4].iter().all(|e| exact(*e, 1.0)), "{:?}", r.efficiency);
     }
 }

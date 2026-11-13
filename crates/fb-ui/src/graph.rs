@@ -7,7 +7,7 @@
 
 use crate::assets::{Assets, UiIcon};
 use crate::fmt::{fmt_num, fmt_rate_unit};
-use crate::theme::{self, *};
+use crate::theme::*;
 use crate::widgets;
 use egui::{vec2, Align, Color32, Layout, RichText, Ui};
 use egui_node_graph2::*;
@@ -209,6 +209,13 @@ pub struct NodeData {
     /// planning mode, not something built.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub planned: bool,
+    /// The floor it's on (floors.rs): 0 is Floor 1.
+    #[serde(default, skip_serializing_if = "is_ground")]
+    pub floor: u8,
+}
+
+fn is_ground(f: &u8) -> bool {
+    *f == 0
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -259,11 +266,16 @@ impl UserResponseTrait for Resp {}
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct PortStat {
-    /// Actual flow per minute.
+    /// What it's using (inputs) or making (outputs) now, per minute.
     pub have: f64,
-    /// Wanted (inputs) or possible (outputs) per minute.
+    /// What it can at full capacity, per minute: what it takes (inputs) or
+    /// can make (outputs) at full speed.
     pub want: f64,
     pub connected: bool,
+    /// It has a capacity (machines, extractors, factories, resources), so
+    /// its row reads "using / capacity"; routers and storage just pass on
+    /// what they get, one number.
+    pub rated: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -301,6 +313,9 @@ pub struct UserState {
     /// A router setting's menu, open: (node, port, where) (routers.rs).
     #[serde(skip)]
     pub router_menu: Option<(NodeId, usize, egui::Pos2)>,
+    /// The floor the graph shows (floors.rs); 0 is Floor 1.
+    #[serde(skip)]
+    pub floor: u8,
     /// A live factory's graph is being drawn: per node, what's live about
     /// it (live_factory.rs).
     #[serde(skip)]
@@ -515,7 +530,9 @@ impl NodeTemplateTrait for Template {
             }
             t => t.kind(),
         };
-        NodeData { kind, color: None, planned: false }
+        // New nodes go on the floor shown (not the master graph's blocks).
+        let floor = if crate::floors::on_floors(&kind) { s.floor } else { 0 };
+        NodeData { kind, color: None, planned: false, floor }
     }
 
     fn build_node(&self, graph: &mut FactoryGraph, s: &mut UserState, node_id: NodeId) {
@@ -813,34 +830,35 @@ fn port_row(ui: &mut Ui, s: &mut UserState, node_id: NodeId, name: &str, item: &
             };
             ui.with_layout(align, |ui| {
                 ui.label(RichText::new(name).color(TEXT));
-                let (text, color) = if s.master && !stat.connected {
+                // Rows read "using / capacity": what it uses (inputs) or
+                // makes (outputs) now, of what it can at full speed.
+                let rate = |v: f64| crate::fmt::fmt_rate(v);
+                let (text, color, tip) = if s.master && !stat.connected {
                     // Factory blocks: unlinked inputs come from outside the
                     // project; unlinked outputs are what the project makes.
                     let t = if input { format!("{} · from outside", fmt_rate_unit(stat.want, form)) } else { fmt_rate_unit(stat.want, form) };
-                    (t, TEXT_DIM)
-                } else if input {
-                    let t = if stat.connected {
-                        format!(
-                            "{} / {}",
-                            crate::fmt::fmt_rate(stat.have),
-                            fmt_rate_unit(stat.want, form)
-                        )
-                    } else {
-                        format!("{} · not connected", fmt_rate_unit(stat.want, form))
-                    };
-                    (t, supply_color(stat.have, stat.want))
-                } else if stat.connected {
-                    (
-                        fmt_rate_unit(stat.have, form),
-                        theme::supply_color(stat.have, stat.want),
-                    )
+                    (t, TEXT_DIM, None)
+                } else if !stat.connected {
+                    let t = format!("{} · not connected", fmt_rate_unit(stat.want, form));
+                    let color = if input { supply_color(stat.have, stat.want) } else if stat.want > 1e-9 { ACCENT } else { TEXT_DIM };
+                    (t, color, None)
+                } else if !stat.rated {
+                    // Routers and storage: what passes through.
+                    (fmt_rate_unit(stat.have, form), TEXT_DIM, None)
                 } else {
-                    (
-                        format!("{} · not connected", fmt_rate_unit(stat.want, form)),
-                        if stat.want > 1e-9 { ACCENT } else { TEXT_DIM },
-                    )
+                    let unit = fmt_rate_unit(stat.want, form);
+                    let t = format!("{} / {unit}", rate(stat.have));
+                    let tip = if input {
+                        format!("Using {} of the {unit} it takes at full speed.", rate(stat.have))
+                    } else {
+                        format!("Making {} of the {unit} it can at full speed.", rate(stat.have))
+                    };
+                    (t, supply_color(stat.have, stat.want), Some(tip))
                 };
-                ui.label(RichText::new(text).small().color(color));
+                let r = ui.label(RichText::new(text).small().color(color));
+                if let Some(tip) = tip {
+                    r.on_hover_text(tip);
+                }
             });
         });
     });

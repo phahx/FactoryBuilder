@@ -395,6 +395,10 @@ pub fn carriers(v: &Value, fluid: bool) -> Vec<fb_model::LiveCarrier> {
         .take(200_000)
         .filter_map(|c| {
             let class = c.get("ClassName")?.as_str().filter(|s| s.len() <= 200)?.to_string();
+            // Its height span, from every point given.
+            let z_of = |p: &Value| p.get("z").and_then(Value::as_f64).filter(|f| f.is_finite() && f.abs() < 1e8).map(|f| f as f32);
+            let zs: Vec<f32> = c.get("SplineData").and_then(Value::as_array).into_iter().flatten().take(20_000).chain(c.get("location0")).chain(c.get("location1")).filter_map(z_of).collect();
+            let z = if zs.is_empty() { [0.0, 0.0] } else { [zs.iter().copied().fold(f32::MAX, f32::min), zs.iter().copied().fold(f32::MIN, f32::max)] };
             let mut pts: Vec<[f32; 2]> = Vec::new();
             for p in c.get("SplineData").and_then(Value::as_array).into_iter().flatten().take(20_000).filter_map(xy) {
                 if pts.last().is_none_or(|q| (q[0] - p[0]).hypot(q[1] - p[1]) >= 200.0) {
@@ -409,7 +413,7 @@ pub fn carriers(v: &Value, fluid: bool) -> Vec<fb_model::LiveCarrier> {
                     pts.push(end);
                 }
             }
-            (pts.len() >= 2).then_some(fb_model::LiveCarrier { class, fluid, points: pts })
+            (pts.len() >= 2).then_some(fb_model::LiveCarrier { class, fluid, points: pts, z })
         })
         .collect()
 }
@@ -452,6 +456,11 @@ fn placed(m: &Value) -> Option<(String, f32, f32, f32)> {
     Some((class, x as f32, y as f32, yaw as f32))
 }
 
+/// A building's height (world Z, cm), when its location gives one.
+fn height_of(m: &Value) -> f32 {
+    m.get("location").and_then(|l| num(l, "z")).filter(|z| z.abs() < 1e8).unwrap_or(0.0) as f32
+}
+
 /// The game's circuit id (-1: none).
 fn circuit_id(v: Option<f64>) -> Option<i64> {
     v.map(|c| c as i64).filter(|c| *c >= 0)
@@ -486,7 +495,7 @@ pub fn structures(v: &Value, prefixes: &[&str]) -> Vec<fb_model::LiveStructure> 
                 _ => None,
             };
             let fluid = num(m, "Capacity").filter(|c| *c > 0.0).map(|cap| (class_name(m, "FluidClassName"), num(m, "Content").unwrap_or(0.0).max(0.0) as f32, cap as f32));
-            Some(fb_model::LiveStructure { class, x, y, yaw, circuit, items: items(m.get("Inventory")), slots, fluid })
+            Some(fb_model::LiveStructure { class, x, y, z: height_of(m), yaw, circuit, items: items(m.get("Inventory")), slots, fluid })
         })
         .collect()
 }
